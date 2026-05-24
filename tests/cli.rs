@@ -356,14 +356,31 @@ fn complete_marks_done_records_decisions_unblocks_deps() {
 }
 
 #[test]
-fn block_records_reason() {
+fn block_creates_blocker_task_and_demotes_original() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
-    qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["assign", "QP-1", "--to", "x"]).assert().success();
-    qp(&db).args(["claim", "QP-1", "--as", "x"]).assert().success();
-    qp(&db).args(["block", "QP-1", "--as", "x", "--reason", "needs API key"]).assert().success();
+    qp(&db).args(["add", "main"]).assert().success();
+    qp(&db).args(["assign", "QP-1", "--to", "alice"]).assert().success();
+    qp(&db).args(["claim",  "QP-1", "--as", "alice"]).assert().success();
+    qp(&db).args(["block",  "QP-1", "--as", "alice",
+                  "--new", "obtain prod API key"]).assert().success();
+
+    // QP-1 should now be pending (blocked on QP-2). assign should fail.
+    qp(&db).args(["assign", "QP-1", "--to", "bob"]).assert().failure().code(2);
+
+    // QP-2 should exist as a ready task tagged kind:blocker.
+    let out = qp(&db).args(["list", "--json"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("QP-2"));
+    assert!(s.contains("kind:blocker"));
+
+    // Resolve the blocker → original auto-thaws.
+    qp(&db).args(["assign", "QP-2", "--to", "alice"]).assert().success();
+    qp(&db).args(["claim",  "QP-2", "--as", "alice"]).assert().success();
+    qp(&db).args(["complete","QP-2", "--as", "alice"]).assert().success();
+    // QP-1 auto-thaws to ready.
+    qp(&db).args(["assign", "QP-1", "--to", "alice"]).assert().success();
 }
 
 #[test]
@@ -514,4 +531,109 @@ fn init_prefix_is_immutable_after_first_init() {
     let out = qp(&db).args(["add", "x", "--json"]).assert().success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(s.contains("ACME-1"), "prefix should remain ACME, got: {s}");
+}
+
+// ─── Pattern C — Slice A appended tests (use QP-<n> ids) ───
+
+#[test]
+fn depends_links_two_ready_tasks_no_agent_required() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["add", "b"]).assert().success();
+    qp(&db).args(["depends", "QP-2", "--on", "QP-1"]).assert().success();
+    // QP-2 should now be pending (has an unresolved dep on QP-1).
+    qp(&db).args(["assign", "QP-2", "--to", "x"]).assert().failure().code(2);
+}
+
+#[test]
+fn depends_rejects_self_cycle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["depends", "QP-1", "--on", "QP-1"]).assert().failure().code(2);
+}
+
+#[test]
+fn depends_rejects_transitive_cycle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["add", "b", "--depends-on", "QP-1"]).assert().success();
+    // Adding QP-1 → depends-on → QP-2 would close the loop.
+    qp(&db).args(["depends", "QP-1", "--on", "QP-2"]).assert().failure().code(2);
+}
+
+#[test]
+fn depends_on_running_task_requires_matching_agent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["add", "b"]).assert().success();
+    qp(&db).args(["assign", "QP-1", "--to", "alice"]).assert().success();
+    qp(&db).args(["claim",  "QP-1", "--as", "alice"]).assert().success();
+    // No --as flag → rejected.
+    qp(&db).args(["depends", "QP-1", "--on", "QP-2"]).assert().failure().code(2);
+    // Wrong --as → rejected.
+    qp(&db).args(["depends", "QP-1", "--on", "QP-2", "--as", "bob"]).assert().failure().code(2);
+    // Matching --as → success.
+    qp(&db).args(["depends", "QP-1", "--on", "QP-2", "--as", "alice"]).assert().success();
+}
+
+#[test]
+fn depends_rm_can_unblock_pending_task() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["add", "b", "--depends-on", "QP-1"]).assert().success();
+    // QP-2 is pending.
+    qp(&db).args(["depends", "QP-2", "--on", "QP-1", "--rm"]).assert().success();
+    // Now assignable.
+    qp(&db).args(["assign", "QP-2", "--to", "x"]).assert().success();
+}
+
+#[test]
+fn abandon_returns_to_ready_when_no_unresolved_deps() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["assign", "QP-1", "--to", "x"]).assert().success();
+    qp(&db).args(["claim",  "QP-1", "--as", "x"]).assert().success();
+    qp(&db).args(["abandon","QP-1", "--as", "x"]).assert().success();
+    // Re-assignable: state must be 'ready'.
+    qp(&db).args(["assign", "QP-1", "--to", "y"]).assert().success();
+}
+
+#[test]
+fn abandon_returns_to_pending_when_unresolved_dep_exists() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "blocker"]).assert().success();    // QP-1
+    qp(&db).args(["add", "main"]).assert().success();       // QP-2
+    qp(&db).args(["assign", "QP-2", "--to", "x"]).assert().success();
+    qp(&db).args(["claim",  "QP-2", "--as", "x"]).assert().success();
+    // Inject an unresolved dep onto QP-2 while running.
+    qp(&db).args(["depends", "QP-2", "--on", "QP-1", "--as", "x"]).assert().success();
+    qp(&db).args(["abandon","QP-2", "--as", "x"]).assert().success();
+    // Should be pending now — assign rejected.
+    qp(&db).args(["assign", "QP-2", "--to", "y"]).assert().failure().code(2);
+}
+
+#[test]
+fn block_rejects_wrong_agent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "main"]).assert().success();
+    qp(&db).args(["assign", "QP-1", "--to", "alice"]).assert().success();
+    qp(&db).args(["claim",  "QP-1", "--as", "alice"]).assert().success();
+    qp(&db).args(["block",  "QP-1", "--as", "bob", "--new", "x"])
+        .assert().failure().code(2);
 }
