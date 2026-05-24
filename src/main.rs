@@ -1,7 +1,13 @@
+//! `qp` — quipu CLI entry point. Parses subcommands and dispatches to `src/cmd/<name>.rs`.
+//! Exit codes: 0 success | 1 generic error | 2 constraint violation | 3 wait timeout.
+
+mod db;
+mod time;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "quipu", bin_name = "qp", version, about = "Structured task substrate for agent orchestration")]
+#[command(name = "quipu", bin_name = "qp", version, about = "Structured task substrate for agent orchestration", subcommand_required = true, arg_required_else_help = true)]
 struct Cli {
     #[arg(long, global = true, env = "QP_DB")]
     db: Option<std::path::PathBuf>,
@@ -54,7 +60,25 @@ enum Cmd {
 }
 
 fn main() {
+    if let Err(e) = real_main() {
+        eprintln!("error: {e:#}");
+        let code = if let Some(err) = e.downcast_ref::<db::QuipuError>() {
+            match err {
+                db::QuipuError::Constraint(_)  => 2,
+                db::QuipuError::NotFound(_)    => 1,
+                db::QuipuError::InvalidInput(_)=> 1,
+            }
+        } else { 1 };
+        std::process::exit(code);
+    }
+}
+
+fn real_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    eprintln!("not implemented yet: {:?}", std::mem::discriminant(&cli.cmd));
-    std::process::exit(1);
+    let db_path = db::resolve_path(cli.db.clone())?;
+    db::warn_on_project_mismatch(&cli.db)?;
+    match cli.cmd {
+        Cmd::Init => { let _ = db::open(&db_path)?; println!("initialized at {}", db_path.display()); Ok(()) }
+        _ => { eprintln!("not implemented yet"); std::process::exit(1); }
+    }
 }
