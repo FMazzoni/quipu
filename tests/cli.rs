@@ -767,3 +767,18 @@ fn edit_rejects_empty_title() {
     qp(&db).args(["add", "a"]).assert().success();
     qp(&db).args(["edit", "QP-1", "--title", ""]).assert().failure().code(1);
 }
+
+#[test]
+fn decisions_auto_only_filters_non_auto() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["log", "QP-1", "decision", "auto-decided", "--auto"]).assert().success();
+    qp(&db).args(["log", "QP-1", "decision", "human-decided"]).assert().success();
+    let out = qp(&db).args(["decisions", "--auto-only", "--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    assert_eq!(v.as_array().unwrap()[0]["payload"]["text"], "auto-decided");
+}
