@@ -40,7 +40,8 @@ pub fn run(db_path: &std::path::Path, a: AddArgs) -> Result<()> {
             "INSERT INTO task(display_id, title, tier, state) VALUES ('', ?, ?, ?)",
             rusqlite::params![a.title, a.tier, state])?;
         let row = tx.last_insert_rowid();
-        let display = id::encode(row);
+        let prefix = db::display_prefix(tx)?;
+        let display = id::encode(row, &prefix);
         tx.execute("UPDATE task SET display_id = ? WHERE id = ?",
             rusqlite::params![display, row])?;
         for did in &dep_ids {
@@ -48,7 +49,8 @@ pub fn run(db_path: &std::path::Path, a: AddArgs) -> Result<()> {
             // some existing edge from *did to row exists. Use would_cycle for safety.
             if db::would_cycle(tx, row, *did)? {
                 return Err(db::constraint(format!(
-                    "cycle: T{row} depends on T{did} which (transitively) depends on T{row}")));
+                    "cycle: {} depends on dep#{} which (transitively) depends on {}",
+                    display, did, display)));
             }
             tx.execute("INSERT INTO dep(task_id, depends_on_task_id) VALUES (?,?)",
                 rusqlite::params![row, did])?;

@@ -20,7 +20,6 @@ pub enum State {
     Assigned,
     Running,
     Done,
-    Blocked,
     Cancelled,
 }
 
@@ -32,7 +31,6 @@ impl State {
             Self::Assigned  => "assigned",
             Self::Running   => "running",
             Self::Done      => "done",
-            Self::Blocked   => "blocked",
             Self::Cancelled => "cancelled",
         }
     }
@@ -44,7 +42,6 @@ impl State {
             "assigned"  => Some(Self::Assigned),
             "running"   => Some(Self::Running),
             "done"      => Some(Self::Done),
-            "blocked"   => Some(Self::Blocked),
             "cancelled" => Some(Self::Cancelled),
             _           => None,
         }
@@ -71,7 +68,6 @@ pub const STATE_READY:     &str = State::Ready.as_str();
 pub const STATE_ASSIGNED:  &str = State::Assigned.as_str();
 pub const STATE_RUNNING:   &str = State::Running.as_str();
 pub const STATE_DONE:      &str = State::Done.as_str();
-pub const STATE_BLOCKED:   &str = State::Blocked.as_str();
 pub const STATE_CANCELLED: &str = State::Cancelled.as_str();
 
 /// Typed errors. `main` matches on the variant to pick an exit code.
@@ -159,6 +155,10 @@ fn read_project_uuid(path: &Path) -> Result<Option<String>> {
 pub const SCHEMA_VERSION: &str = "1";
 
 pub fn open(path: &Path) -> Result<Connection> {
+    open_with_prefix(path, None)
+}
+
+pub fn open_with_prefix(path: &Path, prefix: Option<&str>) -> Result<Connection> {
     if let Some(p) = path.parent() { std::fs::create_dir_all(p)?; }
     let conn = Connection::open(path)
         .with_context(|| format!("opening sqlite at {}", path.display()))?;
@@ -182,11 +182,39 @@ pub fn open(path: &Path) -> Result<Connection> {
     ).ok();
     if current.as_deref() != Some(SCHEMA_VERSION) {
         conn.execute_batch(SCHEMA).context("applying schema")?;
+        // Stamp project_uuid + schema_version + display_prefix on first init only.
+        // Subsequent init calls are idempotent — prefix is never mutated post-init
+        // (INSERT OR IGNORE swallows the duplicate key).
+        let p = prefix.unwrap_or("QP").to_string();
+        validate_prefix(&p)?;
         conn.execute(
-            "INSERT OR IGNORE INTO meta(key, value) VALUES ('project_uuid', ?1), ('schema_version', ?2)",
-            rusqlite::params![uuid::Uuid::new_v4().to_string(), SCHEMA_VERSION])?;
+            "INSERT OR IGNORE INTO meta(key, value) VALUES \
+                ('project_uuid', ?1), \
+                ('schema_version', ?2), \
+                ('display_prefix', ?3)",
+            rusqlite::params![uuid::Uuid::new_v4().to_string(), SCHEMA_VERSION, p])?;
     }
     Ok(conn)
+}
+
+/// Read the display-id prefix from the `meta` table. Defaults to `"QP"` if absent
+/// (older databases predating the prefix work).
+pub fn display_prefix(conn: &rusqlite::Connection) -> Result<String> {
+    let v: Option<String> = conn.query_row(
+        "SELECT value FROM meta WHERE key = 'display_prefix'", [], |r| r.get(0)
+    ).ok();
+    Ok(v.unwrap_or_else(|| "QP".to_string()))
+}
+
+/// Validate a user-supplied prefix: 2–5 ASCII uppercase letters.
+pub fn validate_prefix(s: &str) -> Result<()> {
+    let ok = (2..=5).contains(&s.len())
+        && s.bytes().all(|b| b.is_ascii_uppercase());
+    if !ok {
+        return Err(constraint(format!(
+            "invalid --prefix `{s}` (must be 2-5 uppercase ASCII letters)")));
+    }
+    Ok(())
 }
 
 pub fn with_tx<T>(conn: &mut Connection, f: impl FnOnce(&Transaction) -> Result<T>) -> Result<T> {
@@ -255,12 +283,13 @@ mod tests {
     fn state_str_round_trip() {
         for s in [
             State::Pending, State::Ready, State::Assigned, State::Running,
-            State::Done, State::Blocked, State::Cancelled,
+            State::Done, State::Cancelled,
         ] {
             assert_eq!(State::from_str(s.as_str()), Some(s));
             assert_eq!(s.to_string(), s.as_str());
         }
         assert_eq!(State::from_str("nope"), None);
+        assert_eq!(State::from_str("blocked"), None);
     }
 
     #[test]
@@ -270,7 +299,41 @@ mod tests {
         assert_eq!(STATE_ASSIGNED,  State::Assigned.as_str());
         assert_eq!(STATE_RUNNING,   State::Running.as_str());
         assert_eq!(STATE_DONE,      State::Done.as_str());
-        assert_eq!(STATE_BLOCKED,   State::Blocked.as_str());
         assert_eq!(STATE_CANCELLED, State::Cancelled.as_str());
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::*;
+
+    #[test]
+    fn validate_prefix_accepts_2_to_5_upper() {
+        for ok in ["QP", "QPU", "ACME", "ALPHA"] {
+            assert!(validate_prefix(ok).is_ok(), "should accept {ok}");
+        }
+    }
+
+    #[test]
+    fn validate_prefix_rejects_bad() {
+        for bad in ["", "Q", "TOOLONG", "qp", "Q1", "QP_", "QP-"] {
+            assert!(validate_prefix(bad).is_err(), "should reject `{bad}`");
+        }
+    }
+
+    #[test]
+    fn display_prefix_defaults_to_qp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("db.sqlite");
+        let conn = open(&db).unwrap();
+        assert_eq!(display_prefix(&conn).unwrap(), "QP");
+    }
+
+    #[test]
+    fn display_prefix_honors_init_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("db.sqlite");
+        let conn = open_with_prefix(&db, Some("ACME")).unwrap();
+        assert_eq!(display_prefix(&conn).unwrap(), "ACME");
     }
 }

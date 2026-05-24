@@ -88,7 +88,7 @@ fn real_main() -> anyhow::Result<()> {
     let db_path = db::resolve_path(cli.db.clone())?;
     db::warn_on_project_mismatch(&cli.db)?;
     match cli.cmd {
-        Cmd::Init { prefix: _ } => { let _ = db::open(&db_path)?; println!("initialized at {}", db_path.display()); Ok(()) }
+        Cmd::Init { prefix } => { let _ = db::open_with_prefix(&db_path, prefix.as_deref())?; println!("initialized at {}", db_path.display()); Ok(()) }
         Cmd::Add(a) => cmd::add::run(&db_path, a),
         Cmd::Assign(a) => cmd::assign::run(&db_path, a),
         Cmd::Claim(a) => cmd::claim::run(&db_path, a),
