@@ -1,3 +1,11 @@
+//! T-prefixed display id encoding for human-friendly task references.
+//!
+//! Internally tasks are addressed by `rowid` (an `i64`). The CLI surface
+//! exposes them as `T1`, `T42`, etc. Parsing is case-insensitive
+//! (`T7` and `t7` both work) and whitespace-tolerant — `parse` and
+//! `resolve` both trim before validating, so shell pasting of ids with
+//! stray spaces or tabs resolves cleanly.
+
 use anyhow::{anyhow, Result};
 
 pub fn encode(rowid: i64) -> String { format!("T{rowid}") }
@@ -13,8 +21,13 @@ pub fn parse(s: &str) -> Result<i64> {
 
 pub fn resolve(conn: &rusqlite::Connection, s: &str) -> Result<i64> {
     let _ = parse(s)?;
+    // Trim before uppercasing — `parse` is whitespace-tolerant, so `resolve`
+    // must be too. Without the trim, `"  t7  ".to_uppercase()` becomes
+    // `"  T7  "` and fails the `display_id = ?` lookup with a spurious
+    // "no such task" error.
+    let normed = s.trim().to_uppercase();
     let id: i64 = conn.query_row(
-        "SELECT id FROM task WHERE display_id = ?", [s.to_uppercase()], |r| r.get(0)
+        "SELECT id FROM task WHERE display_id = ?", [&normed], |r| r.get(0)
     ).map_err(|e| match e {
         rusqlite::Error::QueryReturnedNoRows => anyhow!("no such task: {s}"),
         other => other.into(),
@@ -45,5 +58,21 @@ mod tests {
         assert!(parse("Tfoo").is_err());
         assert!(parse("T0").is_err());
         assert!(parse("T-1").is_err());
+    }
+
+    #[test]
+    fn resolve_handles_whitespace_and_lowercase() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("db.sqlite");
+        let conn = crate::db::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO task(display_id, title) VALUES ('T1', 'first')",
+            [],
+        ).unwrap();
+        let rowid = conn.last_insert_rowid();
+        assert_eq!(resolve(&conn, "T1").unwrap(), rowid);
+        assert_eq!(resolve(&conn, "t1").unwrap(), rowid);
+        assert_eq!(resolve(&conn, "  t1  ").unwrap(), rowid);
+        assert_eq!(resolve(&conn, "  T1\t").unwrap(), rowid);
     }
 }

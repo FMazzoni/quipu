@@ -2,11 +2,10 @@
 //! Exit codes: 0 success | 1 generic error | 2 constraint violation | 3 wait timeout.
 
 mod db;
+mod id;
 mod time;
 
 use clap::{Parser, Subcommand};
-
-mod id;
 
 #[derive(Parser)]
 #[command(name = "quipu", bin_name = "qp", version, about = "Structured task substrate for agent orchestration", subcommand_required = true, arg_required_else_help = true)]
