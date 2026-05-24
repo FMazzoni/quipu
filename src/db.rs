@@ -199,19 +199,6 @@ pub fn open_with_prefix(path: &Path, prefix: Option<&str>) -> Result<Connection>
             rusqlite::params![uuid::Uuid::new_v4().to_string(), SCHEMA_VERSION, p])?;
     }
 
-    // Pattern D: add `description` column to existing dbs that predate it.
-    // PRAGMA table_info returns one row per column with (cid, name, type, notnull, dflt, pk).
-    // Cheap (one indexed metadata read) so we run it on every open rather than gating on
-    // schema_version — pre-existing dev DBs already stamped at version 1 still need the column.
-    let has_description: bool = conn.query_row(
-        "SELECT 1 FROM pragma_table_info('task') WHERE name = 'description'",
-        [], |r| r.get::<_, i64>(0).map(|_| true)
-    ).unwrap_or(false);
-    if !has_description {
-        conn.execute("ALTER TABLE task ADD COLUMN description TEXT", [])
-            .context("adding `description` column to `task`")?;
-    }
-
     Ok(conn)
 }
 
