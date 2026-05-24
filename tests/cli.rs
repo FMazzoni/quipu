@@ -7,10 +7,10 @@ fn cancel_terminates_task_unblocks_dependents() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["add", "b", "--depends-on", "T1"]).assert().success();
-    qp(&db).args(["cancel", "T1", "--reason", "no longer needed"]).assert().success();
-    // T2 should be ready: dep is `cancelled` which counts as resolved.
-    qp(&db).args(["assign", "T2", "--to", "x"]).assert().success();
+    qp(&db).args(["add", "b", "--depends-on", "QP-1"]).assert().success();
+    qp(&db).args(["cancel", "QP-1", "--reason", "no longer needed"]).assert().success();
+    // QP-2 should be ready: dep is `cancelled` which counts as resolved.
+    qp(&db).args(["assign", "QP-2", "--to", "x"]).assert().success();
 }
 
 #[test]
@@ -19,11 +19,11 @@ fn abandon_returns_running_task_to_ready() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["assign", "T1", "--to", "x"]).assert().success();
-    qp(&db).args(["claim",  "T1", "--as", "x"]).assert().success();
-    qp(&db).args(["abandon","T1", "--as", "x"]).assert().success();
+    qp(&db).args(["assign", "QP-1", "--to", "x"]).assert().success();
+    qp(&db).args(["claim",  "QP-1", "--as", "x"]).assert().success();
+    qp(&db).args(["abandon","QP-1", "--as", "x"]).assert().success();
     // Re-assignable.
-    qp(&db).args(["assign", "T1", "--to", "y"]).assert().success();
+    qp(&db).args(["assign", "QP-1", "--to", "y"]).assert().success();
 }
 
 #[test]
@@ -32,10 +32,10 @@ fn reclaim_force_releases_without_agent_id() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["assign", "T1", "--to", "x"]).assert().success();
-    qp(&db).args(["claim",  "T1", "--as", "x"]).assert().success();
-    qp(&db).args(["reclaim", "T1", "--reason", "agent unresponsive"]).assert().success();
-    qp(&db).args(["assign", "T1", "--to", "y"]).assert().success();
+    qp(&db).args(["assign", "QP-1", "--to", "x"]).assert().success();
+    qp(&db).args(["claim",  "QP-1", "--as", "x"]).assert().success();
+    qp(&db).args(["reclaim", "QP-1", "--reason", "agent unresponsive"]).assert().success();
+    qp(&db).args(["assign", "QP-1", "--to", "y"]).assert().success();
 }
 
 #[test]
@@ -69,9 +69,9 @@ fn timeline_global_includes_all_event_kinds() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["assign","T1","--to","x"]).assert().success();
-    qp(&db).args(["claim", "T1","--as","x"]).assert().success();
-    qp(&db).args(["complete","T1","--as","x","--decision","ok"]).assert().success();
+    qp(&db).args(["assign","QP-1","--to","x"]).assert().success();
+    qp(&db).args(["claim", "QP-1","--as","x"]).assert().success();
+    qp(&db).args(["complete","QP-1","--as","x","--decision","ok"]).assert().success();
     let out = qp(&db).args(["timeline","--json"]).assert().success();
     let v: serde_json::Value = serde_json::from_str(
         std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
@@ -86,8 +86,8 @@ fn decisions_filters_to_decision_events() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add","a"]).assert().success();
-    qp(&db).args(["log","T1","decision","X","--auto"]).assert().success();
-    qp(&db).args(["log","T1","note","Y"]).assert().success();
+    qp(&db).args(["log","QP-1","decision","X","--auto"]).assert().success();
+    qp(&db).args(["log","QP-1","note","Y"]).assert().success();
     let out = qp(&db).args(["decisions","--json"]).assert().success();
     let v: serde_json::Value = serde_json::from_str(
         std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
@@ -100,8 +100,8 @@ fn log_writes_event_with_kind_and_body() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "t"]).assert().success();
-    qp(&db).args(["log", "T1", "decision", "chose B", "--as", "x", "--auto"]).assert().success();
-    qp(&db).args(["log", "T1", "note", "edge case observed"]).assert().success();
+    qp(&db).args(["log", "QP-1", "decision", "chose B", "--as", "x", "--auto"]).assert().success();
+    qp(&db).args(["log", "QP-1", "note", "edge case observed"]).assert().success();
 }
 
 #[test]
@@ -110,10 +110,10 @@ fn tag_add_and_rm() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "t"]).assert().success();
-    qp(&db).args(["tag", "T1", "add", "kind:critique"]).assert().success();
-    qp(&db).args(["tag", "T1", "rm",  "kind:critique"]).assert().success();
+    qp(&db).args(["tag", "QP-1", "add", "kind:critique"]).assert().success();
+    qp(&db).args(["tag", "QP-1", "rm",  "kind:critique"]).assert().success();
     // Re-removing a tag that doesn't exist should be idempotent (success).
-    qp(&db).args(["tag", "T1", "rm",  "kind:critique"]).assert().success();
+    qp(&db).args(["tag", "QP-1", "rm",  "kind:critique"]).assert().success();
 }
 
 #[test]
@@ -124,15 +124,15 @@ fn relation_add_list_rm() {
     qp(&db).args(["add", "root"]).assert().success();
     qp(&db).args(["add", "a"]).assert().success();
     qp(&db).args(["add", "b"]).assert().success();
-    qp(&db).args(["relation", "add", "T2", "variant-of", "T1"]).assert().success();
-    qp(&db).args(["relation", "add", "T3", "variant-of", "T1"]).assert().success();
-    let out = qp(&db).args(["relation", "list", "T1", "--json"]).assert().success();
+    qp(&db).args(["relation", "add", "QP-2", "variant-of", "QP-1"]).assert().success();
+    qp(&db).args(["relation", "add", "QP-3", "variant-of", "QP-1"]).assert().success();
+    let out = qp(&db).args(["relation", "list", "QP-1", "--json"]).assert().success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
-    // incoming variant-of edges from T2, T3.
+    // incoming variant-of edges from QP-2, QP-3.
     let incoming = v["incoming"].as_array().unwrap();
     assert_eq!(incoming.len(), 2);
-    qp(&db).args(["relation", "rm", "T2", "variant-of", "T1"]).assert().success();
+    qp(&db).args(["relation", "rm", "QP-2", "variant-of", "QP-1"]).assert().success();
 }
 
 #[test]
@@ -167,7 +167,7 @@ fn add_creates_task_with_display_id_and_state() {
     let out = qp(&db).args(["add", "first", "--json"]).assert().success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
-    assert_eq!(v["display_id"], "T1");
+    assert_eq!(v["display_id"], "QP-1");
     assert_eq!(v["state"], "ready");
 }
 
@@ -177,7 +177,7 @@ fn add_with_deps_starts_pending_then_unblocks() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    let out = qp(&db).args(["add", "b", "--depends-on", "T1", "--json"]).assert().success();
+    let out = qp(&db).args(["add", "b", "--depends-on", "QP-1", "--json"]).assert().success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
     assert_eq!(v["state"], "pending");
@@ -202,16 +202,16 @@ fn add_rejects_cycle_on_self_dep() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
-    // T1 → T2 → T3, then try to add T1 dep on T3 via a follow-up — but we add depends-on
+    // QP-1 → QP-2 → QP-3, then try to add QP-1 dep on QP-3 via a follow-up — but we add depends-on
     // only at creation time in MVP, so cycle is only possible self-on-existing. Skip
     // multi-step cycle; assert the self-dep case via direct error path.
     qp(&db).args(["add", "x"]).assert().success();
-    qp(&db).args(["add", "y", "--depends-on", "T1"]).assert().success();
-    // T2 depending on T1 — fine. Now imagine T1 declaring dep on T2: not supported via add
+    qp(&db).args(["add", "y", "--depends-on", "QP-1"]).assert().success();
+    // QP-2 depending on QP-1 — fine. Now imagine QP-1 declaring dep on QP-2: not supported via add
     // (you'd need a future `qp dep add` command). For MVP, just verify self-cycle is rejected
     // via an error path; we test would_cycle() indirectly via dep-add in Task 10 if added.
     // Stub assertion: adding with a non-existent dep errors clearly.
-    qp(&db).args(["add", "z", "--depends-on", "T99"]).assert().failure();
+    qp(&db).args(["add", "z", "--depends-on", "QP-99"]).assert().failure();
 }
 
 #[test]
@@ -220,10 +220,10 @@ fn tree_renders_tasks_with_state_and_deps() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add","root"]).assert().success();
-    qp(&db).args(["add","child","--depends-on","T1"]).assert().success();
+    qp(&db).args(["add","child","--depends-on","QP-1"]).assert().success();
     let out = qp(&db).args(["tree"]).assert().success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert!(s.contains("T1") && s.contains("T2"));
+    assert!(s.contains("QP-1") && s.contains("QP-2"));
 }
 
 #[test]
@@ -245,15 +245,15 @@ fn list_embeds_tags_blocked_by_last_event() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add","a"]).assert().success();
-    qp(&db).args(["add","b","--depends-on","T1","--tag","kind:critique"]).assert().success();
+    qp(&db).args(["add","b","--depends-on","QP-1","--tag","kind:critique"]).assert().success();
     let out = qp(&db).args(["list","--json"]).assert().success();
     let v: serde_json::Value = serde_json::from_str(
         std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
-    let t2 = v.as_array().unwrap().iter().find(|t| t["display_id"]=="T2").unwrap();
+    let t2 = v.as_array().unwrap().iter().find(|t| t["display_id"]=="QP-2").unwrap();
     let tags: Vec<&str> = t2["tags"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
     assert!(tags.contains(&"kind:critique"));
     let blocked: Vec<&str> = t2["blocked_by"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
-    assert_eq!(blocked, vec!["T1"]);
+    assert_eq!(blocked, vec!["QP-1"]);
     assert!(t2["last_event"].is_object() || t2["last_event"].is_null());
 }
 
@@ -264,7 +264,7 @@ fn list_filters_by_tag_and_state_and_assignee() {
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add","a","--tag","kind:critique"]).assert().success();
     qp(&db).args(["add","b"]).assert().success();
-    qp(&db).args(["assign","T1","--to","agent-1"]).assert().success();
+    qp(&db).args(["assign","QP-1","--to","agent-1"]).assert().success();
     let out = qp(&db).args(["list","--tag","kind:critique","--json"]).assert().success();
     let v: serde_json::Value = serde_json::from_str(
         std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
@@ -306,8 +306,8 @@ fn assign_then_claim_happy_path() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "t"]).assert().success();
-    qp(&db).args(["assign", "T1", "--to", "agent-a"]).assert().success();
-    qp(&db).args(["claim", "T1", "--as", "agent-a"]).assert().success();
+    qp(&db).args(["assign", "QP-1", "--to", "agent-a"]).assert().success();
+    qp(&db).args(["claim", "QP-1", "--as", "agent-a"]).assert().success();
 }
 
 #[test]
@@ -316,8 +316,8 @@ fn assign_rejects_double_assign() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "t"]).assert().success();
-    qp(&db).args(["assign", "T1", "--to", "a"]).assert().success();
-    qp(&db).args(["assign", "T1", "--to", "b"]).assert().failure().code(2);
+    qp(&db).args(["assign", "QP-1", "--to", "a"]).assert().success();
+    qp(&db).args(["assign", "QP-1", "--to", "b"]).assert().failure().code(2);
 }
 
 #[test]
@@ -326,8 +326,8 @@ fn claim_rejects_wrong_assignee() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "t"]).assert().success();
-    qp(&db).args(["assign", "T1", "--to", "a"]).assert().success();
-    qp(&db).args(["claim", "T1", "--as", "b"]).assert().failure().code(2);
+    qp(&db).args(["assign", "QP-1", "--to", "a"]).assert().success();
+    qp(&db).args(["claim", "QP-1", "--as", "b"]).assert().failure().code(2);
 }
 
 #[test]
@@ -336,8 +336,8 @@ fn assign_rejects_pending_task() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["add", "b", "--depends-on", "T1"]).assert().success();
-    qp(&db).args(["assign", "T2", "--to", "x"]).assert().failure().code(2);
+    qp(&db).args(["add", "b", "--depends-on", "QP-1"]).assert().success();
+    qp(&db).args(["assign", "QP-2", "--to", "x"]).assert().failure().code(2);
 }
 
 #[test]
@@ -346,13 +346,13 @@ fn complete_marks_done_records_decisions_unblocks_deps() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["add", "b", "--depends-on", "T1"]).assert().success();
-    qp(&db).args(["assign", "T1", "--to", "x"]).assert().success();
-    qp(&db).args(["claim", "T1", "--as", "x"]).assert().success();
-    qp(&db).args(["complete", "T1", "--as", "x",
+    qp(&db).args(["add", "b", "--depends-on", "QP-1"]).assert().success();
+    qp(&db).args(["assign", "QP-1", "--to", "x"]).assert().success();
+    qp(&db).args(["claim", "QP-1", "--as", "x"]).assert().success();
+    qp(&db).args(["complete", "QP-1", "--as", "x",
         "--decision", "chose path A", "--decision", "deferred B"]).assert().success();
-    // T2 should now be assignable (ready).
-    qp(&db).args(["assign", "T2", "--to", "y"]).assert().success();
+    // QP-2 should now be assignable (ready).
+    qp(&db).args(["assign", "QP-2", "--to", "y"]).assert().success();
 }
 
 #[test]
@@ -361,9 +361,9 @@ fn block_records_reason() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["assign", "T1", "--to", "x"]).assert().success();
-    qp(&db).args(["claim", "T1", "--as", "x"]).assert().success();
-    qp(&db).args(["block", "T1", "--as", "x", "--reason", "needs API key"]).assert().success();
+    qp(&db).args(["assign", "QP-1", "--to", "x"]).assert().success();
+    qp(&db).args(["claim", "QP-1", "--as", "x"]).assert().success();
+    qp(&db).args(["block", "QP-1", "--as", "x", "--reason", "needs API key"]).assert().success();
 }
 
 #[test]
@@ -373,15 +373,16 @@ fn wave_groups_by_state_and_includes_last_event() {
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add","a"]).assert().success();
     qp(&db).args(["add","b"]).assert().success();
-    qp(&db).args(["assign","T1","--to","x"]).assert().success();
-    qp(&db).args(["claim","T1","--as","x"]).assert().success();
+    qp(&db).args(["assign","QP-1","--to","x"]).assert().success();
+    qp(&db).args(["claim","QP-1","--as","x"]).assert().success();
     let out = qp(&db).args(["wave","--json"]).assert().success();
     let v: serde_json::Value = serde_json::from_str(
         std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
-    assert!(v["running"].as_array().unwrap().iter().any(|t| t["display_id"]=="T1"));
-    assert!(v["ready"].as_array().unwrap().iter().any(|t| t["display_id"]=="T2"));
+    assert!(v["running"].as_array().unwrap().iter().any(|t| t["display_id"]=="QP-1"));
+    assert!(v["ready"].as_array().unwrap().iter().any(|t| t["display_id"]=="QP-2"));
     assert!(v["assigned"].is_array());
-    assert!(v["blocked"].is_array());
+    assert!(v.get("blocked").is_none(), "blocked group removed");
+    assert!(v["pending"].is_array());
 }
 
 #[test]
@@ -390,8 +391,8 @@ fn wait_returns_when_filter_set_empties() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add","a","--tag","wave:7"]).assert().success();
-    qp(&db).args(["assign","T1","--to","x"]).assert().success();
-    qp(&db).args(["claim", "T1","--as","x"]).assert().success();
+    qp(&db).args(["assign","QP-1","--to","x"]).assert().success();
+    qp(&db).args(["claim", "QP-1","--as","x"]).assert().success();
 
     // Start `wait` in the background.
     let db2 = db.clone();
@@ -404,7 +405,7 @@ fn wait_returns_when_filter_set_empties() {
     });
     std::thread::sleep(std::time::Duration::from_millis(150));
     // Complete the task — wait should return.
-    qp(&db).args(["complete","T1","--as","x","--decision","done"]).assert().success();
+    qp(&db).args(["complete","QP-1","--as","x","--decision","done"]).assert().success();
     join.join().unwrap();
 }
 
@@ -414,8 +415,8 @@ fn wait_times_out_with_exit_code() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add","a"]).assert().success();
-    qp(&db).args(["assign","T1","--to","x"]).assert().success();
-    qp(&db).args(["claim","T1","--as","x"]).assert().success();
+    qp(&db).args(["assign","QP-1","--to","x"]).assert().success();
+    qp(&db).args(["claim","QP-1","--as","x"]).assert().success();
     qp(&db).args(["wait","--state","running","--empty","--interval-ms","50","--timeout-secs","1"])
         .assert().failure().code(3);
 }
@@ -439,7 +440,7 @@ fn watch_emits_new_events_as_jsonl() {
     std::thread::sleep(std::time::Duration::from_millis(75));
     // Emit a few more events.
     qp(&db).args(["add", "another"]).assert().success();
-    qp(&db).args(["log", "T1", "note", "hello"]).assert().success();
+    qp(&db).args(["log", "QP-1", "note", "hello"]).assert().success();
     let out = child.wait_with_output().unwrap();
     let lines: Vec<String> = BufReader::new(&out.stdout[..])
         .lines()
@@ -465,4 +466,52 @@ fn install_skills_symlinks_into_target() {
         .args(["install-skills", "--target", target.path().to_str().unwrap()])
         .assert().success();
     assert!(target.path().join("qp-wave/SKILL.md").exists());
+}
+
+#[test]
+fn wave_lists_pending_tasks_that_have_unresolved_deps() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();                       // QP-1 ready
+    qp(&db).args(["add", "b", "--depends-on", "QP-1"]).assert().success(); // QP-2 pending
+    let out = qp(&db).args(["wave", "--json"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+    assert!(v.get("blocked").is_none(), "should not have `blocked` group");
+    let pending = v["pending"].as_array().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["display_id"], "QP-2");
+}
+
+#[test]
+fn add_with_custom_prefix_uses_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).args(["init", "--prefix", "ACME"]).assert().success();
+    let out = qp(&db).args(["add", "first", "--json"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+    assert_eq!(v["display_id"], "ACME-1");
+}
+
+#[test]
+fn init_with_invalid_prefix_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).args(["init", "--prefix", "qp"]).assert().failure().code(2);
+    qp(&db).args(["init", "--prefix", "TOOLONG"]).assert().failure().code(2);
+}
+
+#[test]
+fn init_prefix_is_immutable_after_first_init() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).args(["init", "--prefix", "ACME"]).assert().success();
+    // Second init with a different prefix should be silently idempotent —
+    // prefix is NOT changed.
+    qp(&db).args(["init", "--prefix", "OTHER"]).assert().success();
+    let out = qp(&db).args(["add", "x", "--json"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("ACME-1"), "prefix should remain ACME, got: {s}");
 }

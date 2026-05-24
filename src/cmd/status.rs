@@ -17,7 +17,7 @@ pub fn run(db_path: &std::path::Path, a: StatusArgs) -> Result<()> {
         map.insert(state.clone(), serde_json::Value::from(*count));
     }
     // Always include all known states (zero if absent) so consumers can rely on the keys.
-    for s in ["pending","ready","assigned","running","done","blocked","cancelled"] {
+    for s in ["pending","ready","assigned","running","done","cancelled"] {
         map.entry(s.to_string()).or_insert(serde_json::Value::from(0));
     }
     if a.json {

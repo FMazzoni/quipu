@@ -14,7 +14,7 @@ fn wave_pattern_with_tags_and_critique() {
     for title in ["X", "Y", "Z"] {
         qp(&db).args(["add", title, "--tier", "wave-1", "--tag", "wave:1"]).assert().success();
     }
-    for (i, t) in [("T1","a1"),("T2","a2"),("T3","a3")] {
+    for (i, t) in [("QP-1","a1"),("QP-2","a2"),("QP-3","a3")] {
         let _ = (i,t);
         qp(&db).args(["assign", i, "--to", t]).assert().success();
         qp(&db).args(["claim", i, "--as", t]).assert().success();
@@ -25,12 +25,12 @@ fn wave_pattern_with_tags_and_critique() {
         std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
     assert_eq!(v["done"], 3);
 
-    // Critique against T2 → new task tagged kind:critique.
-    let out = qp(&db).args(["add","fix: missed timeout","--tag","wave:1","--tag","kind:critique","--depends-on","T2","--json"])
+    // Critique against QP-2 → new task tagged kind:critique.
+    let out = qp(&db).args(["add","fix: missed timeout","--tag","wave:1","--tag","kind:critique","--depends-on","QP-2","--json"])
         .assert().success();
     let crit: serde_json::Value = serde_json::from_str(
         std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
-    // Since T2 is done, the critique starts ready (dep already done).
+    // Since QP-2 is done, the critique starts ready (dep already done).
     assert_eq!(crit["state"], "ready");
     let cid = crit["display_id"].as_str().unwrap().to_string();
 

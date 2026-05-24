@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 -- stamped on init: meta(key='project_uuid', value=<uuid v4>)
 -- stamped on init: meta(key='schema_version', value='1')
+-- stamped on init: meta(key='display_prefix', value='QP' or user-supplied)
 
 CREATE TABLE IF NOT EXISTS task (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -18,7 +19,7 @@ CREATE TABLE IF NOT EXISTS task (
     state      TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
--- state ∈ pending | ready | assigned | running | done | blocked | cancelled
+-- state ∈ pending | ready | assigned | running | done | cancelled
 
 CREATE TABLE IF NOT EXISTS dep (
     task_id            INTEGER NOT NULL REFERENCES task(id),
