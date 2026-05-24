@@ -64,6 +64,37 @@ fn qp(db: &std::path::Path) -> Command {
 }
 
 #[test]
+fn timeline_global_includes_all_event_kinds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["assign","T1","--to","x"]).assert().success();
+    qp(&db).args(["claim", "T1","--as","x"]).assert().success();
+    qp(&db).args(["complete","T1","--as","x","--decision","ok"]).assert().success();
+    let out = qp(&db).args(["timeline","--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+    let kinds: Vec<&str> = v.as_array().unwrap().iter()
+        .map(|e| e["kind"].as_str().unwrap()).collect();
+    assert!(kinds.contains(&"decision") && kinds.iter().filter(|k| **k=="state_change").count() >= 3);
+}
+
+#[test]
+fn decisions_filters_to_decision_events() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add","a"]).assert().success();
+    qp(&db).args(["log","T1","decision","X","--auto"]).assert().success();
+    qp(&db).args(["log","T1","note","Y"]).assert().success();
+    let out = qp(&db).args(["decisions","--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn log_writes_event_with_kind_and_body() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");

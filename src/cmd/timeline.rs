@@ -1,0 +1,65 @@
+use anyhow::Result;
+use clap::Args;
+use serde_json::Value;
+use crate::{db, id};
+
+#[derive(Args, Debug)]
+pub struct TimelineArgs {
+    pub task: Option<String>,
+    #[arg(long)] pub json: bool,
+    #[arg(long = "kind")] pub kinds: Vec<String>,
+    #[arg(long, default_value_t = 0)] pub since: i64,
+}
+
+pub fn run(db_path: &std::path::Path, a: TimelineArgs) -> Result<()> {
+    let conn = db::open(db_path)?;
+    let task_id = a.task.as_deref().map(|s| id::resolve(&conn, s)).transpose()?;
+    let mut sql = String::from(
+        "SELECT e.id, t.display_id, e.ts, e.kind, e.agent_id, e.payload
+           FROM event e LEFT JOIN task t ON t.id = e.task_id
+          WHERE e.id > ?1");
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(a.since)];
+    if let Some(tid) = task_id {
+        sql.push_str(" AND e.task_id = ?");
+        sql.push_str(&format!("{}", params.len() + 1));
+        params.push(Box::new(tid));
+    }
+    if !a.kinds.is_empty() {
+        sql.push_str(" AND e.kind IN (");
+        for (i, _) in a.kinds.iter().enumerate() {
+            if i > 0 { sql.push(','); }
+            sql.push_str(&format!("?{}", params.len() + 1 + i));
+        }
+        sql.push(')');
+        for k in &a.kinds { params.push(Box::new(k.clone())); }
+    }
+    sql.push_str(" ORDER BY e.id ASC");
+    let mut stmt = conn.prepare(&sql)?;
+    let pref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+    let rows = stmt.query_map(pref.as_slice(), |r| {
+        let payload: Option<String> = r.get(5)?;
+        let payload_v: Value = payload.as_deref()
+            .map(serde_json::from_str).transpose().ok().flatten().unwrap_or(Value::Null);
+        Ok(serde_json::json!({
+            "id": r.get::<_, i64>(0)?,
+            "task": r.get::<_, Option<String>>(1)?,
+            "ts": r.get::<_, String>(2)?,
+            "kind": r.get::<_, String>(3)?,
+            "agent_id": r.get::<_, Option<String>>(4)?,
+            "payload": payload_v,
+        }))
+    })?;
+    let collected: Vec<Value> = rows.collect::<Result<_, _>>()?;
+    if a.json { println!("{}", serde_json::to_string(&collected)?); }
+    else {
+        for e in &collected {
+            println!("{}\t{}\t{}\t{}\t{}",
+                e["ts"].as_str().unwrap_or(""),
+                e["task"].as_str().unwrap_or("-"),
+                e["kind"].as_str().unwrap_or(""),
+                e["agent_id"].as_str().unwrap_or("-"),
+                e["payload"]);
+        }
+    }
+    Ok(())
+}

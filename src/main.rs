@@ -46,7 +46,7 @@ enum Cmd {
     /// Render the task DAG
     Tree,
     /// Show the event timeline (per-task or global)
-    Timeline,
+    Timeline(cmd::timeline::TimelineArgs),
     /// Show the current wave: ready / running / blocked groups
     Wave,
     /// Snapshot of state counts
@@ -54,7 +54,7 @@ enum Cmd {
     /// List tasks with filters
     List,
     /// Decision events (filter alias over timeline)
-    Decisions,
+    Decisions(cmd::decisions::DecisionsArgs),
     /// Block until a tag/state cohort drains
     Wait,
     /// Tail new events as they are recorded
@@ -92,6 +92,8 @@ fn real_main() -> anyhow::Result<()> {
         Cmd::Log(a) => cmd::log::run(&db_path, a),
         Cmd::Tag(a) => cmd::tag::run(&db_path, a),
         Cmd::Relation(a) => cmd::relation::run(&db_path, a),
+        Cmd::Timeline(a) => cmd::timeline::run(&db_path, a),
+        Cmd::Decisions(a) => cmd::decisions::run(&db_path, a),
         _ => { eprintln!("not implemented yet"); std::process::exit(1); }
     }
 }
