@@ -736,3 +736,34 @@ fn edit_during_running_state_allowed() {
     qp(&db).args(["edit", "QP-1", "--description", "scope refined"])
         .assert().success();
 }
+
+#[test]
+fn edit_rejected_on_done_task() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["assign", "QP-1", "--to", "x"]).assert().success();
+    qp(&db).args(["claim",  "QP-1", "--as", "x"]).assert().success();
+    qp(&db).args(["complete","QP-1", "--as", "x"]).assert().success();
+    qp(&db).args(["edit", "QP-1", "--title", "no go"]).assert().failure().code(2);
+}
+
+#[test]
+fn edit_rejected_on_cancelled_task() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["cancel", "QP-1", "--reason", "obsolete"]).assert().success();
+    qp(&db).args(["edit", "QP-1", "--title", "no go"]).assert().failure().code(2);
+}
+
+#[test]
+fn edit_rejects_empty_title() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["edit", "QP-1", "--title", ""]).assert().failure().code(1);
+}

@@ -18,6 +18,11 @@ pub fn run(db_path: &std::path::Path, a: EditArgs) -> Result<()> {
         return Err(db::invalid_input(
             "qp edit requires at least one of --title, --tier, --description"));
     }
+    if let Some(t) = &a.title {
+        if t.is_empty() {
+            return Err(db::invalid_input("--title cannot be empty"));
+        }
+    }
     let mut conn = db::open(db_path)?;
     let task_id = id::resolve(&conn, &a.task)?;
     let any_changed = db::with_tx(&mut conn, |tx| -> Result<bool> {
@@ -64,11 +69,14 @@ pub fn run(db_path: &std::path::Path, a: EditArgs) -> Result<()> {
 
         if changes.is_empty() { return Ok(false); }
 
-        let sql = format!("UPDATE task SET {} WHERE id = ?", sets.join(", "));
+        let sql = format!(
+            "UPDATE task SET {} WHERE id = ? AND state NOT IN ('done','cancelled')",
+            sets.join(", "));
         params.push(task_id.into());
         let n = tx.execute(&sql, rusqlite::params_from_iter(params.iter()))?;
         if n != 1 {
-            return Err(db::constraint(format!("{}: row vanished mid-edit", a.task)));
+            return Err(db::constraint(format!(
+                "{}: not editable (terminal state or vanished)", a.task)));
         }
         db::insert_event(tx, Some(task_id), "edit", a.agent.as_deref(),
             Some(&serde_json::json!({"changes": changes})))?;
