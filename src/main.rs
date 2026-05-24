@@ -1,0 +1,60 @@
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(name = "quipu", bin_name = "qp", version, about = "Structured task substrate for agent orchestration")]
+struct Cli {
+    #[arg(long, global = true, env = "QP_DB")]
+    db: Option<std::path::PathBuf>,
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Initialize a store in the current directory
+    Init,
+    /// Add a new task
+    Add,
+    /// Assign a ready task to an agent (orchestrator only)
+    Assign,
+    /// Claim an assigned task as the running agent
+    Claim,
+    /// Complete a running task (records decisions/artifacts)
+    Complete,
+    /// Mark a running task blocked with a reason
+    Block,
+    /// Cancel a task (any non-terminal state)
+    Cancel,
+    /// Agent self-release of a claim (running → ready)
+    Abandon,
+    /// Orchestrator force-release of a claim
+    Reclaim,
+    /// Log a free-form event against a task
+    Log,
+    /// Manage tags on a task
+    Tag,
+    /// Manage relations between tasks
+    Relation,
+    /// Render the task DAG
+    Tree,
+    /// Show the event timeline (per-task or global)
+    Timeline,
+    /// Show the current wave: ready / running / blocked groups
+    Wave,
+    /// Snapshot of state counts
+    Status,
+    /// List tasks with filters
+    List,
+    /// Decision events (filter alias over timeline)
+    Decisions,
+    /// Block until a tag/state cohort drains
+    Wait,
+    /// Tail new events as they are recorded
+    Watch,
+}
+
+fn main() {
+    let cli = Cli::parse();
+    eprintln!("not implemented yet: {:?}", std::mem::discriminant(&cli.cmd));
+    std::process::exit(1);
+}
