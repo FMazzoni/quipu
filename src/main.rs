@@ -20,7 +20,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Initialize a store in the current directory
-    Init,
+    Init {
+        /// Display-id prefix (2–5 uppercase letters). Configurable at first init only. Default: QP.
+        #[arg(long)]
+        prefix: Option<String>,
+    },
     /// Add a new task
     Add(cmd::add::AddArgs),
     /// Assign a ready task to an agent (orchestrator only)
@@ -61,6 +65,8 @@ enum Cmd {
     Watch(cmd::watch::WatchArgs),
     /// Install bundled skills into Claude Code's skill dir
     InstallSkills(cmd::install_skills::InstallSkillsArgs),
+    /// Add or remove a dep edge between tasks
+    Depends(cmd::depends::DependsArgs),
 }
 
 fn main() {
@@ -82,7 +88,7 @@ fn real_main() -> anyhow::Result<()> {
     let db_path = db::resolve_path(cli.db.clone())?;
     db::warn_on_project_mismatch(&cli.db)?;
     match cli.cmd {
-        Cmd::Init => { let _ = db::open(&db_path)?; println!("initialized at {}", db_path.display()); Ok(()) }
+        Cmd::Init { prefix: _ } => { let _ = db::open(&db_path)?; println!("initialized at {}", db_path.display()); Ok(()) }
         Cmd::Add(a) => cmd::add::run(&db_path, a),
         Cmd::Assign(a) => cmd::assign::run(&db_path, a),
         Cmd::Claim(a) => cmd::claim::run(&db_path, a),
@@ -103,6 +109,8 @@ fn real_main() -> anyhow::Result<()> {
         Cmd::Wait(a) => cmd::wait::run(&db_path, a),
         Cmd::Watch(a) => cmd::watch::run(&db_path, a),
         Cmd::InstallSkills(a) => cmd::install_skills::run(a),
+        Cmd::Depends(a) => cmd::depends::run(&db_path, a),
+        #[allow(unreachable_patterns)]
         _ => { eprintln!("not implemented yet"); std::process::exit(1); }
     }
 }
