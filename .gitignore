@@ -1,3 +1,8 @@
 /target
 /.quipu
 *.swp
+/docs/critic/
+/docs/bugs/
+/docs/superpowers/plans/*.tmp
+.superpowers/
+.DS_Store
