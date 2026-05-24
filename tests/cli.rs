@@ -130,3 +130,43 @@ fn mismatched_project_uuid_emits_warning() {
     assert!(stderr.contains("project_uuid mismatch") || stderr.contains("warning"),
         "expected mismatch warning in stderr:\n{stderr}");
 }
+
+#[test]
+fn assign_then_claim_happy_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "t"]).assert().success();
+    qp(&db).args(["assign", "T1", "--to", "agent-a"]).assert().success();
+    qp(&db).args(["claim", "T1", "--as", "agent-a"]).assert().success();
+}
+
+#[test]
+fn assign_rejects_double_assign() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "t"]).assert().success();
+    qp(&db).args(["assign", "T1", "--to", "a"]).assert().success();
+    qp(&db).args(["assign", "T1", "--to", "b"]).assert().failure().code(2);
+}
+
+#[test]
+fn claim_rejects_wrong_assignee() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "t"]).assert().success();
+    qp(&db).args(["assign", "T1", "--to", "a"]).assert().success();
+    qp(&db).args(["claim", "T1", "--as", "b"]).assert().failure().code(2);
+}
+
+#[test]
+fn assign_rejects_pending_task() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["add", "b", "--depends-on", "T1"]).assert().success();
+    qp(&db).args(["assign", "T2", "--to", "x"]).assert().failure().code(2);
+}

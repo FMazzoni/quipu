@@ -24,9 +24,9 @@ enum Cmd {
     /// Add a new task
     Add(cmd::add::AddArgs),
     /// Assign a ready task to an agent (orchestrator only)
-    Assign,
+    Assign(cmd::assign::AssignArgs),
     /// Claim an assigned task as the running agent
-    Claim,
+    Claim(cmd::claim::ClaimArgs),
     /// Complete a running task (records decisions/artifacts)
     Complete,
     /// Mark a running task blocked with a reason
@@ -82,6 +82,8 @@ fn real_main() -> anyhow::Result<()> {
     match cli.cmd {
         Cmd::Init => { let _ = db::open(&db_path)?; println!("initialized at {}", db_path.display()); Ok(()) }
         Cmd::Add(a) => cmd::add::run(&db_path, a),
+        Cmd::Assign(a) => cmd::assign::run(&db_path, a),
+        Cmd::Claim(a) => cmd::claim::run(&db_path, a),
         _ => { eprintln!("not implemented yet"); std::process::exit(1); }
     }
 }
