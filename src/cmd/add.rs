@@ -57,11 +57,16 @@ pub fn run(db_path: &std::path::Path, a: AddArgs) -> Result<()> {
             tx.execute("INSERT OR IGNORE INTO tag(task_id, name) VALUES (?,?)",
                 rusqlite::params![row, tag])?;
         }
+        // If deps were added, run refresh_ready now: if all deps are already done/cancelled
+        // this task may immediately transition to ready.
+        if !dep_ids.is_empty() { db::refresh_ready(tx)?; }
+        let actual_state: String = tx.query_row(
+            "SELECT state FROM task WHERE id = ?", [row], |r| r.get(0))?;
         db::insert_event(tx, Some(row), "state_change", None,
-            Some(&serde_json::json!({"to": state, "title": a.title})))?;
+            Some(&serde_json::json!({"to": actual_state, "title": a.title})))?;
         Ok(Created {
             display_id: display, title: a.title.clone(),
-            state: state.to_string(), tier: a.tier.clone(), tags: a.tag.clone(),
+            state: actual_state, tier: a.tier.clone(), tags: a.tag.clone(),
         })
     })?;
 
