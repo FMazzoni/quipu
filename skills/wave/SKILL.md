@@ -32,9 +32,10 @@ for t in $(qp list --tag wave:$WAVE --state ready --json | jq -r '.[].display_id
   qp assign $t --to "wave-$WAVE-agent-$i"
 done
 
-# 3) Dispatch subagents (skill writer's choice)
-# Push:  spawn agent K with prompt "claim T<x>; work; complete T<x> --decision '...'"
-# Pull:  spawn agent K with prompt "list --assigned-to wave-$WAVE-agent-K; claim each; complete each"
+# 3) Dispatch subagents — each agent runs:
+qp claim  $t --as "wave-$WAVE-agent-$i"
+# ... do work ...
+qp complete $t --as "wave-$WAVE-agent-$i" --decision "result summary"
 
 # 4) Wait for the wave to drain (running → done/blocked)
 qp wait --tag wave:$WAVE --state running --empty --interval-ms 1000 --timeout-secs 1800
