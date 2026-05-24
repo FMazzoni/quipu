@@ -28,9 +28,9 @@ enum Cmd {
     /// Claim an assigned task as the running agent
     Claim(cmd::claim::ClaimArgs),
     /// Complete a running task (records decisions/artifacts)
-    Complete,
+    Complete(cmd::complete::CompleteArgs),
     /// Mark a running task blocked with a reason
-    Block,
+    Block(cmd::block::BlockArgs),
     /// Cancel a task (any non-terminal state)
     Cancel,
     /// Agent self-release of a claim (running → ready)
@@ -84,6 +84,8 @@ fn real_main() -> anyhow::Result<()> {
         Cmd::Add(a) => cmd::add::run(&db_path, a),
         Cmd::Assign(a) => cmd::assign::run(&db_path, a),
         Cmd::Claim(a) => cmd::claim::run(&db_path, a),
+        Cmd::Complete(a) => cmd::complete::run(&db_path, a),
+        Cmd::Block(a) => cmd::block::run(&db_path, a),
         _ => { eprintln!("not implemented yet"); std::process::exit(1); }
     }
 }
