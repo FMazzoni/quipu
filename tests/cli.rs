@@ -51,7 +51,7 @@ fn help_lists_core_commands() {
     for cmd in [
         "init","add","assign","claim","complete","block","cancel","abandon","reclaim",
         "log","tag","relation","tree","timeline","wave","status","list",
-        "decisions","wait","watch","install-skills",
+        "decisions","wait","watch","install-skills","depends",
     ] {
         assert!(out.contains(cmd), "help missing `{cmd}`:\n{out}");
     }
