@@ -51,7 +51,7 @@ enum Cmd {
     Tree(cmd::tree::TreeArgs),
     /// Show the event timeline (per-task or global)
     Timeline(cmd::timeline::TimelineArgs),
-    /// Show the current wave: ready / running / blocked groups
+    /// Show the current wave: ready / assigned / running / pending groups
     Wave(cmd::wave::WaveArgs),
     /// Snapshot of state counts
     Status(cmd::status::StatusArgs),
