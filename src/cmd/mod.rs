@@ -14,3 +14,4 @@ pub mod decisions;
 pub mod tree;
 pub mod status;
 pub mod list;
+pub mod wave;

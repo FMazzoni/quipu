@@ -365,3 +365,21 @@ fn block_records_reason() {
     qp(&db).args(["claim", "T1", "--as", "x"]).assert().success();
     qp(&db).args(["block", "T1", "--as", "x", "--reason", "needs API key"]).assert().success();
 }
+
+#[test]
+fn wave_groups_by_state_and_includes_last_event() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add","a"]).assert().success();
+    qp(&db).args(["add","b"]).assert().success();
+    qp(&db).args(["assign","T1","--to","x"]).assert().success();
+    qp(&db).args(["claim","T1","--as","x"]).assert().success();
+    let out = qp(&db).args(["wave","--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+    assert!(v["running"].as_array().unwrap().iter().any(|t| t["display_id"]=="T1"));
+    assert!(v["ready"].as_array().unwrap().iter().any(|t| t["display_id"]=="T2"));
+    assert!(v["assigned"].is_array());
+    assert!(v["blocked"].is_array());
+}

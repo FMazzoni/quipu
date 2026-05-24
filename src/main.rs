@@ -48,7 +48,7 @@ enum Cmd {
     /// Show the event timeline (per-task or global)
     Timeline(cmd::timeline::TimelineArgs),
     /// Show the current wave: ready / running / blocked groups
-    Wave,
+    Wave(cmd::wave::WaveArgs),
     /// Snapshot of state counts
     Status(cmd::status::StatusArgs),
     /// List tasks with filters
@@ -97,6 +97,7 @@ fn real_main() -> anyhow::Result<()> {
         Cmd::Tree(a) => cmd::tree::run(&db_path, a),
         Cmd::Status(a) => cmd::status::run(&db_path, a),
         Cmd::List(a) => cmd::list::run(&db_path, a),
+        Cmd::Wave(a) => cmd::wave::run(&db_path, a),
         _ => { eprintln!("not implemented yet"); std::process::exit(1); }
     }
 }
