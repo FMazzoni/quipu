@@ -170,3 +170,29 @@ fn assign_rejects_pending_task() {
     qp(&db).args(["add", "b", "--depends-on", "T1"]).assert().success();
     qp(&db).args(["assign", "T2", "--to", "x"]).assert().failure().code(2);
 }
+
+#[test]
+fn complete_marks_done_records_decisions_unblocks_deps() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["add", "b", "--depends-on", "T1"]).assert().success();
+    qp(&db).args(["assign", "T1", "--to", "x"]).assert().success();
+    qp(&db).args(["claim", "T1", "--as", "x"]).assert().success();
+    qp(&db).args(["complete", "T1", "--as", "x",
+        "--decision", "chose path A", "--decision", "deferred B"]).assert().success();
+    // T2 should now be assignable (ready).
+    qp(&db).args(["assign", "T2", "--to", "y"]).assert().success();
+}
+
+#[test]
+fn block_records_reason() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["assign", "T1", "--to", "x"]).assert().success();
+    qp(&db).args(["claim", "T1", "--as", "x"]).assert().success();
+    qp(&db).args(["block", "T1", "--as", "x", "--reason", "needs API key"]).assert().success();
+}
