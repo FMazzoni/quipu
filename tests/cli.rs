@@ -215,7 +215,67 @@ fn add_rejects_cycle_on_self_dep() {
 }
 
 #[test]
-#[ignore]
+fn tree_renders_tasks_with_state_and_deps() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add","root"]).assert().success();
+    qp(&db).args(["add","child","--depends-on","T1"]).assert().success();
+    let out = qp(&db).args(["tree"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("T1") && s.contains("T2"));
+}
+
+#[test]
+fn status_counts_by_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add","a"]).assert().success();
+    qp(&db).args(["add","b"]).assert().success();
+    let out = qp(&db).args(["status","--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+    assert_eq!(v["ready"], 2);
+}
+
+#[test]
+fn list_embeds_tags_blocked_by_last_event() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add","a"]).assert().success();
+    qp(&db).args(["add","b","--depends-on","T1","--tag","kind:critique"]).assert().success();
+    let out = qp(&db).args(["list","--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+    let t2 = v.as_array().unwrap().iter().find(|t| t["display_id"]=="T2").unwrap();
+    let tags: Vec<&str> = t2["tags"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
+    assert!(tags.contains(&"kind:critique"));
+    let blocked: Vec<&str> = t2["blocked_by"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
+    assert_eq!(blocked, vec!["T1"]);
+    assert!(t2["last_event"].is_object() || t2["last_event"].is_null());
+}
+
+#[test]
+fn list_filters_by_tag_and_state_and_assignee() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add","a","--tag","kind:critique"]).assert().success();
+    qp(&db).args(["add","b"]).assert().success();
+    qp(&db).args(["assign","T1","--to","agent-1"]).assert().success();
+    let out = qp(&db).args(["list","--tag","kind:critique","--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    let out = qp(&db).args(["list","--assigned-to","agent-1","--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn mismatched_project_uuid_emits_warning() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
