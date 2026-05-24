@@ -56,7 +56,7 @@ enum Cmd {
     /// Decision events (filter alias over timeline)
     Decisions(cmd::decisions::DecisionsArgs),
     /// Block until a tag/state cohort drains
-    Wait,
+    Wait(cmd::wait::WaitArgs),
     /// Tail new events as they are recorded
     Watch,
 }
@@ -98,6 +98,7 @@ fn real_main() -> anyhow::Result<()> {
         Cmd::Status(a) => cmd::status::run(&db_path, a),
         Cmd::List(a) => cmd::list::run(&db_path, a),
         Cmd::Wave(a) => cmd::wave::run(&db_path, a),
+        Cmd::Wait(a) => cmd::wait::run(&db_path, a),
         _ => { eprintln!("not implemented yet"); std::process::exit(1); }
     }
 }

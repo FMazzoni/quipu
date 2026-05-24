@@ -383,3 +383,39 @@ fn wave_groups_by_state_and_includes_last_event() {
     assert!(v["assigned"].is_array());
     assert!(v["blocked"].is_array());
 }
+
+#[test]
+fn wait_returns_when_filter_set_empties() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add","a","--tag","wave:7"]).assert().success();
+    qp(&db).args(["assign","T1","--to","x"]).assert().success();
+    qp(&db).args(["claim", "T1","--as","x"]).assert().success();
+
+    // Start `wait` in the background.
+    let db2 = db.clone();
+    let join = std::thread::spawn(move || {
+        Command::cargo_bin("qp").unwrap()
+            .env("QP_DB", &db2)
+            .args(["wait","--tag","wave:7","--state","running","--empty",
+                   "--interval-ms","50","--timeout-secs","5"])
+            .assert().success();
+    });
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    // Complete the task — wait should return.
+    qp(&db).args(["complete","T1","--as","x","--decision","done"]).assert().success();
+    join.join().unwrap();
+}
+
+#[test]
+fn wait_times_out_with_exit_code() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add","a"]).assert().success();
+    qp(&db).args(["assign","T1","--to","x"]).assert().success();
+    qp(&db).args(["claim","T1","--as","x"]).assert().success();
+    qp(&db).args(["wait","--state","running","--empty","--interval-ms","50","--timeout-secs","1"])
+        .assert().failure().code(3);
+}
