@@ -57,11 +57,16 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
             return Err(db::constraint(format!("{} not blockable from current state", a.task)));
         }
 
-        // (4) Close the in-flight assignment (the agent is releasing the task).
-        tx.execute(
-            "UPDATE assignment SET completed_at = ?, outcome = 'abandoned'
-              WHERE task_id = ? AND completed_at IS NULL",
-            rusqlite::params![crate::time::now_rfc3339(), task_id])?;
+        // (4) Close the in-flight assignment by specific id (mirrors abandon.rs pattern).
+        let aid: i64 = tx.query_row(
+            "SELECT id FROM assignment WHERE task_id = ? AND completed_at IS NULL ORDER BY id DESC LIMIT 1",
+            [task_id], |r| r.get(0))?;
+        let n = tx.execute(
+            "UPDATE assignment SET completed_at = ?, outcome = 'abandoned' WHERE id = ?",
+            rusqlite::params![crate::time::now_rfc3339(), aid])?;
+        if n != 1 {
+            return Err(db::constraint(format!("no open assignment to close for {}", a.task)));
+        }
 
         // (5) One `blocker` event with structured payload (skill-readable).
         db::insert_event(tx, Some(task_id), "blocker", Some(&a.agent),

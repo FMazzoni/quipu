@@ -637,3 +637,20 @@ fn block_rejects_wrong_agent() {
     qp(&db).args(["block",  "QP-1", "--as", "bob", "--new", "x"])
         .assert().failure().code(2);
 }
+
+#[test]
+fn depends_demote_emits_state_change_event() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["add", "b"]).assert().success();
+    qp(&db).args(["depends", "QP-2", "--on", "QP-1"]).assert().success();
+    let out = qp(&db).args(["timeline", "QP-2", "--json"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+    let kinds: Vec<&str> = v.as_array().unwrap().iter()
+        .map(|e| e["kind"].as_str().unwrap()).collect();
+    assert!(kinds.contains(&"dep_added"), "expected dep_added in {kinds:?}");
+    assert!(kinds.contains(&"state_change"), "expected state_change in {kinds:?}");
+}
