@@ -37,6 +37,20 @@ fn init_creates_db_and_stamps_project_uuid() {
 }
 
 #[test]
+fn init_enables_wal_journal_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    // Open the file directly and ask SQLite what mode it is in. WAL persists
+    // in the file header, so a fresh connection sees the same setting.
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mode.to_lowercase(), "wal", "expected WAL journal mode, got {mode}");
+}
+
+#[test]
 #[ignore]
 fn mismatched_project_uuid_emits_warning() {
     let a = tempfile::tempdir().unwrap();

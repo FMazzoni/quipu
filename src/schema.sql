@@ -1,7 +1,7 @@
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous = NORMAL;
-PRAGMA foreign_keys = ON;
-PRAGMA busy_timeout = 5000;
+-- PRAGMAs are applied by `db::open` before this DDL runs. They cannot live here
+-- because `rusqlite::Connection::execute_batch` wraps multi-statement strings in
+-- an implicit BEGIN/COMMIT, and `PRAGMA journal_mode = WAL` is silently a no-op
+-- inside a transaction.
 
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
