@@ -59,6 +59,8 @@ enum Cmd {
     Wait(cmd::wait::WaitArgs),
     /// Tail new events as they are recorded
     Watch(cmd::watch::WatchArgs),
+    /// Install bundled skills into Claude Code's skill dir
+    InstallSkills(cmd::install_skills::InstallSkillsArgs),
 }
 
 fn main() {
@@ -100,6 +102,7 @@ fn real_main() -> anyhow::Result<()> {
         Cmd::Wave(a) => cmd::wave::run(&db_path, a),
         Cmd::Wait(a) => cmd::wait::run(&db_path, a),
         Cmd::Watch(a) => cmd::watch::run(&db_path, a),
+        Cmd::InstallSkills(a) => cmd::install_skills::run(a),
         _ => { eprintln!("not implemented yet"); std::process::exit(1); }
     }
 }
