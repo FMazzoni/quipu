@@ -6,6 +6,8 @@ mod time;
 
 use clap::{Parser, Subcommand};
 
+mod id;
+
 #[derive(Parser)]
 #[command(name = "quipu", bin_name = "qp", version, about = "Structured task substrate for agent orchestration", subcommand_required = true, arg_required_else_help = true)]
 struct Cli {
