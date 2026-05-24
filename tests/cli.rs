@@ -2,6 +2,43 @@ use assert_cmd::Command;
 use predicates::str::contains;
 
 #[test]
+fn cancel_terminates_task_unblocks_dependents() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["add", "b", "--depends-on", "T1"]).assert().success();
+    qp(&db).args(["cancel", "T1", "--reason", "no longer needed"]).assert().success();
+    // T2 should be ready: dep is `cancelled` which counts as resolved.
+    qp(&db).args(["assign", "T2", "--to", "x"]).assert().success();
+}
+
+#[test]
+fn abandon_returns_running_task_to_ready() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["assign", "T1", "--to", "x"]).assert().success();
+    qp(&db).args(["claim",  "T1", "--as", "x"]).assert().success();
+    qp(&db).args(["abandon","T1", "--as", "x"]).assert().success();
+    // Re-assignable.
+    qp(&db).args(["assign", "T1", "--to", "y"]).assert().success();
+}
+
+#[test]
+fn reclaim_force_releases_without_agent_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["assign", "T1", "--to", "x"]).assert().success();
+    qp(&db).args(["claim",  "T1", "--as", "x"]).assert().success();
+    qp(&db).args(["reclaim", "T1", "--reason", "agent unresponsive"]).assert().success();
+    qp(&db).args(["assign", "T1", "--to", "y"]).assert().success();
+}
+
+#[test]
 fn version_flag_prints_version() {
     Command::cargo_bin("qp").unwrap().arg("--version").assert().success()
         .stdout(contains("quipu"));
