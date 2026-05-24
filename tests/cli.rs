@@ -51,7 +51,7 @@ fn help_lists_core_commands() {
     for cmd in [
         "init","add","assign","claim","complete","block","cancel","abandon","reclaim",
         "log","tag","relation","tree","timeline","wave","status","list",
-        "decisions","wait","watch",
+        "decisions","wait","watch","install-skills",
     ] {
         assert!(out.contains(cmd), "help missing `{cmd}`:\n{out}");
     }
@@ -451,4 +451,18 @@ fn watch_emits_new_events_as_jsonl() {
         let _v: serde_json::Value = serde_json::from_str(line)
             .expect("each watch line must be valid JSON");
     }
+}
+
+#[test]
+fn install_skills_symlinks_into_target() {
+    let src = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(src.path().join("skills/wave")).unwrap();
+    std::fs::write(src.path().join("skills/wave/SKILL.md"), "x").unwrap();
+
+    Command::cargo_bin("qp").unwrap()
+        .env("QP_SKILLS_SRC", src.path())
+        .args(["install-skills", "--target", target.path().to_str().unwrap()])
+        .assert().success();
+    assert!(target.path().join("qp-wave/SKILL.md").exists());
 }
