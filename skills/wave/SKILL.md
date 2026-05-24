@@ -106,3 +106,13 @@ Exploratory planners use the same primitive *without* `qp block` — they just c
 - `cron:nightly-gc` — automated maintenance
 
 Pair this with a `harness:<name>` tag on any task the harness creates, so `qp list --tag harness:claude-code` filters cleanly. The substrate doesn't enforce this — it's an orchestrator convention.
+
+### Editing tasks
+
+Task title, tier, and description are editable after creation:
+
+    qp edit QP-3 --title "fetch staging credentials" --description "see Linear INGEST-42"
+
+Each call emits one `edit` event capturing the before/after of every changed field. No-ops are silently skipped (no event). State, display_id, and created_at are not editable. Edits are allowed in any non-terminal state — including `running` — for scope-refinement mid-flight.
+
+`--as <agent>` is optional and only used for attribution in the `edit` event payload.
