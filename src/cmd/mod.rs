@@ -16,3 +16,4 @@ pub mod status;
 pub mod list;
 pub mod wave;
 pub mod wait;
+pub mod watch;

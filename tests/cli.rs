@@ -419,3 +419,36 @@ fn wait_times_out_with_exit_code() {
     qp(&db).args(["wait","--state","running","--empty","--interval-ms","50","--timeout-secs","1"])
         .assert().failure().code(3);
 }
+
+#[test]
+fn watch_emits_new_events_as_jsonl() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command as PCommand, Stdio};
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "seed"]).assert().success();
+    // Start watch in a child. --max-ticks bounds the run.
+    let bin = assert_cmd::cargo::cargo_bin("qp");
+    let mut child = PCommand::new(&bin)
+        .env("QP_DB", &db)
+        .args(["watch", "--since", "0", "--max-ticks", "5", "--interval-ms", "50", "--json"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(75));
+    // Emit a few more events.
+    qp(&db).args(["add", "another"]).assert().success();
+    qp(&db).args(["log", "T1", "note", "hello"]).assert().success();
+    let out = child.wait_with_output().unwrap();
+    let lines: Vec<String> = BufReader::new(&out.stdout[..])
+        .lines()
+        .filter_map(|l| l.ok())
+        .filter(|l| !l.is_empty())
+        .collect();
+    assert!(lines.len() >= 2, "expected >=2 event lines, got: {lines:?}");
+    for line in &lines {
+        let _v: serde_json::Value = serde_json::from_str(line)
+            .expect("each watch line must be valid JSON");
+    }
+}

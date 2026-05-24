@@ -58,7 +58,7 @@ enum Cmd {
     /// Block until a tag/state cohort drains
     Wait(cmd::wait::WaitArgs),
     /// Tail new events as they are recorded
-    Watch,
+    Watch(cmd::watch::WatchArgs),
 }
 
 fn main() {
@@ -99,6 +99,7 @@ fn real_main() -> anyhow::Result<()> {
         Cmd::List(a) => cmd::list::run(&db_path, a),
         Cmd::Wave(a) => cmd::wave::run(&db_path, a),
         Cmd::Wait(a) => cmd::wait::run(&db_path, a),
+        Cmd::Watch(a) => cmd::watch::run(&db_path, a),
         _ => { eprintln!("not implemented yet"); std::process::exit(1); }
     }
 }
