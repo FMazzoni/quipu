@@ -12,7 +12,7 @@ Independent work units that can be parallelized, with a critique step.
 - **Critique tasks:** tagged `kind:critique`, `--depends-on <reviewed-task>`.
 - **Non-blocking findings:** add `blocking:false` tag if the critique should not gate progress.
 - **Variants (branch-and-evaluate):** use `qp relation add <T> variant-of <root>`. After picking a winner, `qp cancel` losers.
-- **Decisions:** agents log autonomous decisions via `qp log T<n> decision "..." --as <agent> --auto`.
+- **Decisions:** agents log autonomous decisions via `qp log QP-<n> decision "..." --as <agent> --auto`.
 
 ## Recipe
 
@@ -37,11 +37,11 @@ qp claim  $t --as "wave-$WAVE-agent-$i"
 # ... do work ...
 qp complete $t --as "wave-$WAVE-agent-$i" --decision "result summary"
 
-# 4) Wait for the wave to drain (running → done/blocked)
+# 4) Wait for the wave to drain (running → done/pending)
 qp wait --tag wave:$WAVE --state running --empty --interval-ms 1000 --timeout-secs 1800
 
 # 5) Critique pass (spawn a critic; for each issue):
-#    qp add "fix: <finding>" --depends-on <reviewed-T> --tag wave:$WAVE --tag kind:critique
+#    qp add "fix: <finding>" --depends-on <reviewed-QP-N> --tag wave:$WAVE --tag kind:critique
 
 # 6) Promote-and-loop: critiques that exist are already tasks; if any are ready, re-enter step 2.
 while [ -n "$(qp list --tag wave:$WAVE --tag kind:critique --state ready --json | jq -r '.[].display_id')" ]; do
@@ -61,8 +61,8 @@ done
 ## Observability during a run
 
 - `qp watch` in a side terminal: live event stream.
-- `qp wave` (one-shot): grouped `{ready, running, blocked}`.
-- `qp timeline T<n>`: everything that happened to one task.
+- `qp wave` (one-shot): grouped `{ready, assigned, running, pending}`.
+- `qp timeline QP-<n>`: everything that happened to one task.
 - `qp decisions`: skim autonomous decisions after the wave.
 - `qp list --tag wave:$WAVE`: everything in this wave.
 
@@ -75,8 +75,34 @@ for v in a b c; do
   qp relation add $T variant-of $ROOT
 done
 # ...dispatch, evaluate...
-WINNER=T<x>; for L in $(qp relation list $ROOT --json | jq -r ".incoming[].from" | grep -v ^$WINNER$); do
+WINNER=QP-<x>; for L in $(qp relation list $ROOT --json | jq -r ".incoming[].from" | grep -v ^$WINNER$); do
   qp cancel $L --reason "superseded by $WINNER"
 done
 qp relation add $WINNER supersedes $ROOT
 ```
+
+### Blocker pattern (deps-as-blockers)
+
+When a running task hits an obstacle, the agent doesn't mark it `blocked` (that state no longer exists). Instead, it creates a blocker task as a new dep:
+
+    qp block QP-3 --as wave-7:agent-a --new "DB schema migration needed for QP-3"
+
+This is shorthand for:
+
+    qp add "DB schema migration needed for QP-3" --tag kind:blocker  # QP-9
+    qp depends QP-3 --on QP-9 --as wave-7:agent-a
+    qp abandon QP-3 --as wave-7:agent-a   # demoted to pending due to new dep
+
+The orchestrator sees QP-9 appear in `qp wave` under `ready`, dispatches an agent to resolve it. When QP-9 completes, `refresh_ready` automatically thaws QP-3 back to `ready`, and the orchestrator re-dispatches it.
+
+Exploratory planners use the same primitive *without* `qp block` — they just call `qp depends parent --on child` to push planning work down the DAG.
+
+### Harness attribution
+
+`agent_id` is a free-form string. The convention is `<harness>:<instance>`:
+
+- `claude-code:main`, `claude-code:wt-wave-7-agent-a` — Claude Code sessions
+- `cli:nando` — a human operator running `qp` directly
+- `cron:nightly-gc` — automated maintenance
+
+Pair this with a `harness:<name>` tag on any task the harness creates, so `qp list --tag harness:claude-code` filters cleanly. The substrate doesn't enforce this — it's an orchestrator convention.
