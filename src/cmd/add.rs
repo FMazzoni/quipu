@@ -7,6 +7,7 @@ use crate::{db, id};
 pub struct AddArgs {
     pub title: String,
     #[arg(long)] pub tier: Option<String>,
+    #[arg(long)] pub description: Option<String>,
     #[arg(long = "depends-on", value_name = "TASK_ID")]
     pub depends_on: Vec<String>,
     #[arg(long, value_name = "NAME")]
@@ -20,6 +21,8 @@ struct Created {
     title: String,
     state: String,
     tier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
     tags: Vec<String>,
 }
 impl std::fmt::Display for Created {
@@ -37,8 +40,8 @@ pub fn run(db_path: &std::path::Path, a: AddArgs) -> Result<()> {
     let created = db::with_tx(&mut conn, |tx| {
         let state = if dep_ids.is_empty() { db::STATE_READY } else { db::STATE_PENDING };
         tx.execute(
-            "INSERT INTO task(display_id, title, tier, state) VALUES ('', ?, ?, ?)",
-            rusqlite::params![a.title, a.tier, state])?;
+            "INSERT INTO task(display_id, title, tier, description, state) VALUES ('', ?, ?, ?, ?)",
+            rusqlite::params![a.title, a.tier, a.description, state])?;
         let row = tx.last_insert_rowid();
         let prefix = db::display_prefix(tx)?;
         let display = id::encode(row, &prefix);
@@ -68,7 +71,9 @@ pub fn run(db_path: &std::path::Path, a: AddArgs) -> Result<()> {
             Some(&serde_json::json!({"to": actual_state, "title": a.title})))?;
         Ok(Created {
             display_id: display, title: a.title.clone(),
-            state: actual_state, tier: a.tier.clone(), tags: a.tag.clone(),
+            state: actual_state, tier: a.tier.clone(),
+            description: a.description.clone(),
+            tags: a.tag.clone(),
         })
     })?;
 

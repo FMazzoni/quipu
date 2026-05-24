@@ -654,3 +654,85 @@ fn depends_demote_emits_state_change_event() {
     assert!(kinds.contains(&"dep_added"), "expected dep_added in {kinds:?}");
     assert!(kinds.contains(&"state_change"), "expected state_change in {kinds:?}");
 }
+
+#[test]
+fn edit_requires_at_least_one_field() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["edit", "QP-1"]).assert().failure().code(1);
+}
+
+#[test]
+fn edit_updates_title_and_emits_edit_event() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "old title"]).assert().success();
+    qp(&db).args(["edit", "QP-1", "--title", "new title"]).assert().success();
+    let out = qp(&db).args(["list", "--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+    assert_eq!(v.as_array().unwrap()[0]["title"], "new title");
+    let tl = qp(&db).args(["timeline", "QP-1", "--json"]).assert().success();
+    let tv: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&tl.get_output().stdout).unwrap().trim()).unwrap();
+    assert!(tv.as_array().unwrap().iter().any(|e| e["kind"] == "edit"),
+        "expected an `edit` event in timeline");
+}
+
+#[test]
+fn edit_no_op_skips_event() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["edit", "QP-1", "--title", "a"]).assert().success();
+    let tl = qp(&db).args(["timeline", "QP-1", "--json"]).assert().success();
+    let tv: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&tl.get_output().stdout).unwrap().trim()).unwrap();
+    assert!(!tv.as_array().unwrap().iter().any(|e| e["kind"] == "edit"),
+        "no-op edit should not emit event");
+}
+
+#[test]
+fn edit_can_clear_tier_with_empty_string() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a", "--tier", "p1"]).assert().success();
+    qp(&db).args(["edit", "QP-1", "--tier", ""]).assert().success();
+    let out = qp(&db).args(["list", "--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+    // tier becomes null/absent in JSON.
+    assert!(v.as_array().unwrap()[0]["tier"].is_null()
+        || v.as_array().unwrap()[0].get("tier").is_none());
+}
+
+#[test]
+fn add_with_description_stores_and_lists_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a", "--description", "long form scope notes"])
+        .assert().success();
+    let out = qp(&db).args(["list", "--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+    assert_eq!(v.as_array().unwrap()[0]["description"], "long form scope notes");
+}
+
+#[test]
+fn edit_during_running_state_allowed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["assign", "QP-1", "--to", "alice"]).assert().success();
+    qp(&db).args(["claim",  "QP-1", "--as", "alice"]).assert().success();
+    // Scope refinement mid-flight should be allowed.
+    qp(&db).args(["edit", "QP-1", "--description", "scope refined"])
+        .assert().success();
+}

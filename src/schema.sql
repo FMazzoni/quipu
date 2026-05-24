@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS task (
     display_id TEXT NOT NULL UNIQUE,
     title      TEXT NOT NULL,
     tier       TEXT,
+    description TEXT,
     state      TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );

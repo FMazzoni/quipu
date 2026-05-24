@@ -15,7 +15,7 @@ pub fn run(db_path: &std::path::Path, a: ListArgs) -> Result<()> {
     let conn = db::open(db_path)?;
     // Base task query with filters.
     let mut sql = String::from(
-        "SELECT t.id, t.display_id, t.title, t.state, t.tier,
+        "SELECT t.id, t.display_id, t.title, t.state, t.tier, t.description,
                 (SELECT a.agent_id FROM assignment a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1) AS agent
            FROM task t WHERE 1=1");
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -33,9 +33,9 @@ pub fn run(db_path: &std::path::Path, a: ListArgs) -> Result<()> {
     sql.push_str(" ORDER BY t.id ASC");
     let mut stmt = conn.prepare(&sql)?;
     let pref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-    let core: Vec<(i64, String, String, String, Option<String>, Option<String>)> =
+    let core: Vec<(i64, String, String, String, Option<String>, Option<String>, Option<String>)> =
         stmt.query_map(pref.as_slice(), |r| Ok((
-            r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?,
+            r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?,
         )))?.collect::<Result<_, _>>()?;
 
     // Bulk-fetch tags, blocked_by, last_event for the selected ids.
@@ -74,14 +74,18 @@ pub fn run(db_path: &std::path::Path, a: ListArgs) -> Result<()> {
     }
 
     let mut out = Vec::with_capacity(core.len());
-    for (id, did, title, state, tier, agent) in core {
-        out.push(serde_json::json!({
+    for (id, did, title, state, tier, description, agent) in core {
+        let mut obj = serde_json::json!({
             "id": id, "display_id": did, "title": title, "state": state, "tier": tier,
             "agent": agent,
             "tags": tags_by.remove(&id).unwrap_or_default(),
             "blocked_by": blockers_by.remove(&id).unwrap_or_default(),
             "last_event": last_event_by.remove(&id),
-        }));
+        });
+        if let Some(d) = description {
+            obj.as_object_mut().unwrap().insert("description".into(), serde_json::Value::String(d));
+        }
+        out.push(obj);
     }
     if a.json { println!("{}", serde_json::to_string(&out)?); }
     else {
