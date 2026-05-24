@@ -67,6 +67,8 @@ enum Cmd {
     InstallSkills(cmd::install_skills::InstallSkillsArgs),
     /// Add or remove a dep edge between tasks
     Depends(cmd::depends::DependsArgs),
+    /// Mutate task fields (title, tier, description)
+    Edit(cmd::edit::EditArgs),
 }
 
 fn main() {
@@ -110,6 +112,7 @@ fn real_main() -> anyhow::Result<()> {
         Cmd::Watch(a) => cmd::watch::run(&db_path, a),
         Cmd::InstallSkills(a) => cmd::install_skills::run(a),
         Cmd::Depends(a) => cmd::depends::run(&db_path, a),
+        Cmd::Edit(a) => cmd::edit::run(&db_path, a),
         #[allow(unreachable_patterns)]
         _ => { eprintln!("not implemented yet"); std::process::exit(1); }
     }
