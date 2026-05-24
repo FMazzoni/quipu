@@ -19,3 +19,4 @@ pub mod wait;
 pub mod watch;
 pub mod install_skills;
 pub mod depends;
+pub mod edit;
