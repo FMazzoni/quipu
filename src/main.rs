@@ -32,11 +32,11 @@ enum Cmd {
     /// Mark a running task blocked with a reason
     Block(cmd::block::BlockArgs),
     /// Cancel a task (any non-terminal state)
-    Cancel,
+    Cancel(cmd::cancel::CancelArgs),
     /// Agent self-release of a claim (running → ready)
-    Abandon,
+    Abandon(cmd::abandon::AbandonArgs),
     /// Orchestrator force-release of a claim
-    Reclaim,
+    Reclaim(cmd::reclaim::ReclaimArgs),
     /// Log a free-form event against a task
     Log,
     /// Manage tags on a task
@@ -86,6 +86,9 @@ fn real_main() -> anyhow::Result<()> {
         Cmd::Claim(a) => cmd::claim::run(&db_path, a),
         Cmd::Complete(a) => cmd::complete::run(&db_path, a),
         Cmd::Block(a) => cmd::block::run(&db_path, a),
+        Cmd::Cancel(a) => cmd::cancel::run(&db_path, a),
+        Cmd::Abandon(a) => cmd::abandon::run(&db_path, a),
+        Cmd::Reclaim(a) => cmd::reclaim::run(&db_path, a),
         _ => { eprintln!("not implemented yet"); std::process::exit(1); }
     }
 }
