@@ -64,6 +64,47 @@ fn qp(db: &std::path::Path) -> Command {
 }
 
 #[test]
+fn log_writes_event_with_kind_and_body() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "t"]).assert().success();
+    qp(&db).args(["log", "T1", "decision", "chose B", "--as", "x", "--auto"]).assert().success();
+    qp(&db).args(["log", "T1", "note", "edge case observed"]).assert().success();
+}
+
+#[test]
+fn tag_add_and_rm() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "t"]).assert().success();
+    qp(&db).args(["tag", "T1", "add", "kind:critique"]).assert().success();
+    qp(&db).args(["tag", "T1", "rm",  "kind:critique"]).assert().success();
+    // Re-removing a tag that doesn't exist should be idempotent (success).
+    qp(&db).args(["tag", "T1", "rm",  "kind:critique"]).assert().success();
+}
+
+#[test]
+fn relation_add_list_rm() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "root"]).assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["add", "b"]).assert().success();
+    qp(&db).args(["relation", "add", "T2", "variant-of", "T1"]).assert().success();
+    qp(&db).args(["relation", "add", "T3", "variant-of", "T1"]).assert().success();
+    let out = qp(&db).args(["relation", "list", "T1", "--json"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+    // incoming variant-of edges from T2, T3.
+    let incoming = v["incoming"].as_array().unwrap();
+    assert_eq!(incoming.len(), 2);
+    qp(&db).args(["relation", "rm", "T2", "variant-of", "T1"]).assert().success();
+}
+
+#[test]
 fn init_creates_db_and_stamps_project_uuid() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");

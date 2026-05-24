@@ -6,3 +6,6 @@ pub mod block;
 pub mod cancel;
 pub mod abandon;
 pub mod reclaim;
+pub mod log;
+pub mod tag;
+pub mod relation;

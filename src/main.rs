@@ -38,11 +38,11 @@ enum Cmd {
     /// Orchestrator force-release of a claim
     Reclaim(cmd::reclaim::ReclaimArgs),
     /// Log a free-form event against a task
-    Log,
+    Log(cmd::log::LogArgs),
     /// Manage tags on a task
-    Tag,
+    Tag(cmd::tag::TagArgs),
     /// Manage relations between tasks
-    Relation,
+    Relation(cmd::relation::RelationArgs),
     /// Render the task DAG
     Tree,
     /// Show the event timeline (per-task or global)
@@ -89,6 +89,9 @@ fn real_main() -> anyhow::Result<()> {
         Cmd::Cancel(a) => cmd::cancel::run(&db_path, a),
         Cmd::Abandon(a) => cmd::abandon::run(&db_path, a),
         Cmd::Reclaim(a) => cmd::reclaim::run(&db_path, a),
+        Cmd::Log(a) => cmd::log::run(&db_path, a),
+        Cmd::Tag(a) => cmd::tag::run(&db_path, a),
+        Cmd::Relation(a) => cmd::relation::run(&db_path, a),
         _ => { eprintln!("not implemented yet"); std::process::exit(1); }
     }
 }
