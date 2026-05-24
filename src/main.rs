@@ -44,15 +44,15 @@ enum Cmd {
     /// Manage relations between tasks
     Relation(cmd::relation::RelationArgs),
     /// Render the task DAG
-    Tree,
+    Tree(cmd::tree::TreeArgs),
     /// Show the event timeline (per-task or global)
     Timeline(cmd::timeline::TimelineArgs),
     /// Show the current wave: ready / running / blocked groups
     Wave,
     /// Snapshot of state counts
-    Status,
+    Status(cmd::status::StatusArgs),
     /// List tasks with filters
-    List,
+    List(cmd::list::ListArgs),
     /// Decision events (filter alias over timeline)
     Decisions(cmd::decisions::DecisionsArgs),
     /// Block until a tag/state cohort drains
@@ -94,6 +94,9 @@ fn real_main() -> anyhow::Result<()> {
         Cmd::Relation(a) => cmd::relation::run(&db_path, a),
         Cmd::Timeline(a) => cmd::timeline::run(&db_path, a),
         Cmd::Decisions(a) => cmd::decisions::run(&db_path, a),
+        Cmd::Tree(a) => cmd::tree::run(&db_path, a),
+        Cmd::Status(a) => cmd::status::run(&db_path, a),
+        Cmd::List(a) => cmd::list::run(&db_path, a),
         _ => { eprintln!("not implemented yet"); std::process::exit(1); }
     }
 }
