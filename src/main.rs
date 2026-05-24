@@ -1,6 +1,7 @@
 //! `qp` — quipu CLI entry point. Parses subcommands and dispatches to `src/cmd/<name>.rs`.
 //! Exit codes: 0 success | 1 generic error | 2 constraint violation | 3 wait timeout.
 
+mod cmd;
 mod db;
 mod id;
 mod time;
@@ -21,7 +22,7 @@ enum Cmd {
     /// Initialize a store in the current directory
     Init,
     /// Add a new task
-    Add,
+    Add(cmd::add::AddArgs),
     /// Assign a ready task to an agent (orchestrator only)
     Assign,
     /// Claim an assigned task as the running agent
@@ -80,6 +81,7 @@ fn real_main() -> anyhow::Result<()> {
     db::warn_on_project_mismatch(&cli.db)?;
     match cli.cmd {
         Cmd::Init => { let _ = db::open(&db_path)?; println!("initialized at {}", db_path.display()); Ok(()) }
+        Cmd::Add(a) => cmd::add::run(&db_path, a),
         _ => { eprintln!("not implemented yet"); std::process::exit(1); }
     }
 }
