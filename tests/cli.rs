@@ -1181,3 +1181,41 @@ fn list_with_description_includes_description_lines() {
     assert!(s.contains("alpha"));
     assert!(s.contains("second task notes"));
 }
+
+#[test]
+fn report_json_emits_tasks_events_deps_shape() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["add", "b", "--depends-on", "QP-1"]).assert().success();
+    qp(&db).args(["log", "QP-1", "decision", "ok", "--auto"]).assert().success();
+    let out = qp(&db).args(["report", "--json"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+    assert!(v["tasks"].is_array());
+    assert!(v["events"].is_array());
+    assert!(v["deps"].is_array());
+    assert_eq!(v["tasks"].as_array().unwrap().len(), 2);
+    // The dep we added
+    let deps = v["deps"].as_array().unwrap();
+    assert!(deps.iter().any(|d| d["from"] == "QP-2" && d["to"] == "QP-1"));
+}
+
+#[test]
+fn report_json_wave_scope_filters_subtree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "root"]).assert().success();
+    qp(&db).args(["add", "child"]).assert().success();
+    qp(&db).args(["add", "unrelated"]).assert().success();
+    qp(&db).args(["depends", "QP-1", "--on", "QP-2"]).assert().success();
+    let out = qp(&db).args(["report", "--json", "--wave", "QP-1"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+    let ids: Vec<&str> = v["tasks"].as_array().unwrap().iter()
+        .map(|t| t["display_id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&"QP-1") && ids.contains(&"QP-2"));
+    assert!(!ids.contains(&"QP-3"));
+}

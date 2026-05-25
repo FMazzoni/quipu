@@ -34,11 +34,14 @@ pub struct ReportArgs {
     #[arg(long)]
     pub wave: Option<String>,
     /// Emit Markdown (default).
-    #[arg(long, conflicts_with = "html")]
+    #[arg(long, conflicts_with = "html", conflicts_with = "json")]
     pub markdown: bool,
     /// Emit a self-contained styled HTML document.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "json")]
     pub html: bool,
+    /// Emit a JSON payload for the board (tasks + events + deps).
+    #[arg(long)]
+    pub json: bool,
     /// Write to this path instead of stdout.
     #[arg(long)]
     pub output: Option<std::path::PathBuf>,
@@ -57,6 +60,23 @@ pub fn run(db_path: &std::path::Path, a: ReportArgs) -> Result<()> {
     let conn = db::open(db_path)?;
     let since_iso = a.since.as_deref().map(parse_since).transpose()?;
     let subtree = a.wave.as_deref().map(|t| resolve_subtree(&conn, t)).transpose()?;
+
+    // JSON mode: emit board payload.
+    if a.json {
+        if a.ticket.is_some() || a.all_tickets {
+            anyhow::bail!("--json is not compatible with --ticket or --all-tickets");
+        }
+        let payload = collect_json(&conn, since_iso.as_deref(), subtree.as_ref())?;
+        let body = serde_json::to_string(&payload)?;
+        if let Some(path) = &a.output {
+            let mut f = std::fs::File::create(path)?;
+            f.write_all(body.as_bytes())?;
+            f.write_all(b"\n")?;
+        } else {
+            println!("{body}");
+        }
+        return Ok(());
+    }
 
     // Per-ticket modes.
     if let Some(tref) = a.ticket.as_deref() {
@@ -362,6 +382,168 @@ fn render_ticket_html(t: &TicketDetail) -> String {
     o.push_str("<div class=\"footer\">qp report --ticket</div>\n");
     o.push_str("</div></body></html>\n");
     o
+}
+
+// ---------- JSON board payload ----------
+
+fn collect_json(
+    conn: &rusqlite::Connection,
+    since_iso: Option<&str>,
+    subtree: Option<&HashSet<i64>>,
+) -> Result<Value> {
+    // Tasks: same shape as `qp list --json`.
+    let sql = "SELECT t.id, t.display_id, t.title, t.state, t.tier, t.description,
+                (SELECT a.agent_id FROM assignment a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1) AS agent
+           FROM task t ORDER BY t.id ASC";
+    // If subtree-scoped, we filter below (in Rust, not SQL — keeps query simple).
+    let mut stmt = conn.prepare(sql)?;
+    let core: Vec<(i64, String, String, String, Option<String>, Option<String>, Option<String>)> =
+        stmt.query_map([], |r| Ok((
+            r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?,
+        )))?.collect::<Result<_, _>>()?;
+
+    // Filter by subtree if scoped.
+    let core: Vec<_> = match subtree {
+        Some(set) => core.into_iter().filter(|(id, ..)| set.contains(id)).collect(),
+        None => core,
+    };
+
+    let task_ids: Vec<i64> = core.iter().map(|r| r.0).collect();
+    let mut tags_by: std::collections::HashMap<i64, Vec<String>> = std::collections::HashMap::new();
+    let mut blockers_by: std::collections::HashMap<i64, Vec<String>> = std::collections::HashMap::new();
+    let mut last_event_by: std::collections::HashMap<i64, Value> = std::collections::HashMap::new();
+
+    if !task_ids.is_empty() {
+        let placeholders = std::iter::repeat("?").take(task_ids.len()).collect::<Vec<_>>().join(",");
+        let pref: Vec<&dyn rusqlite::ToSql> = task_ids.iter().map(|i| i as &dyn rusqlite::ToSql).collect();
+
+        let q = format!("SELECT task_id, name FROM tag WHERE task_id IN ({placeholders})");
+        let mut s = conn.prepare(&q)?;
+        for r in s.query_map(pref.as_slice(), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))? {
+            let (t, n) = r?; tags_by.entry(t).or_default().push(n);
+        }
+
+        let q = format!(
+            "SELECT d.task_id, t2.display_id FROM dep d JOIN task t2 ON t2.id = d.depends_on_task_id
+              WHERE d.task_id IN ({placeholders}) AND t2.state NOT IN ('done','cancelled')");
+        let mut s = conn.prepare(&q)?;
+        for r in s.query_map(pref.as_slice(), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))? {
+            let (t, d) = r?; blockers_by.entry(t).or_default().push(d);
+        }
+
+        let q = format!(
+            "SELECT task_id, kind, ts, payload FROM event
+              WHERE id IN (SELECT MAX(id) FROM event WHERE task_id IN ({placeholders}) GROUP BY task_id)");
+        let mut s = conn.prepare(&q)?;
+        for r in s.query_map(pref.as_slice(), |r| {
+            let payload: Option<String> = r.get(3)?;
+            let payload_v: Value = payload.as_deref()
+                .map(serde_json::from_str).transpose().ok().flatten().unwrap_or(Value::Null);
+            Ok((r.get::<_, i64>(0)?, serde_json::json!({
+                "kind": r.get::<_, String>(1)?, "ts": r.get::<_, String>(2)?, "payload": payload_v
+            })))
+        })? { let (t, v) = r?; last_event_by.insert(t, v); }
+    }
+
+    let mut tasks: Vec<Value> = Vec::with_capacity(core.len());
+    for (id, did, title, state, tier, description, agent) in core {
+        let mut obj = serde_json::json!({
+            "id": id, "display_id": did, "title": title, "state": state, "tier": tier,
+            "agent": agent,
+            "tags": tags_by.remove(&id).unwrap_or_default(),
+            "blocked_by": blockers_by.remove(&id).unwrap_or_default(),
+            "last_event": last_event_by.remove(&id),
+        });
+        if let Some(d) = description {
+            obj.as_object_mut().unwrap().insert("description".into(), Value::String(d));
+        }
+        tasks.push(obj);
+    }
+
+    // Events: same shape as `qp timeline --json`, scoped + capped at 200.
+    let mut evt_sql = String::from(
+        "SELECT e.id, t.display_id, e.ts, e.kind, e.agent_id, e.payload
+           FROM event e LEFT JOIN task t ON t.id = e.task_id
+          WHERE 1=1");
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(s) = since_iso {
+        evt_sql.push_str(&format!(" AND e.ts >= ?{}", params.len() + 1));
+        params.push(Box::new(s.to_string()));
+    }
+    evt_sql.push_str(" ORDER BY e.id ASC");
+    let mut stmt = conn.prepare(&evt_sql)?;
+    let pref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
+    let evt_rows: Vec<(i64, Option<String>, String, String, Option<String>, Option<String>)> =
+        stmt.query_map(pref.as_slice(), |r| Ok((
+            r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?,
+        )))?.collect::<Result<_, _>>()?;
+
+    let subtree_task_ids: Option<HashSet<i64>> = subtree.map(|set| {
+        // We need task rowids mapped from display_ids — but we already have task_ids vec.
+        // Reuse subtree directly (it's already task rowids).
+        set.clone()
+    });
+
+    // Subtree scoping for events requires filtering by task rowid; but EventRow only has display_id.
+    // We need a lookup from display_id to rowid for subtree filtering.
+    // Build it only if needed.
+    let did_to_id: Option<std::collections::HashMap<String, i64>> = if subtree.is_some() {
+        let mut m = std::collections::HashMap::new();
+        let mut s = conn.prepare("SELECT id, display_id FROM task")?;
+        for r in s.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))? {
+            let (id, did) = r?;
+            m.insert(did, id);
+        }
+        Some(m)
+    } else { None };
+
+    let mut events: Vec<Value> = Vec::new();
+    for (eid, did, ts, kind, agent, payload) in evt_rows {
+        // Subtree scope: skip events whose task isn't in the subtree.
+        if let (Some(ref map), Some(ref set)) = (&did_to_id, &subtree_task_ids) {
+            match did.as_ref().and_then(|d| map.get(d)) {
+                Some(tid) if set.contains(tid) => {}
+                _ => continue,
+            }
+        }
+        let payload_v: Value = payload.as_deref()
+            .map(serde_json::from_str).transpose().ok().flatten().unwrap_or(Value::Null);
+        events.push(serde_json::json!({
+            "id": eid,
+            "task": did,
+            "ts": ts,
+            "kind": kind,
+            "agent_id": agent,
+            "payload": payload_v,
+        }));
+        if events.len() >= 200 { break; }
+    }
+
+    // Deps: all dep edges in scope (both tasks must be in subtree if scoped).
+    let mut dep_stmt = conn.prepare(
+        "SELECT tf.display_id, tt.display_id
+           FROM dep d
+           JOIN task tf ON tf.id = d.task_id
+           JOIN task tt ON tt.id = d.depends_on_task_id
+          ORDER BY d.task_id ASC")?;
+    let deps_raw: Vec<(String, String)> = dep_stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<Result<_, _>>()?;
+
+    let task_dids: std::collections::HashSet<&str> = tasks.iter()
+        .filter_map(|t| t["display_id"].as_str())
+        .collect();
+
+    let deps: Vec<Value> = deps_raw.into_iter()
+        .filter(|(from, to)| task_dids.contains(from.as_str()) && task_dids.contains(to.as_str()))
+        .map(|(from, to)| serde_json::json!({"from": from, "to": to}))
+        .collect();
+
+    Ok(serde_json::json!({
+        "tasks": tasks,
+        "events": events,
+        "deps": deps,
+    }))
 }
 
 // ---------- duration parsing ----------
