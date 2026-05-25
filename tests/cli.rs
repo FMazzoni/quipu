@@ -51,7 +51,7 @@ fn help_lists_core_commands() {
     for cmd in [
         "init","add","assign","claim","complete","block","cancel","abandon","reclaim",
         "log","tag","relation","tree","timeline","wave","status","list",
-        "decisions","wait","watch","install-skills","depends","edit",
+        "decisions","wait","watch","install-skills","depends","edit","report",
     ] {
         assert!(out.contains(cmd), "help missing `{cmd}`:\n{out}");
     }
@@ -1049,4 +1049,53 @@ fn tree_with_task_arg_filters_to_subtree() {
         "subtree missing root/deps:\n{s}");
     assert!(!s.contains("unrelated-1") && !s.contains("unrelated-2") && !s.contains("unrelated-3"),
         "subtree leaked unrelated tasks:\n{s}");
+}
+
+#[test]
+fn report_markdown_includes_all_sections() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["add", "b", "--tag", "kind:bug"]).assert().success();
+    qp(&db).args(["assign", "QP-1", "--to", "x"]).assert().success();
+    qp(&db).args(["claim",  "QP-1", "--as", "x"]).assert().success();
+    qp(&db).args(["log",    "QP-1", "decision", "shipping it", "--auto"]).assert().success();
+    let out = qp(&db).args(["report"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("# "));                // header
+    assert!(s.contains("State snapshot") || s.contains("State"));
+    assert!(s.contains("In flight"));
+    assert!(s.contains("Friction") || s.contains("friction"));
+    assert!(s.contains("Open bugs") || s.contains("bug"));
+    assert!(s.contains("shipping it"));        // friction note text
+    assert!(s.contains("QP-1"));
+}
+
+#[test]
+fn report_html_returns_html_with_styles() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    let out = qp(&db).args(["report", "--html"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.starts_with("<!DOCTYPE") || s.starts_with("<!doctype"));
+    assert!(s.contains("<style>"));
+    assert!(s.contains("QP-1"));
+}
+
+#[test]
+fn report_wave_scope_filters_to_subtree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "root"]).assert().success();
+    qp(&db).args(["add", "child"]).assert().success();
+    qp(&db).args(["add", "unrelated"]).assert().success();
+    qp(&db).args(["depends", "QP-1", "--on", "QP-2"]).assert().success();
+    let out = qp(&db).args(["report", "--wave", "QP-1"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("QP-1") && s.contains("QP-2"));
+    assert!(!s.contains("QP-3"), "should not contain unrelated task");
 }

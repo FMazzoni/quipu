@@ -20,3 +20,4 @@ pub mod watch;
 pub mod install_skills;
 pub mod depends;
 pub mod edit;
+pub mod report;
