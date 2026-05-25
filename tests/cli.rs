@@ -1100,12 +1100,6 @@ fn report_wave_scope_filters_to_subtree() {
     assert!(!s.contains("QP-3"), "should not contain unrelated task");
 }
 
-    // refresh=0 means no meta tag
-    qp(&db).args(["html", "--output", out.to_str().unwrap(), "--refresh", "0"]).assert().success();
-    let s2 = std::fs::read_to_string(&out).unwrap();
-    assert!(!s2.contains("http-equiv=\"refresh\""));
-}
-
 #[test]
 fn show_renders_title_description_and_events() {
     let tmp = tempfile::tempdir().unwrap();
