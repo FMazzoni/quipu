@@ -5,6 +5,7 @@ use crate::db;
 
 #[derive(Args, Debug)]
 pub struct ListArgs {
+    /// Glob pattern (e.g. claude-code:*)
     #[arg(long = "assigned-to")] pub assigned_to: Option<String>,
     #[arg(long = "state")]       pub state: Option<String>,
     #[arg(long)]                 pub tag: Vec<String>,
@@ -23,7 +24,7 @@ pub fn run(db_path: &std::path::Path, a: ListArgs) -> Result<()> {
         sql.push_str(" AND t.state = ?"); params.push(Box::new(s.clone()));
     }
     if let Some(who) = &a.assigned_to {
-        sql.push_str(" AND (SELECT a.agent_id FROM assignment a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1) = ?");
+        sql.push_str(" AND (SELECT a.agent_id FROM assignment a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1) GLOB ?");
         params.push(Box::new(who.clone()));
     }
     for tag in &a.tag {
