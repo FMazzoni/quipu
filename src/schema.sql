@@ -11,6 +11,10 @@ CREATE TABLE IF NOT EXISTS meta (
 -- stamped on init: meta(key='schema_version', value='1')
 -- stamped on init: meta(key='display_prefix', value='QP' or user-supplied)
 
+CREATE TABLE IF NOT EXISTS default_tag (
+    name TEXT PRIMARY KEY
+);
+
 CREATE TABLE IF NOT EXISTS task (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     display_id TEXT NOT NULL UNIQUE,

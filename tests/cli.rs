@@ -869,3 +869,43 @@ fn log_explicit_as_always_wins() {
         .find(|e| e["kind"] == "note").expect("note event present");
     assert_eq!(note["agent_id"], "orch");
 }
+
+#[test]
+fn init_default_tag_is_applied_to_subsequent_adds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).args(["init", "--default-tag", "harness:claude-code"]).assert().success();
+    let out = qp(&db).args(["add", "t", "--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+    let tags: Vec<&str> = v["tags"].as_array().unwrap()
+        .iter().map(|t| t.as_str().unwrap()).collect();
+    assert!(tags.contains(&"harness:claude-code"));
+}
+
+#[test]
+fn init_default_tag_is_additive_across_reinits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).args(["init", "--default-tag", "a"]).assert().success();
+    qp(&db).args(["init", "--default-tag", "b"]).assert().success();
+    let out = qp(&db).args(["add", "t", "--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+    let tags: Vec<&str> = v["tags"].as_array().unwrap()
+        .iter().map(|t| t.as_str().unwrap()).collect();
+    assert!(tags.contains(&"a") && tags.contains(&"b"));
+}
+
+#[test]
+fn default_tag_dedupes_against_explicit_tag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).args(["init", "--default-tag", "foo"]).assert().success();
+    let out = qp(&db).args(["add", "t", "--tag", "foo", "--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+    let tags: Vec<&str> = v["tags"].as_array().unwrap()
+        .iter().map(|t| t.as_str().unwrap()).collect();
+    assert_eq!(tags.iter().filter(|t| **t == "foo").count(), 1);
+}
