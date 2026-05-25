@@ -815,3 +815,57 @@ fn resolve_path_finds_store_from_worktree() {
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(s.contains("from-worktree"), "task should be in main store: {s}");
 }
+
+#[test]
+fn log_auto_attributes_to_running_assignee() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["assign", "QP-1", "--to", "alice"]).assert().success();
+    qp(&db).args(["claim",  "QP-1", "--as", "alice"]).assert().success();
+    // No --as — should still attribute to alice because QP-1 is running.
+    qp(&db).args(["log", "QP-1", "note", "from inside the run"]).assert().success();
+    let out = qp(&db).args(["timeline", "QP-1", "--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+    let note = v.as_array().unwrap().iter()
+        .find(|e| e["kind"] == "note").expect("note event present");
+    assert_eq!(note["agent_id"], "alice", "log should auto-attribute to running assignee");
+}
+
+#[test]
+fn log_does_not_auto_attribute_when_not_running() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    // Task is ready, never assigned/claimed.
+    qp(&db).args(["log", "QP-1", "note", "from the void"]).assert().success();
+    let out = qp(&db).args(["timeline", "QP-1", "--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+    let note = v.as_array().unwrap().iter()
+        .find(|e| e["kind"] == "note").expect("note event present");
+    // agent_id should be absent or null.
+    assert!(note.get("agent_id").map_or(true, |v| v.is_null()),
+        "log should NOT auto-attribute on non-running task; got {:?}", note["agent_id"]);
+}
+
+#[test]
+fn log_explicit_as_always_wins() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["assign", "QP-1", "--to", "alice"]).assert().success();
+    qp(&db).args(["claim",  "QP-1", "--as", "alice"]).assert().success();
+    // Explicit --as overrides the auto default.
+    qp(&db).args(["log", "QP-1", "note", "orchestrator log", "--as", "orch"]).assert().success();
+    let out = qp(&db).args(["timeline", "QP-1", "--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+    let note = v.as_array().unwrap().iter()
+        .find(|e| e["kind"] == "note").expect("note event present");
+    assert_eq!(note["agent_id"], "orch");
+}
