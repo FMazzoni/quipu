@@ -35,7 +35,7 @@ See: commits `5f88113` (Pattern C) and `2806c30` (Pattern D) for shipped example
 ## Phase 1 — Plan
 
 1. **Research subagent** (sonnet/haiku). Have it read relevant files + existing patterns and report: file paths, line ranges, key types/functions, integration points.
-2. **Write the plan yourself** at `docs/superpowers/plans/YYYY-MM-DD-<feature>.md`. The plan must contain **actual code** in every step — no "TBD", no "implement X appropriately".
+2. **Write the plan yourself** at `$QUIPU_VAULT/plans/YYYY-MM-DD-HHMMSS-<feature>.md`. The plan must contain **actual code** in every step — no "TBD", no "implement X appropriately".
 
 Plan structure:
 
@@ -192,7 +192,7 @@ Dispatch ≤4 critic agents in parallel, one lens each. Reference `.claude/skill
 
 ## Phase 6 — Fix
 
-**Auto mode:** act only on Critical findings. Important/Minor/Observation get filed to `docs/bugs/YYYY-MM-DD-<short>.md`.
+**Auto mode:** act only on Critical findings. Important/Minor/Observation get filed as qp tickets: `qp add "<short>" --tag kind:bug --tag harness:claude-code --description "<finding body>"`.
 
 **Interactive mode:** triage all findings with the user, then dispatch fix subagents in parallel (one worktree per topic-affinity group via `wt switch -c fix-<slug>`). After merge, mark addressed findings `**Status: FIXED in <sha>**` in the critic file.
 
@@ -203,9 +203,8 @@ Dispatch ≤4 critic agents in parallel, one lens each. Reference `.claude/skill
    cargo test 2>&1 | grep "^test result"
    ```
 2. Leanness gates: stripped-binary size, `qp --version` cold start, RSS. Confirm under budget (CLAUDE.md).
-3. Update `docs/TODO.md` — check off completed items.
-4. Update `docs/DECISIONS.md` if architectural decisions were made.
-5. Update `docs/HANDOFF.md` — append session entry (built / decisions / critic count / next).
-6. Vault notes for any new decision: `$QUIPU_VAULT/decisions/`.
-7. File deferred bugs to `docs/bugs/`.
-8. Report to user: commit range, test count, deferred items.
+3. Mark completed qp tickets `done` (`qp complete QP-N`).
+4. Vault notes for any new decision: `$QUIPU_VAULT/decisions/<slug>.md`.
+5. Append a session entry at `$QUIPU_VAULT/sessions/YYYY-MM-DD-HHMMSS-<slug>.md` (built / decisions / critic count / next).
+6. File deferred bugs as qp tickets (`qp add ... --tag kind:bug`).
+7. Report to user: commit range, test count, deferred items.
