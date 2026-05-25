@@ -909,3 +909,42 @@ fn default_tag_dedupes_against_explicit_tag() {
         .iter().map(|t| t.as_str().unwrap()).collect();
     assert_eq!(tags.iter().filter(|t| **t == "foo").count(), 1);
 }
+
+#[test]
+fn list_assigned_to_supports_glob_pattern() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["add", "b"]).assert().success();
+    qp(&db).args(["add", "c"]).assert().success();
+    qp(&db).args(["assign", "QP-1", "--to", "claude-code:agent-x"]).assert().success();
+    qp(&db).args(["assign", "QP-2", "--to", "claude-code:agent-y"]).assert().success();
+    qp(&db).args(["assign", "QP-3", "--to", "cli:nando"]).assert().success();
+    let out = qp(&db).args(["list", "--assigned-to", "claude-code:*", "--json"])
+        .assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+    let ids: Vec<&str> = v.as_array().unwrap()
+        .iter().map(|t| t["display_id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&"QP-1") && ids.contains(&"QP-2"));
+    assert!(!ids.contains(&"QP-3"));
+}
+
+#[test]
+fn list_assigned_to_exact_match_still_works() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["add", "b"]).assert().success();
+    qp(&db).args(["assign", "QP-1", "--to", "alice"]).assert().success();
+    qp(&db).args(["assign", "QP-2", "--to", "alicia"]).assert().success();
+    let out = qp(&db).args(["list", "--assigned-to", "alice", "--json"])
+        .assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+    let ids: Vec<&str> = v.as_array().unwrap()
+        .iter().map(|t| t["display_id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["QP-1"]);
+}
