@@ -153,7 +153,7 @@ cd there first. All commands and paths are relative to it.
 
 ```bash
 wt merge -C <worktree-path> -y && \
-  ./target/release/qp tag QP-<N> add commit:$(git rev-parse HEAD)
+  ./target/release/qp tag QP-<N> add commit:$(git rev-parse --short=6 HEAD)
 ```
 
 Chain the commit-tag in the same Bash call so it can't be forgotten. The tag uses the namespace `commit:<sha>` so reverse lookup is just `qp list --tag commit:<sha>` — no new commands needed.
