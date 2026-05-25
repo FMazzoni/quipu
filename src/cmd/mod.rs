@@ -21,3 +21,6 @@ pub mod install_skills;
 pub mod depends;
 pub mod edit;
 pub mod report;
+pub mod html;
+mod html_layout;
+mod html_render;
