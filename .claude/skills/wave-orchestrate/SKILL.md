@@ -152,8 +152,13 @@ cd there first. All commands and paths are relative to it.
 ## Phase 4 — Merge
 
 ```bash
-wt merge -C <worktree-path> -y
+wt merge -C <worktree-path> -y && \
+  ./target/release/qp tag QP-<N> add commit:$(git rev-parse HEAD)
 ```
+
+Chain the commit-tag in the same Bash call so it can't be forgotten. The tag uses the namespace `commit:<sha>` so reverse lookup is just `qp list --tag commit:<sha>` — no new commands needed.
+
+For coordinator-direct commits (justfile edits, reactive fixes, doc-only work) that bypass the wave-orchestrate flow: still ticket them. Open a `qp add` retroactively if needed, then `qp tag` with the SHA. The system-of-record stays complete.
 
 Merge order: foundational slice first (data model, types); feature slices that build on it second. If slice B references slice A's APIs, merge A first.
 
