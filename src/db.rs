@@ -35,6 +35,7 @@ impl State {
         }
     }
 
+    #[allow(dead_code)] // paired with as_str; used in tests
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "pending"   => Some(Self::Pending),
@@ -61,13 +62,16 @@ impl rusqlite::ToSql for State {
 }
 
 // Legacy `&str` constants — kept as thin aliases over `State::*.as_str()` so
-// existing call sites (and the Task 4–7 plan blocks) keep working. New code
-// should prefer the typed `State` variant.
+// existing call sites keep working. New code should prefer the typed `State` variant.
 pub const STATE_PENDING:   &str = State::Pending.as_str();
 pub const STATE_READY:     &str = State::Ready.as_str();
+#[allow(dead_code)] // kept for family consistency; STATE_PENDING/READY used in add.rs
 pub const STATE_ASSIGNED:  &str = State::Assigned.as_str();
+#[allow(dead_code)] // kept for family consistency
 pub const STATE_RUNNING:   &str = State::Running.as_str();
+#[allow(dead_code)] // kept for family consistency
 pub const STATE_DONE:      &str = State::Done.as_str();
+#[allow(dead_code)] // kept for family consistency
 pub const STATE_CANCELLED: &str = State::Cancelled.as_str();
 
 /// Typed errors. `main` matches on the variant to pick an exit code.
@@ -88,26 +92,8 @@ pub fn constraint(msg: impl Into<String>) -> anyhow::Error {
     anyhow::Error::from(QuipuError::Constraint(msg.into()))
 }
 
-pub fn not_found(msg: impl Into<String>) -> anyhow::Error {
-    anyhow::Error::from(QuipuError::NotFound(msg.into()))
-}
-
 pub fn invalid_input(msg: impl Into<String>) -> anyhow::Error {
     anyhow::Error::from(QuipuError::InvalidInput(msg.into()))
-}
-
-/// Converts rusqlite errors into the domain error type, preserving constraint
-/// semantics so `main` can map them to exit code 2. `SQLITE_CONSTRAINT` (UNIQUE,
-/// FK, CHECK, NOT NULL) becomes `QuipuError::Constraint(extended-message)`;
-/// everything else passes through opaquely as `anyhow::Error::new(e)`.
-/// Used as `.map_err(map_sqlite)`.
-pub fn map_sqlite(e: rusqlite::Error) -> anyhow::Error {
-    if let rusqlite::Error::SqliteFailure(ref ferr, _) = e {
-        if ferr.code == rusqlite::ErrorCode::ConstraintViolation {
-            return anyhow::Error::from(QuipuError::Constraint(e.to_string()));
-        }
-    }
-    anyhow::Error::new(e)
 }
 
 pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
@@ -254,11 +240,6 @@ pub fn with_tx<T>(conn: &mut Connection, f: impl FnOnce(&Transaction) -> Result<
         Ok(v) => { tx.commit()?; Ok(v) }
         Err(e) => { let _ = tx.rollback(); Err(e) }
     }
-}
-
-pub fn host() -> String {
-    std::env::var("HOST").or_else(|_| std::env::var("HOSTNAME"))
-        .unwrap_or_else(|_| "unknown".into())
 }
 
 pub fn insert_event(
