@@ -80,7 +80,6 @@ fn main() {
         let code = if let Some(err) = e.downcast_ref::<db::QuipuError>() {
             match err {
                 db::QuipuError::Constraint(_)  => 2,
-                db::QuipuError::NotFound(_)    => 1,
                 db::QuipuError::InvalidInput(_)=> 1,
             }
         } else { 1 };

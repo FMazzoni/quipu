@@ -80,9 +80,6 @@ pub enum QuipuError {
     /// Constraint violation (wrong state, wrong assignee, double-assign, etc.) — exit 2.
     #[error("{0}")]
     Constraint(String),
-    /// Referenced row not found — exit 1, but distinct error message.
-    #[error("not found: {0}")]
-    NotFound(String),
     /// Invalid CLI input — exit 1.
     #[error("invalid input: {0}")]
     InvalidInput(String),
