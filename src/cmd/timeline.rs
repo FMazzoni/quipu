@@ -53,13 +53,38 @@ pub fn run(db_path: &std::path::Path, a: TimelineArgs) -> Result<()> {
     if a.json { println!("{}", serde_json::to_string(&collected)?); }
     else {
         for e in &collected {
-            println!("{}\t{}\t{}\t{}\t{}",
+            let kind = e["kind"].as_str().unwrap_or("");
+            let body = summarize_payload(kind, &e["payload"]);
+            println!("{}\t{}\t{}\t{}",
                 e["ts"].as_str().unwrap_or(""),
-                e["task"].as_str().unwrap_or("-"),
-                e["kind"].as_str().unwrap_or(""),
+                kind,
                 e["agent_id"].as_str().unwrap_or("-"),
-                e["payload"]);
+                body);
         }
     }
     Ok(())
+}
+
+fn summarize_payload(kind: &str, p: &Value) -> String {
+    match kind {
+        "state_change" => p["to"].as_str().unwrap_or("").to_string(),
+        "decision" => {
+            let text = p["text"].as_str().unwrap_or("");
+            if p["auto"].as_bool().unwrap_or(false) {
+                format!("[auto] {text}")
+            } else { text.to_string() }
+        }
+        "dep_added" | "dep_removed" => p["on"].as_str().unwrap_or("").to_string(),
+        "edit" => {
+            if let Some(obj) = p["changes"].as_object() {
+                obj.keys().cloned().collect::<Vec<_>>().join(",")
+            } else { String::new() }
+        }
+        "blocker" => p["title"].as_str().unwrap_or("").to_string(),
+        "tag_added" | "tag_removed" => p["name"].as_str().unwrap_or("").to_string(),
+        _ => {
+            let s = serde_json::to_string(p).unwrap_or_default();
+            if s.len() > 80 { format!("{}...", &s[..80]) } else { s }
+        }
+    }
 }
