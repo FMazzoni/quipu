@@ -1,7 +1,7 @@
 //! quipu storage layer: SQLite open/migrate, transaction helpers, error types,
 //! and shared mutation utilities. Every state mutation in the crate routes
 //! through `with_tx` + a guarded conditional UPDATE — see
-//! `docs/DECISIONS.md → guarded-state-transitions.md` for the contract.
+//! `vault decisions/ → guarded-state-transitions.md` for the contract.
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
