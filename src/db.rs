@@ -117,6 +117,32 @@ pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
         let c = a.join(".quipu").join("db.sqlite");
         if c.exists() { return Ok(c); }
     }
+    // Git-aware fallback: when invoked from a worktree, the main repo's
+    // `.quipu/` is a sibling of the worktree, not an ancestor. Ask git for
+    // the common .git dir (resolves to the main repo's .git regardless of
+    // whether we're in a worktree or the main checkout) and look for
+    // `.quipu/db.sqlite` next to it.
+    if let Ok(out) = std::process::Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .output()
+    {
+        if out.status.success() {
+            let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !raw.is_empty() {
+                let git_dir = PathBuf::from(&raw);
+                let git_dir = if git_dir.is_absolute() {
+                    git_dir
+                } else {
+                    cwd.join(git_dir)
+                };
+                let git_dir = git_dir.canonicalize().unwrap_or(git_dir);
+                if let Some(repo_root) = git_dir.parent() {
+                    let c = repo_root.join(".quipu").join("db.sqlite");
+                    if c.exists() { return Ok(c); }
+                }
+            }
+        }
+    }
     Ok(cwd.join(".quipu").join("db.sqlite"))
 }
 
