@@ -72,6 +72,8 @@ enum Cmd {
     Depends(cmd::depends::DependsArgs),
     /// Mutate task fields (title, tier, description)
     Edit(cmd::edit::EditArgs),
+    /// Emit a structured snapshot of the store (markdown or HTML)
+    Report(cmd::report::ReportArgs),
 }
 
 fn main() {
@@ -115,6 +117,7 @@ fn real_main() -> anyhow::Result<()> {
         Cmd::InstallSkills(a) => cmd::install_skills::run(a),
         Cmd::Depends(a) => cmd::depends::run(&db_path, a),
         Cmd::Edit(a) => cmd::edit::run(&db_path, a),
+        Cmd::Report(a) => cmd::report::run(&db_path, a),
         #[allow(unreachable_patterns)]
         _ => { eprintln!("not implemented yet"); std::process::exit(1); }
     }
