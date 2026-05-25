@@ -782,3 +782,36 @@ fn decisions_auto_only_filters_non_auto() {
     assert_eq!(v.as_array().unwrap().len(), 1);
     assert_eq!(v.as_array().unwrap()[0]["payload"]["text"], "auto-decided");
 }
+
+#[test]
+fn resolve_path_finds_store_from_worktree() {
+    // Simulate: a main repo with .quipu/, and a sibling "worktree" dir
+    // whose only git-link points back at the main repo. qp run from inside
+    // the worktree should find the main repo's .quipu/.
+    use std::process::Command as PCommand;
+    let tmp = tempfile::tempdir().unwrap();
+    let main = tmp.path().join("repo-main");
+    std::fs::create_dir(&main).unwrap();
+    // Init a git repo + initial commit so worktree-add works.
+    PCommand::new("git").args(["init", "-q"]).current_dir(&main).status().unwrap();
+    PCommand::new("git").args(["commit", "--allow-empty", "-q", "-m", "init"])
+        .current_dir(&main).status().unwrap();
+    // Initialize a qp store in the main repo.
+    Command::cargo_bin("qp").unwrap().current_dir(&main)
+        .arg("init").assert().success();
+    // Create a worktree as a sibling.
+    let wt = tmp.path().join("repo-wt");
+    PCommand::new("git")
+        .args(["worktree", "add", "-q", "-b", "tmpbranch",
+               wt.to_str().unwrap()])
+        .current_dir(&main).status().unwrap();
+    // Without QP_DB, running qp from the worktree should still work
+    // and create the task in the MAIN repo's store.
+    Command::cargo_bin("qp").unwrap().current_dir(&wt)
+        .args(["add", "from-worktree"]).assert().success();
+    // Verify the task landed in the main store.
+    let out = Command::cargo_bin("qp").unwrap().current_dir(&main)
+        .args(["list", "--json"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("from-worktree"), "task should be in main store: {s}");
+}
