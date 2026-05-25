@@ -11,9 +11,9 @@ allowed-tools: Read Glob Grep Bash Edit Write
 ## Hard rules
 
 - [ ] **One lens per agent.** The coordinator dispatched you with exactly one of: correctness / architecture / spec-compliance / UX / perf / API-surface. Stay in your lane — other lenses run in parallel agents.
-- [ ] **No worktree needed.** Findings go to `docs/critic/<wave-slug>-<lens>.md`, which is gitignored. Read the merged code on `main`.
+- [ ] **No worktree needed.** Findings go to the vault at `$QUIPU_VAULT/critiques/YYYY-MM-DD-HHMMSS-<wave-slug>-<lens>.md`. Read the merged code on `main`.
 - [ ] **Locked decisions are out of scope.** If the plan has a "Locked decisions" section, treat those as pre-decided. Don't dispute them. (You may flag *spec divergence from* a locked decision — that's in-scope correctness.)
-- [ ] **No Co-Authored-By trailer** on any commit you make (you generally make none — you only write to `docs/critic/`).
+- [ ] **No Co-Authored-By trailer** on any commit you make (you generally make none — you only write to the vault's `critiques/`).
 - [ ] **Friction logging is required** before finishing your ticket (if you were given one).
 
 ## Inputs (from coordinator prompt)
@@ -30,7 +30,7 @@ allowed-tools: Read Glob Grep Bash Edit Write
 3. `git diff <BASE>..<HEAD> -- <files>` to see what changed.
 4. Read the changed files at their new state on `main`.
 5. Evaluate strictly through your assigned lens. Resist scope creep into other lenses — those critics exist.
-6. Write findings to `docs/critic/<wave-slug>-<lens>.md` using the template below.
+6. Write findings to `$QUIPU_VAULT/critiques/YYYY-MM-DD-HHMMSS-<wave-slug>-<lens>.md` using the template below.
 7. If ticketed: `./target/release/qp log <TICKET> decision "<friction note>" --auto` then `./target/release/qp complete <TICKET> --as <agent-id>`.
 
 ## Severity ladder
@@ -42,7 +42,7 @@ allowed-tools: Read Glob Grep Bash Edit Write
 | Minor        | Style, ergonomics, micro-perf, cosmetic                                    |
 | Observation  | FYI; not actionable; context for next maintainer                           |
 
-Auto-mode triage (run by coordinator): **only Critical findings are acted on automatically**. Important/Minor/Observation get filed to `docs/bugs/`. Calibrate your severities accordingly — don't inflate to force action.
+Auto-mode triage (run by coordinator): **only Critical findings are acted on automatically**. Important/Minor/Observation get filed as qp tickets (`qp add ... --tag kind:bug --tag harness:claude-code`). Calibrate your severities accordingly — don't inflate to force action.
 
 ## Lens scope quick reference
 
@@ -55,7 +55,7 @@ Auto-mode triage (run by coordinator): **only Critical findings are acted on aut
 
 ## Output template
 
-Write to `docs/critic/<wave-slug>-<lens>.md`:
+Write to `$QUIPU_VAULT/critiques/YYYY-MM-DD-HHMMSS-<wave-slug>-<lens>.md`:
 
 ```markdown
 # Critic Report — <wave-slug>: <lens>
@@ -104,7 +104,7 @@ Write to `docs/critic/<wave-slug>-<lens>.md`:
 | F-4 | <title>                            | Observation|
 ```
 
-See `docs/critic/wave-pattern-d.md` for a shipped example.
+See `$QUIPU_VAULT/critiques/2026-05-24-183801-wave-pattern-d.md` for a shipped example.
 
 ## What NOT to flag
 

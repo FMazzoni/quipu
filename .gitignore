@@ -1,7 +1,6 @@
 /target
 /.quipu
 *.swp
-/docs/*
 .superpowers/
 .DS_Store
 .tmp/*

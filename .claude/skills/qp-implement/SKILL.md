@@ -89,5 +89,5 @@ The `--auto` flag marks the log entry for `qp decisions --auto-only`. This feeds
 - Running `cargo test` with no filter while other agents are active.
 - Adding `cargo test --workspace` (this isn't a workspace).
 - Squashing your friction note ("nothing notable") when something *was* notable. The retro reads these.
-- Committing files under `docs/` (gitignored).
+- Putting durable knowledge in repo files. Plans, critiques, sessions all live in the vault now (`$QUIPU_VAULT/`). Bugs are qp tickets tagged `kind:bug`.
 - Pulling in tokio/hyper/axum/tracing — see CLAUDE.md.
