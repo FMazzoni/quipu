@@ -53,9 +53,11 @@ pub fn run(db_path: &std::path::Path, a: WaveArgs) -> Result<()> {
     let v = serde_json::Value::Object(out);
     if a.json { println!("{}", serde_json::to_string(&v)?); }
     else {
+        let mut any = false;
         for (label, _) in GROUPS {
             let arr = v[*label].as_array().unwrap();
             if arr.is_empty() { continue; }
+            any = true;
             println!("## {label}");
             for r in arr {
                 println!("  {:>7}  {:<14}  {:<10}  {}",
@@ -64,6 +66,9 @@ pub fn run(db_path: &std::path::Path, a: WaveArgs) -> Result<()> {
                     r["last_kind"].as_str().unwrap_or("-"),
                     r["title"].as_str().unwrap_or(""));
             }
+        }
+        if !any {
+            println!("nothing in flight — run `qp status` for full state, or `qp list --state done` to see what shipped");
         }
     }
     Ok(())

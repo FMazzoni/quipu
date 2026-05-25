@@ -23,8 +23,9 @@ pub fn run(db_path: &std::path::Path, a: StatusArgs) -> Result<()> {
     if a.json {
         println!("{}", serde_json::to_string(&serde_json::Value::Object(map))?);
     } else {
-        for (state, count) in &rows {
-            println!("{state:<10} {count}");
+        for s in ["pending","ready","assigned","running","done","cancelled"] {
+            let count = map.get(s).and_then(|v| v.as_i64()).unwrap_or(0);
+            println!("{s:<10} {count}");
         }
     }
     Ok(())

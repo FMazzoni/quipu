@@ -948,3 +948,105 @@ fn list_assigned_to_exact_match_still_works() {
         .iter().map(|t| t["display_id"].as_str().unwrap()).collect();
     assert_eq!(ids, vec!["QP-1"]);
 }
+
+#[test]
+fn status_shows_all_states_including_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    let out = qp(&db).arg("status").assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    for state in ["pending","ready","assigned","running","done","cancelled"] {
+        assert!(s.contains(state), "status missing `{state}`:\n{s}");
+    }
+}
+
+#[test]
+fn wave_human_mode_says_nothing_in_flight_when_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    let out = qp(&db).arg("wave").assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("nothing in flight"), "wave missing guidance:\n{s}");
+}
+
+#[test]
+fn decisions_human_mode_renders_readable_text() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["log", "QP-1", "decision", "the decision body", "--auto"]).assert().success();
+    let out = qp(&db).arg("decisions").assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("the decision body"), "missing text:\n{s}");
+    assert!(!s.contains("{\""), "raw JSON leaked:\n{s}");
+}
+
+#[test]
+fn timeline_human_mode_renders_columns() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["assign", "QP-1", "--to", "x"]).assert().success();
+    qp(&db).args(["claim", "QP-1", "--as", "x"]).assert().success();
+    qp(&db).args(["complete", "QP-1", "--as", "x", "--decision", "all-good"]).assert().success();
+    let out = qp(&db).arg("timeline").assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    for line in s.lines() {
+        assert!(!line.starts_with('{'), "line starts with JSON brace: {line}");
+    }
+    assert!(s.contains("state_change"), "missing state_change:\n{s}");
+    assert!(s.contains("decision"), "missing decision:\n{s}");
+    assert!(s.contains("all-good"), "missing decision text:\n{s}");
+}
+
+#[test]
+fn list_human_mode_has_header_row() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    let out = qp(&db).arg("list").assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let first = s.lines().next().unwrap_or("");
+    assert!(first.starts_with("ID"), "expected header starting with ID, got: {first}");
+    assert!(first.contains("STATE") && first.contains("AGENT") && first.contains("TAGS") && first.contains("TITLE"),
+        "header missing columns: {first}");
+}
+
+#[test]
+fn tree_uses_display_id_format_for_dep_refs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["add", "b", "--depends-on", "QP-1"]).assert().success();
+    let out = qp(&db).arg("tree").assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("QP-1") && s.contains("QP-2"), "tree missing display ids:\n{s}");
+    assert!(s.contains("[QP-1]"), "dep ref not in display-id format:\n{s}");
+    assert!(!s.contains("[T1]"), "old T-prefix format leaked:\n{s}");
+}
+
+#[test]
+fn tree_with_task_arg_filters_to_subtree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "unrelated-1"]).assert().success();   // QP-1
+    qp(&db).args(["add", "unrelated-2"]).assert().success();   // QP-2
+    qp(&db).args(["add", "unrelated-3"]).assert().success();   // QP-3
+    qp(&db).args(["add", "leaf-a"]).assert().success();        // QP-4
+    qp(&db).args(["add", "leaf-b"]).assert().success();        // QP-5
+    qp(&db).args(["add", "root", "--depends-on", "QP-4", "--depends-on", "QP-5"]).assert().success(); // QP-6
+    let out = qp(&db).args(["tree", "QP-6"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("QP-6") && s.contains("QP-4") && s.contains("QP-5"),
+        "subtree missing root/deps:\n{s}");
+    assert!(!s.contains("unrelated-1") && !s.contains("unrelated-2") && !s.contains("unrelated-3"),
+        "subtree leaked unrelated tasks:\n{s}");
+}

@@ -90,6 +90,7 @@ pub fn run(db_path: &std::path::Path, a: ListArgs) -> Result<()> {
     }
     if a.json { println!("{}", serde_json::to_string(&out)?); }
     else {
+        println!("ID\tSTATE\tAGENT\tTAGS\tTITLE");
         for r in &out {
             println!("{}\t{}\t{}\t{}\t{}",
                 r["display_id"].as_str().unwrap_or(""),
