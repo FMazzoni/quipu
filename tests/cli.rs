@@ -51,7 +51,7 @@ fn help_lists_core_commands() {
     for cmd in [
         "init","add","assign","claim","complete","block","cancel","abandon","reclaim",
         "log","tag","relation","tree","timeline","wave","status","list",
-        "decisions","wait","watch","install-skills","depends","edit","report","show","html",
+        "decisions","wait","watch","install-skills","depends","edit","report","show",
     ] {
         assert!(out.contains(cmd), "help missing `{cmd}`:\n{out}");
     }
@@ -1100,57 +1100,10 @@ fn report_wave_scope_filters_to_subtree() {
     assert!(!s.contains("QP-3"), "should not contain unrelated task");
 }
 
-#[test]
-fn html_writes_self_contained_file_with_dag() {
-    let tmp = tempfile::tempdir().unwrap();
-    let db = tmp.path().join("db.sqlite");
-    let out = tmp.path().join("board.html");
-    qp(&db).arg("init").assert().success();
-    qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["add", "b", "--depends-on", "QP-1"]).assert().success();
-    qp(&db).args(["html", "--output", out.to_str().unwrap()]).assert().success();
-    let s = std::fs::read_to_string(&out).unwrap();
-    // Self-contained: no http/https external refs except the meta-refresh attr
-    assert!(s.contains("<!DOCTYPE") || s.contains("<!doctype"));
-    assert!(s.contains("<style>"));
-    assert!(s.contains("<script"));
-    // No CDN / no external CSS
-    assert!(!s.contains("cdn.") && !s.contains("googleapis.com"));
-    // DAG present
-    assert!(s.contains("<svg") && s.contains("QP-1") && s.contains("QP-2"));
-}
-
-#[test]
-fn html_meta_refresh_respects_flag() {
-    let tmp = tempfile::tempdir().unwrap();
-    let db = tmp.path().join("db.sqlite");
-    let out = tmp.path().join("b.html");
-    qp(&db).arg("init").assert().success();
-    qp(&db).args(["html", "--output", out.to_str().unwrap(), "--refresh", "10"]).assert().success();
-    let s = std::fs::read_to_string(&out).unwrap();
-    assert!(s.contains("http-equiv=\"refresh\""));
-    assert!(s.contains("content=\"10\""));
-
     // refresh=0 means no meta tag
     qp(&db).args(["html", "--output", out.to_str().unwrap(), "--refresh", "0"]).assert().success();
     let s2 = std::fs::read_to_string(&out).unwrap();
     assert!(!s2.contains("http-equiv=\"refresh\""));
-}
-
-#[test]
-fn html_wave_scope_filters_to_subtree() {
-    let tmp = tempfile::tempdir().unwrap();
-    let db = tmp.path().join("db.sqlite");
-    let out = tmp.path().join("b.html");
-    qp(&db).arg("init").assert().success();
-    qp(&db).args(["add", "root"]).assert().success();
-    qp(&db).args(["add", "child"]).assert().success();
-    qp(&db).args(["add", "unrelated"]).assert().success();
-    qp(&db).args(["depends", "QP-1", "--on", "QP-2"]).assert().success();
-    qp(&db).args(["html", "--output", out.to_str().unwrap(), "--wave", "QP-1"]).assert().success();
-    let s = std::fs::read_to_string(&out).unwrap();
-    assert!(s.contains("QP-1") && s.contains("QP-2"));
-    assert!(!s.contains("QP-3"));
 }
 
 #[test]
