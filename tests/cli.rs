@@ -51,7 +51,7 @@ fn help_lists_core_commands() {
     for cmd in [
         "init","add","assign","claim","complete","block","cancel","abandon","reclaim",
         "log","tag","relation","tree","timeline","wave","status","list",
-        "decisions","wait","watch","install-skills","depends","edit","report","html",
+        "decisions","wait","watch","install-skills","depends","edit","report","show","html",
     ] {
         assert!(out.contains(cmd), "help missing `{cmd}`:\n{out}");
     }
@@ -1151,4 +1151,86 @@ fn html_wave_scope_filters_to_subtree() {
     let s = std::fs::read_to_string(&out).unwrap();
     assert!(s.contains("QP-1") && s.contains("QP-2"));
     assert!(!s.contains("QP-3"));
+}
+
+#[test]
+fn show_renders_title_description_and_events() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "ticket title", "--description", "long form notes"]).assert().success();
+    let out = qp(&db).args(["show", "QP-1"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("ticket title"));
+    assert!(s.contains("long form notes"));
+    assert!(s.contains("QP-1"));
+}
+
+#[test]
+fn show_json_includes_recent_events() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["assign", "QP-1", "--to", "x"]).assert().success();
+    let out = qp(&db).args(["show", "QP-1", "--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+    assert_eq!(v["display_id"], "QP-1");
+    assert!(v["recent_events"].is_array());
+    assert!(v["recent_events"].as_array().unwrap().len() >= 2); // ready + assigned
+}
+
+#[test]
+fn tree_with_description_includes_description_lines() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "alpha", "--description", "first task notes"]).assert().success();
+    let out = qp(&db).args(["tree", "--with-description"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("alpha"));
+    assert!(s.contains("first task notes"));
+}
+
+#[test]
+fn report_ticket_writes_single_document_with_description() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "alpha", "--description", "ticket detail body"]).assert().success();
+    let out = qp(&db).args(["report", "--ticket", "QP-1"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("alpha"));
+    assert!(s.contains("ticket detail body"));
+    assert!(s.contains("QP-1"));
+}
+
+#[test]
+fn report_all_tickets_writes_one_file_per_ticket() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    let out_dir = tmp.path().join("tickets");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "first"]).assert().success();
+    qp(&db).args(["add", "second"]).assert().success();
+    qp(&db).args(["report", "--all-tickets", "--output-dir", out_dir.to_str().unwrap()]).assert().success();
+    let entries: Vec<_> = std::fs::read_dir(&out_dir).unwrap().collect::<Result<_,_>>().unwrap();
+    assert_eq!(entries.len(), 2);
+    // Each filename starts with QP-1 or QP-2
+    let names: Vec<String> = entries.iter().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+    assert!(names.iter().any(|n| n.starts_with("QP-1")));
+    assert!(names.iter().any(|n| n.starts_with("QP-2")));
+}
+
+#[test]
+fn list_with_description_includes_description_lines() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "alpha", "--description", "second task notes"]).assert().success();
+    let out = qp(&db).args(["list", "--with-description"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("alpha"));
+    assert!(s.contains("second task notes"));
 }

@@ -74,6 +74,8 @@ enum Cmd {
     Edit(cmd::edit::EditArgs),
     /// Emit a structured snapshot of the store (markdown or HTML)
     Report(cmd::report::ReportArgs),
+    /// Show a single-ticket detail view (human or JSON)
+    Show(cmd::show::ShowArgs),
     /// Emit an interactive HTML dashboard (DAG + filters + timeline)
     Html(cmd::html::HtmlArgs),
 }
@@ -120,6 +122,7 @@ fn real_main() -> anyhow::Result<()> {
         Cmd::Depends(a) => cmd::depends::run(&db_path, a),
         Cmd::Edit(a) => cmd::edit::run(&db_path, a),
         Cmd::Report(a) => cmd::report::run(&db_path, a),
+        Cmd::Show(a) => cmd::show::run(&db_path, a),
         Cmd::Html(a) => cmd::html::run(&db_path, a),
         #[allow(unreachable_patterns)]
         _ => { eprintln!("not implemented yet"); std::process::exit(1); }

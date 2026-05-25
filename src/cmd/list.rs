@@ -10,6 +10,8 @@ pub struct ListArgs {
     #[arg(long = "state")]       pub state: Option<String>,
     #[arg(long)]                 pub tag: Vec<String>,
     #[arg(long)]                 pub json: bool,
+    /// Print each task's description on indented continuation lines.
+    #[arg(long = "with-description")] pub with_description: bool,
 }
 
 pub fn run(db_path: &std::path::Path, a: ListArgs) -> Result<()> {
@@ -98,6 +100,14 @@ pub fn run(db_path: &std::path::Path, a: ListArgs) -> Result<()> {
                 r["agent"].as_str().unwrap_or("-"),
                 r["tags"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(",")).unwrap_or_default(),
                 r["title"].as_str().unwrap_or(""));
+            if a.with_description {
+                if let Some(d) = r.get("description").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                    let lines = crate::cmd::show::wrap_text(d, 80);
+                    for line in lines.iter().take(3) {
+                        println!("    {}", line);
+                    }
+                }
+            }
         }
     }
     Ok(())
