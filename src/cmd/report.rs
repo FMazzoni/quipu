@@ -42,6 +42,15 @@ pub struct ReportArgs {
     /// Write to this path instead of stdout.
     #[arg(long)]
     pub output: Option<std::path::PathBuf>,
+    /// Single-ticket mode: emit a focused report for one ticket.
+    #[arg(long, conflicts_with = "all_tickets")]
+    pub ticket: Option<String>,
+    /// Bulk mode: emit one file per ticket into --output-dir.
+    #[arg(long = "all-tickets", conflicts_with = "ticket", requires = "output_dir")]
+    pub all_tickets: bool,
+    /// Directory to write per-ticket files into (used with --all-tickets).
+    #[arg(long = "output-dir")]
+    pub output_dir: Option<std::path::PathBuf>,
 }
 
 pub fn run(db_path: &std::path::Path, a: ReportArgs) -> Result<()> {
@@ -49,6 +58,44 @@ pub fn run(db_path: &std::path::Path, a: ReportArgs) -> Result<()> {
     let since_iso = a.since.as_deref().map(parse_since).transpose()?;
     let subtree = a.wave.as_deref().map(|t| resolve_subtree(&conn, t)).transpose()?;
 
+    // Per-ticket modes.
+    if let Some(tref) = a.ticket.as_deref() {
+        let tid = id::resolve(&conn, tref)?;
+        let detail = collect_ticket(&conn, tid)?;
+        let body = if a.html { render_ticket_html(&detail) } else { render_ticket_markdown(&detail) };
+        if let Some(path) = &a.output {
+            let mut f = std::fs::File::create(path)?;
+            f.write_all(body.as_bytes())?;
+        } else {
+            print!("{body}");
+            if !body.ends_with('\n') { println!(); }
+        }
+        return Ok(());
+    }
+    if a.all_tickets {
+        let dir = a.output_dir.as_ref()
+            .ok_or_else(|| db::invalid_input("--all-tickets requires --output-dir"))?;
+        std::fs::create_dir_all(dir)?;
+        let ext = if a.html { "html" } else { "md" };
+        // Iterate tasks, scoped by --wave and (event-based) --since when supplied.
+        let scope_ids = ticket_ids_in_scope(&conn, since_iso.as_deref(), subtree.as_ref())?;
+        for tid in scope_ids {
+            let detail = collect_ticket(&conn, tid)?;
+            let slug = slugify(&detail.title);
+            let fname = if slug.is_empty() {
+                format!("{}.{ext}", detail.display_id)
+            } else {
+                format!("{}-{}.{ext}", detail.display_id, slug)
+            };
+            let path = dir.join(fname);
+            let body = if a.html { render_ticket_html(&detail) } else { render_ticket_markdown(&detail) };
+            let mut f = std::fs::File::create(&path)?;
+            f.write_all(body.as_bytes())?;
+        }
+        return Ok(());
+    }
+
+    // Default: full snapshot.
     let snap = collect(&conn, since_iso.as_deref(), subtree.as_ref())?;
 
     let body = if a.html {
@@ -65,6 +112,256 @@ pub fn run(db_path: &std::path::Path, a: ReportArgs) -> Result<()> {
         if !body.ends_with('\n') { println!(); }
     }
     Ok(())
+}
+
+// ---------- Per-ticket collection / rendering ----------
+
+struct TicketDetail {
+    display_id: String,
+    title: String,
+    state: String,
+    tier: Option<String>,
+    agent: Option<String>,
+    description: Option<String>,
+    created_at: Option<String>,
+    tags: Vec<String>,
+    parents: Vec<(String, String, String)>,  // display_id, title, state — this depends on
+    children: Vec<(String, String, String)>, // display_id, title, state — depend on this
+    events: Vec<EventRow>,                   // chronological asc
+}
+
+fn collect_ticket(conn: &rusqlite::Connection, tid: i64) -> Result<TicketDetail> {
+    let (display_id, title, state, tier, description, created_at): (String, String, String, Option<String>, Option<String>, Option<String>) =
+        conn.query_row(
+            "SELECT display_id, title, state, tier, description, created_at FROM task WHERE id = ?1",
+            [tid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        )?;
+    let agent: Option<String> = conn.query_row(
+        "SELECT agent_id FROM assignment WHERE task_id = ?1 ORDER BY id DESC LIMIT 1",
+        [tid], |r| r.get(0),
+    ).ok();
+    let mut tag_stmt = conn.prepare("SELECT name FROM tag WHERE task_id = ?1 ORDER BY name")?;
+    let tags: Vec<String> = tag_stmt.query_map([tid], |r| r.get::<_, String>(0))?
+        .collect::<Result<_, _>>()?;
+
+    let mut p_stmt = conn.prepare(
+        "SELECT t.display_id, t.title, t.state FROM dep d JOIN task t ON t.id = d.depends_on_task_id
+          WHERE d.task_id = ?1 ORDER BY t.id")?;
+    let parents: Vec<(String, String, String)> = p_stmt.query_map([tid], |r|
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?
+        .collect::<Result<_, _>>()?;
+    let mut c_stmt = conn.prepare(
+        "SELECT t.display_id, t.title, t.state FROM dep d JOIN task t ON t.id = d.task_id
+          WHERE d.depends_on_task_id = ?1 ORDER BY t.id")?;
+    let children: Vec<(String, String, String)> = c_stmt.query_map([tid], |r|
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?
+        .collect::<Result<_, _>>()?;
+
+    // Full timeline for this ticket, oldest-first.
+    let mut e_stmt = conn.prepare(
+        "SELECT t.display_id, e.ts, e.kind, e.agent_id, e.payload
+           FROM event e LEFT JOIN task t ON t.id = e.task_id
+          WHERE e.task_id = ?1 ORDER BY e.id ASC")?;
+    let events: Vec<EventRow> = e_stmt.query_map([tid], |r| {
+        let payload: Option<String> = r.get(4)?;
+        let payload_v: Value = payload.as_deref()
+            .map(serde_json::from_str).transpose().ok().flatten().unwrap_or(Value::Null);
+        Ok(EventRow {
+            task: r.get::<_, Option<String>>(0)?,
+            ts: r.get::<_, String>(1)?,
+            kind: r.get::<_, String>(2)?,
+            agent: r.get::<_, Option<String>>(3)?,
+            payload: payload_v,
+        })
+    })?.collect::<Result<_, _>>()?;
+
+    Ok(TicketDetail {
+        display_id, title, state, tier, agent, description, created_at, tags,
+        parents, children, events,
+    })
+}
+
+fn ticket_ids_in_scope(
+    conn: &rusqlite::Connection,
+    since_iso: Option<&str>,
+    subtree: Option<&HashSet<i64>>,
+) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare("SELECT id FROM task ORDER BY id ASC")?;
+    let mut ids: Vec<i64> = stmt.query_map([], |r| r.get::<_, i64>(0))?
+        .collect::<Result<_, _>>()?;
+    if let Some(set) = subtree {
+        ids.retain(|i| set.contains(i));
+    }
+    if let Some(s) = since_iso {
+        // Keep tickets with any event in the window.
+        let mut e = conn.prepare("SELECT DISTINCT task_id FROM event WHERE task_id IS NOT NULL AND ts >= ?1")?;
+        let recent: HashSet<i64> = e.query_map([s], |r| r.get::<_, i64>(0))?
+            .collect::<Result<_, _>>()?;
+        ids.retain(|i| recent.contains(i));
+    }
+    Ok(ids)
+}
+
+fn slugify(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    let mut prev_dash = false;
+    for c in title.chars() {
+        if c.is_ascii_alphanumeric() {
+            for lc in c.to_lowercase() { out.push(lc); }
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') { out.pop(); }
+    if out.len() > 40 {
+        out.truncate(40);
+        while out.ends_with('-') { out.pop(); }
+    }
+    out
+}
+
+fn render_ticket_markdown(t: &TicketDetail) -> String {
+    let mut o = String::new();
+    o.push_str(&format!("# {} — {}\n\n", t.display_id, t.title));
+    o.push_str(&format!("- **state:** `{}`\n", t.state));
+    if let Some(tier) = &t.tier { o.push_str(&format!("- **tier:** `{}`\n", tier)); }
+    o.push_str(&format!("- **agent:** {}\n", t.agent.as_deref().unwrap_or("—")));
+    if let Some(c) = &t.created_at { o.push_str(&format!("- **created:** {}\n", c)); }
+
+    // Tag extraction.
+    let mut commit_sha: Option<&str> = None;
+    let mut plan: Option<&str> = None;
+    let mut critique: Option<&str> = None;
+    let mut harness: Option<&str> = None;
+    let mut others: Vec<&str> = Vec::new();
+    for tag in &t.tags {
+        if let Some(v) = tag.strip_prefix("commit:") { commit_sha = Some(v); }
+        else if let Some(v) = tag.strip_prefix("plan:") { plan = Some(v); }
+        else if let Some(v) = tag.strip_prefix("critique:") { critique = Some(v); }
+        else if let Some(v) = tag.strip_prefix("harness:") { harness = Some(v); }
+        else { others.push(tag); }
+    }
+    if let Some(v) = commit_sha { o.push_str(&format!("- **commit:** `{}`\n", v)); }
+    if let Some(v) = plan { o.push_str(&format!("- **plan:** {}\n", v)); }
+    if let Some(v) = critique { o.push_str(&format!("- **critique:** {}\n", v)); }
+    if let Some(v) = harness { o.push_str(&format!("- **harness:** {}\n", v)); }
+    if !others.is_empty() {
+        o.push_str(&format!("- **tags:** {}\n", others.join(", ")));
+    }
+    o.push('\n');
+
+    if let Some(d) = t.description.as_deref().filter(|s| !s.is_empty()) {
+        o.push_str("## Description\n\n");
+        o.push_str(d);
+        if !d.ends_with('\n') { o.push('\n'); }
+        o.push('\n');
+    }
+
+    o.push_str("## Related tickets\n\n");
+    if t.parents.is_empty() && t.children.is_empty() {
+        o.push_str("_no related tickets_\n\n");
+    } else {
+        if !t.parents.is_empty() {
+            o.push_str("**Depends on:**\n\n");
+            for (did, title, state) in &t.parents {
+                o.push_str(&format!("- `{}` ({}) {}\n", did, state, md_esc(title)));
+            }
+            o.push('\n');
+        }
+        if !t.children.is_empty() {
+            o.push_str("**Depended on by:**\n\n");
+            for (did, title, state) in &t.children {
+                o.push_str(&format!("- `{}` ({}) {}\n", did, state, md_esc(title)));
+            }
+            o.push('\n');
+        }
+    }
+
+    o.push_str("## Timeline\n\n");
+    if t.events.is_empty() {
+        o.push_str("_no events_\n\n");
+    } else {
+        o.push_str("| ts | kind | agent | summary |\n|----|------|-------|---------|\n");
+        for e in &t.events {
+            o.push_str(&format!("| {} | {} | {} | {} |\n",
+                e.ts, e.kind,
+                md_esc(e.agent.as_deref().unwrap_or("-")),
+                md_esc(&summarize_payload(&e.kind, &e.payload))));
+        }
+        o.push('\n');
+    }
+    o
+}
+
+fn render_ticket_html(t: &TicketDetail) -> String {
+    let mut o = String::new();
+    o.push_str("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n");
+    o.push_str("<meta charset=\"UTF-8\">\n");
+    o.push_str(&format!("<title>{} — {}</title>\n", html_esc(&t.display_id), html_esc(&t.title)));
+    o.push_str("<style>\n");
+    o.push_str(HTML_CSS);
+    o.push_str("</style>\n</head>\n<body><div class=\"wrap\">\n");
+
+    o.push_str(&format!("<h1>{} <span style=\"color:var(--dim);font-weight:400\">— {}</span></h1>\n",
+        html_esc(&t.display_id), html_esc(&t.title)));
+    o.push_str(&format!("<div class=\"subtitle\">state <span class=\"pill p-{0}\">{0}</span> · agent <code>{1}</code></div>\n",
+        html_esc(&t.state), html_esc(t.agent.as_deref().unwrap_or("-"))));
+
+    if let Some(d) = t.description.as_deref().filter(|s| !s.is_empty()) {
+        o.push_str("<h2>Description</h2>\n");
+        o.push_str(&format!("<div class=\"panel\">{}</div>\n", html_esc(d).replace('\n', "<br>")));
+    }
+
+    if !t.tags.is_empty() {
+        o.push_str("<h2>Tags</h2>\n<div class=\"panel\">");
+        for tag in &t.tags {
+            o.push_str(&format!("<code>{}</code> ", html_esc(tag)));
+        }
+        o.push_str("</div>\n");
+    }
+
+    o.push_str("<h2>Related tickets</h2>\n");
+    if t.parents.is_empty() && t.children.is_empty() {
+        o.push_str("<div class=\"empty\">no related tickets</div>\n");
+    } else {
+        if !t.parents.is_empty() {
+            o.push_str("<div class=\"panel\"><strong>Depends on:</strong><ul>\n");
+            for (did, title, state) in &t.parents {
+                o.push_str(&format!("<li><span class=\"id\">{}</span> <span class=\"pill p-{1}\">{1}</span> {2}</li>\n",
+                    html_esc(did), html_esc(state), html_esc(title)));
+            }
+            o.push_str("</ul></div>\n");
+        }
+        if !t.children.is_empty() {
+            o.push_str("<div class=\"panel\"><strong>Depended on by:</strong><ul>\n");
+            for (did, title, state) in &t.children {
+                o.push_str(&format!("<li><span class=\"id\">{}</span> <span class=\"pill p-{1}\">{1}</span> {2}</li>\n",
+                    html_esc(did), html_esc(state), html_esc(title)));
+            }
+            o.push_str("</ul></div>\n");
+        }
+    }
+
+    o.push_str("<h2>Timeline</h2>\n");
+    if t.events.is_empty() {
+        o.push_str("<div class=\"empty\">no events</div>\n");
+    } else {
+        o.push_str("<table><thead><tr><th>ts</th><th>kind</th><th>agent</th><th>summary</th></tr></thead><tbody>\n");
+        for e in &t.events {
+            o.push_str(&format!(
+                "<tr><td class=\"ts\">{}</td><td class=\"mono\">{}</td><td class=\"mono\">{}</td><td>{}</td></tr>\n",
+                html_esc(&e.ts), html_esc(&e.kind),
+                html_esc(e.agent.as_deref().unwrap_or("-")),
+                html_esc(&summarize_payload(&e.kind, &e.payload))));
+        }
+        o.push_str("</tbody></table>\n");
+    }
+
+    o.push_str("<div class=\"footer\">qp report --ticket</div>\n");
+    o.push_str("</div></body></html>\n");
+    o
 }
 
 // ---------- duration parsing ----------
