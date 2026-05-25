@@ -10,7 +10,12 @@ brain_project: quipu
 
 ## Workflow
 
-This repo uses the `wave-execute` skill (in `.claude/skills/wave-execute/`) for all feature work. The coordinator never edits code directly; subagents do all changes inside worktrees managed by `wt` (worktrunk). Plans live in `docs/superpowers/plans/`. The current MVP plan is `docs/superpowers/plans/2026-05-23-quipu-mvp.md`.
+This repo uses a three-skill split for feature work:
+- **`wave-orchestrate`** (`.claude/skills/wave-orchestrate/`) — coordinator's playbook. Phases, dispatch, merge, optionally critique, wrap.
+- **`qp-implement`** (`.claude/skills/qp-implement/`) — what a subagent in a worktree does. Referenced by the orchestrator in dispatch prompts.
+- **`qp-critique`** (`.claude/skills/qp-critique/`) — what a critic agent does. Referenced when the orchestrator dispatches critics.
+
+The coordinator never edits code directly; subagents do all changes inside `wt`-managed worktrees. Plans live in `docs/superpowers/plans/`. The MVP plan is `docs/superpowers/plans/2026-05-23-quipu-mvp.md`. Dogfooding convention: open qp tickets for non-trivial waves and embed slice bodies inline in subagent prompts (no separate `.tmp/QP-N.md` read targets).
 
 ## Hard rules
 
