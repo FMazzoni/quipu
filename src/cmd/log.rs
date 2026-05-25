@@ -17,7 +17,23 @@ pub fn run(db_path: &std::path::Path, a: LogArgs) -> Result<()> {
     db::with_tx(&mut conn, |tx| {
         let mut payload = serde_json::json!({"text": a.body});
         if a.auto { payload["auto"] = serde_json::Value::Bool(true); }
-        db::insert_event(tx, Some(task_id), &a.kind, a.agent.as_deref(), Some(&payload))?;
+        // If --as wasn't provided, auto-attribute to the latest open assignee
+        // iff the task is currently running (unambiguous owner).
+        let auto_agent: Option<String> = if a.agent.is_none() {
+            let state: Option<String> = tx.query_row(
+                "SELECT state FROM task WHERE id = ?", [task_id], |r| r.get(0)
+            ).ok();
+            if state.as_deref() == Some("running") {
+                tx.query_row(
+                    "SELECT agent_id FROM assignment
+                      WHERE task_id = ? AND completed_at IS NULL
+                      ORDER BY id DESC LIMIT 1",
+                    [task_id], |r| r.get(0)
+                ).ok()
+            } else { None }
+        } else { None };
+        let agent = a.agent.as_deref().or(auto_agent.as_deref());
+        db::insert_event(tx, Some(task_id), &a.kind, agent, Some(&payload))?;
         Ok(())
     })?;
     println!("logged {} on {}", a.kind, a.task.to_uppercase());
