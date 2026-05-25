@@ -168,13 +168,18 @@ fn read_project_uuid(path: &Path) -> Result<Option<String>> {
 /// `schema.sql` changes in a way that requires a migration. The value is
 /// stamped into `meta(key='schema_version')` on first init; subsequent
 /// `open()` calls compare it to decide whether to (re)apply DDL.
-pub const SCHEMA_VERSION: &str = "1";
+pub const SCHEMA_VERSION: &str = "2";
 
 pub fn open(path: &Path) -> Result<Connection> {
-    open_with_prefix(path, None)
+    open_with(path, None, &[])
 }
 
+#[allow(dead_code)] // retained as a stable shim; tests + external callers may still use it
 pub fn open_with_prefix(path: &Path, prefix: Option<&str>) -> Result<Connection> {
+    open_with(path, prefix, &[])
+}
+
+pub fn open_with(path: &Path, prefix: Option<&str>, default_tags: &[String]) -> Result<Connection> {
     if let Some(p) = path.parent() { std::fs::create_dir_all(p)?; }
     let conn = Connection::open(path)
         .with_context(|| format!("opening sqlite at {}", path.display()))?;
@@ -209,9 +214,32 @@ pub fn open_with_prefix(path: &Path, prefix: Option<&str>) -> Result<Connection>
                 ('schema_version', ?2), \
                 ('display_prefix', ?3)",
             rusqlite::params![uuid::Uuid::new_v4().to_string(), SCHEMA_VERSION, p])?;
+        // schema_version must advance even on existing stores being migrated forward.
+        conn.execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+            rusqlite::params![SCHEMA_VERSION])?;
     }
 
+    insert_default_tags(&conn, default_tags)?;
+
     Ok(conn)
+}
+
+pub fn default_tags(conn: &Connection) -> Result<Vec<String>> {
+    let mut s = conn.prepare("SELECT name FROM default_tag ORDER BY name")?;
+    let rows = s.query_map([], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+pub fn insert_default_tags(conn: &Connection, tags: &[String]) -> Result<usize> {
+    if tags.is_empty() { return Ok(0); }
+    let mut total = 0;
+    let mut stmt = conn.prepare("INSERT OR IGNORE INTO default_tag(name) VALUES (?)")?;
+    for t in tags {
+        if t.is_empty() { continue; }
+        total += stmt.execute([t])?;
+    }
+    Ok(total)
 }
 
 /// Read the display-id prefix from the `meta` table. Defaults to `"QP"` if absent

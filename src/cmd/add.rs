@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Args;
 use serde::Serialize;
+use std::collections::HashSet;
 use crate::{db, id};
 
 #[derive(Args, Debug)]
@@ -58,7 +59,13 @@ pub fn run(db_path: &std::path::Path, a: AddArgs) -> Result<()> {
             tx.execute("INSERT INTO dep(task_id, depends_on_task_id) VALUES (?,?)",
                 rusqlite::params![row, did])?;
         }
-        for tag in &a.tag {
+        let defaults = db::default_tags(tx)?;
+        let mut merged: HashSet<String> = HashSet::new();
+        for t in defaults { merged.insert(t); }
+        for t in &a.tag { merged.insert(t.clone()); }
+        let mut merged_tags: Vec<String> = merged.into_iter().collect();
+        merged_tags.sort();
+        for tag in &merged_tags {
             tx.execute("INSERT OR IGNORE INTO tag(task_id, name) VALUES (?,?)",
                 rusqlite::params![row, tag])?;
         }
@@ -73,7 +80,7 @@ pub fn run(db_path: &std::path::Path, a: AddArgs) -> Result<()> {
             display_id: display, title: a.title.clone(),
             state: actual_state, tier: a.tier.clone(),
             description: a.description.clone(),
-            tags: a.tag.clone(),
+            tags: merged_tags,
         })
     })?;
 
