@@ -4,7 +4,14 @@ Structured, observable task substrate for agent orchestration. Per-project SQLit
 
 ## Install (dev)
 
-    cargo install --path .
+Common workflows are wrapped in a [`justfile`](./justfile):
+
+    just install        # build + install qp to ~/.cargo/bin
+    just build          # release build only
+    just test           # run the test suite
+    just check-lean     # verify stripped-binary size + RSS budget
+
+Raw `cargo install --path .` works too; the `justfile` is just a shortcut layer.
 
 ## Quickstart
 
