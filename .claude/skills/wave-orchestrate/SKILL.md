@@ -205,6 +205,6 @@ Dispatch ≤4 critic agents in parallel, one lens each. Reference `.claude/skill
 2. Leanness gates: stripped-binary size, `qp --version` cold start, RSS. Confirm under budget (CLAUDE.md).
 3. Mark completed qp tickets `done` (`qp complete QP-N`).
 4. Vault notes for any new decision: `$QUIPU_VAULT/decisions/<slug>.md`.
-5. Append a session entry at `$QUIPU_VAULT/sessions/YYYY-MM-DD-HHMMSS-<slug>.md` (built / decisions / critic count / next).
+5. Append a session entry at `$QUIPU_VAULT/sessions/YYYY-MM-DD-HHMMSS-<slug>.md` (built / decisions / critic count / next). Use the real wall-clock time the session ends (e.g. `date +%H%M%S`) — do **not** use a daily counter like `000001`.
 6. File deferred bugs as qp tickets (`qp add ... --tag kind:bug`).
 7. Report to user: commit range, test count, deferred items.
