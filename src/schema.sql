@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 -- stamped on init: meta(key='project_uuid', value=<uuid v4>)
--- stamped on init: meta(key='schema_version', value='1')
+-- stamped on init: meta(key='schema_version', value='2')
 -- stamped on init: meta(key='display_prefix', value='QP' or user-supplied)
 
 CREATE TABLE IF NOT EXISTS default_tag (

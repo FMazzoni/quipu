@@ -78,16 +78,14 @@ pub fn run(db_path: &std::path::Path, a: ListArgs) -> Result<()> {
 
     let mut out = Vec::with_capacity(core.len());
     for (id, did, title, state, tier, description, agent) in core {
-        let mut obj = serde_json::json!({
+        let obj = serde_json::json!({
             "id": id, "display_id": did, "title": title, "state": state, "tier": tier,
+            "description": description,
             "agent": agent,
             "tags": tags_by.remove(&id).unwrap_or_default(),
             "blocked_by": blockers_by.remove(&id).unwrap_or_default(),
             "last_event": last_event_by.remove(&id),
         });
-        if let Some(d) = description {
-            obj.as_object_mut().unwrap().insert("description".into(), serde_json::Value::String(d));
-        }
         out.push(obj);
     }
     if a.json { println!("{}", serde_json::to_string(&out)?); }

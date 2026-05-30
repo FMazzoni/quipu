@@ -1238,3 +1238,32 @@ fn depends_rm_emits_state_change_on_promote() {
     );
     assert!(saw, "expected state_change to ready via depends_rm in timeline: {:?}", arr);
 }
+
+#[test]
+fn list_emits_description_null_when_none() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    let out = qp(&db).args(["list", "--json"]).output().unwrap();
+    let arr: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let first = &arr.as_array().unwrap()[0];
+    assert!(first.as_object().unwrap().contains_key("description"));
+    assert!(first["description"].is_null());
+}
+
+#[test]
+fn tag_add_emits_event() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["tag", "QP-1", "add", "foo"]).assert().success();
+    let out = qp(&db).args(["timeline", "QP-1", "--json"]).output().unwrap();
+    let events: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let arr = events.as_array().unwrap();
+    let saw = arr.iter().any(|e|
+        e["kind"] == "tag_added"
+        && e.get("payload").and_then(|p| p.get("name")) == Some(&serde_json::Value::String("foo".into())));
+    assert!(saw, "expected tag_added event: {:?}", arr);
+}
