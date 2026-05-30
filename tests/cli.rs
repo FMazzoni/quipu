@@ -1219,3 +1219,22 @@ fn report_json_wave_scope_filters_subtree() {
     assert!(ids.contains(&"QP-1") && ids.contains(&"QP-2"));
     assert!(!ids.contains(&"QP-3"));
 }
+
+#[test]
+fn depends_rm_emits_state_change_on_promote() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "A"]).assert().success();   // QP-1
+    qp(&db).args(["add", "B", "--depends-on", "QP-1"]).assert().success(); // QP-2 pending
+    qp(&db).args(["depends", "QP-2", "--on", "QP-1", "--rm"]).assert().success();
+    let out = qp(&db).args(["timeline", "QP-2", "--json"]).output().unwrap();
+    let events: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let arr = events.as_array().expect("timeline json is an array");
+    let saw = arr.iter().any(|e|
+        e["kind"] == "state_change"
+        && e.get("payload").and_then(|p| p.get("to")) == Some(&serde_json::Value::String("ready".into()))
+        && e.get("payload").and_then(|p| p.get("via")) == Some(&serde_json::Value::String("depends_rm".into()))
+    );
+    assert!(saw, "expected state_change to ready via depends_rm in timeline: {:?}", arr);
+}
