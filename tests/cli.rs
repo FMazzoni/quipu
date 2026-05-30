@@ -1267,3 +1267,29 @@ fn tag_add_emits_event() {
         && e.get("payload").and_then(|p| p.get("name")) == Some(&serde_json::Value::String("foo".into())));
     assert!(saw, "expected tag_added event: {:?}", arr);
 }
+
+#[test]
+fn schema_migrates_v1_to_v2() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("db.sqlite");
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        // Minimal v1 shape: meta table + schema_version='1'. No default_tag table.
+        conn.execute_batch("
+            CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta(key, value) VALUES ('schema_version','1');
+            INSERT INTO meta(key, value) VALUES ('display_prefix','QP');
+            INSERT INTO meta(key, value) VALUES ('project_uuid','00000000-0000-0000-0000-000000000000');
+        ").unwrap();
+    }
+    // qp init on the existing v1 store should migrate it forward.
+    qp(&db_path).arg("init").assert().success();
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let v: String = conn.query_row(
+        "SELECT value FROM meta WHERE key='schema_version'", [], |r| r.get(0)).unwrap();
+    assert_eq!(v, "2", "schema_version should be migrated to 2");
+    let has_default_tag: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='default_tag'",
+        [], |r| r.get(0)).unwrap();
+    assert_eq!(has_default_tag, 1, "default_tag table should exist post-migration");
+}
