@@ -198,6 +198,17 @@ pub fn open_with(path: &Path, prefix: Option<&str>, default_tags: &[String]) -> 
     let current: Option<String> = conn.query_row(
         "SELECT value FROM meta WHERE key='schema_version'", [], |r| r.get(0)
     ).ok();
+    if let (Some(cur), Some(user_p)) = (current.as_deref(), prefix) {
+        if cur == SCHEMA_VERSION {
+            let stored: Option<String> = conn.query_row(
+                "SELECT value FROM meta WHERE key='display_prefix'", [], |r| r.get(0)).ok();
+            if let Some(s) = stored.as_deref() {
+                if s != user_p {
+                    eprintln!("warn: prefix already set to {}; --prefix {} ignored", s, user_p);
+                }
+            }
+        }
+    }
     if current.as_deref() != Some(SCHEMA_VERSION) {
         conn.execute_batch(SCHEMA).context("applying schema")?;
         // Stamp project_uuid + schema_version + display_prefix on first init only.

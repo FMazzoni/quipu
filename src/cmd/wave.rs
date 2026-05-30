@@ -21,9 +21,10 @@ const GROUPS: &[(&str, &str)] = &[
                          (SELECT kind FROM event e WHERE e.task_id=t.id ORDER BY e.id DESC LIMIT 1), \
                          (SELECT ts   FROM event e WHERE e.task_id=t.id ORDER BY e.id DESC LIMIT 1) \
                   FROM task t WHERE t.state='running' ORDER BY t.id ASC"),
-    // Pending tasks ONLY appear here if they have at least one unresolved dep —
-    // a "blocker" in the new model. Pending-without-real-blockers (e.g. deep
-    // planning chains) stays hidden from the wave view.
+    // Pending tasks appear here iff they have at least one unresolved dep
+    // (depends_on task is not done/cancelled). This is broader than the
+    // skill-layer `kind:blocker` convention — any unresolved dep qualifies.
+    // Pending-without-unresolved-deps tasks stay hidden from the wave view.
     ("pending",  "SELECT t.display_id, t.title, t.state, \
                          (SELECT a.agent_id FROM assignment a WHERE a.task_id=t.id ORDER BY a.id DESC LIMIT 1), \
                          (SELECT kind FROM event e WHERE e.task_id=t.id ORDER BY e.id DESC LIMIT 1), \
