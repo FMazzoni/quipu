@@ -83,3 +83,33 @@ fn wave_pattern_with_tags_and_critique() {
         assert!(skill.contains(cmd), "skill missing `{cmd}`");
     }
 }
+
+#[test]
+fn wave_block_flow_thaws_original() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "main task"]).assert().success();   // QP-1
+    qp(&db).args(["assign", "QP-1", "--to", "alice"]).assert().success();
+    qp(&db).args(["claim", "QP-1", "--as", "alice"]).assert().success();
+    // Create a blocker dep — `block` uses --new for the blocker title, --as for the owning agent.
+    qp(&db).args(["block", "QP-1",
+                  "--new", "the blocker",
+                  "--as", "alice"]).assert().success();
+    // Original should be pending (demoted); the blocker should be QP-2.
+    let out = qp(&db).args(["list", "--json"]).output().unwrap();
+    let arr: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let qp1 = arr.as_array().unwrap().iter()
+        .find(|t| t["display_id"] == "QP-1").expect("QP-1 should exist");
+    assert_eq!(qp1["state"], "pending", "QP-1 should be pending after block");
+    // Complete the blocker (QP-2).
+    qp(&db).args(["assign", "QP-2", "--to", "bob"]).assert().success();
+    qp(&db).args(["claim", "QP-2", "--as", "bob"]).assert().success();
+    qp(&db).args(["complete", "QP-2", "--as", "bob"]).assert().success();
+    // QP-1 should now be ready again.
+    let out = qp(&db).args(["list", "--json"]).output().unwrap();
+    let arr: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let qp1 = arr.as_array().unwrap().iter()
+        .find(|t| t["display_id"] == "QP-1").expect("QP-1 should exist");
+    assert_eq!(qp1["state"], "ready", "QP-1 should thaw to ready after blocker completes");
+}
