@@ -23,14 +23,6 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
     let task_id = id::resolve(&conn, &a.task)?;
 
     let blocker_display = db::with_tx(&mut conn, |tx| {
-        // Ownership check first — bail before mutating anything.
-        let assignee: Option<String> = tx.query_row(
-            "SELECT agent_id FROM assignment WHERE task_id = ? ORDER BY id DESC LIMIT 1",
-            [task_id], |r| r.get(0)).ok();
-        if assignee.as_deref() != Some(&a.agent) {
-            return Err(db::constraint(format!("{} not yours", a.task)));
-        }
-
         // (1) Create the blocker task. State = ready (no deps of its own).
         let prefix = db::display_prefix(tx)?;
         tx.execute(
@@ -48,13 +40,15 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
             "INSERT INTO dep(task_id, depends_on_task_id) VALUES (?,?)",
             rusqlite::params![task_id, blocker_id])?;
 
-        // (3) Guarded UPDATE: demote orig to pending. State must be assigned or running.
+        // (3) Guarded UPDATE: demote orig to pending. Folds ownership into WHERE via EXISTS.
         let n = tx.execute(
             "UPDATE task SET state = 'pending'
-              WHERE id = ? AND state IN ('assigned','running')",
-            [task_id])?;
+              WHERE id = ?1 AND state IN ('assigned','running')
+                AND EXISTS (SELECT 1 FROM assignment
+                             WHERE task_id = ?1 AND agent_id = ?2 AND completed_at IS NULL)",
+            rusqlite::params![task_id, a.agent])?;
         if n != 1 {
-            return Err(db::constraint(format!("{} not blockable from current state", a.task)));
+            return Err(db::constraint(format!("{} not yours or not blockable", a.task)));
         }
 
         // (4) Close the in-flight assignment by specific id (mirrors abandon.rs pattern).

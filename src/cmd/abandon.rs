@@ -48,9 +48,13 @@ pub fn run(db_path: &std::path::Path, a: AbandonArgs) -> Result<()> {
         let resulting: String = tx.query_row(
             "SELECT state FROM task WHERE id = ?", [task_id], |r| r.get(0))?;
 
-        tx.execute(
-            "UPDATE assignment SET completed_at = ?, outcome = 'abandoned' WHERE id = ?",
+        let n2 = tx.execute(
+            "UPDATE assignment SET completed_at = ?, outcome = 'abandoned' \
+              WHERE id = ? AND completed_at IS NULL",
             rusqlite::params![crate::time::now_rfc3339(), aid])?;
+        if n2 != 1 {
+            return Err(db::constraint(format!("{} assignment already closed", a.task)));
+        }
         db::insert_event(tx, Some(task_id), "state_change", Some(&a.agent),
             Some(&serde_json::json!({
                 "to": resulting, "via": "abandon", "reason": a.reason
