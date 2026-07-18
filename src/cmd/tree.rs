@@ -3,6 +3,10 @@ use anyhow::Result;
 use clap::Args;
 use std::collections::{HashMap, HashSet};
 
+/// (id, display_id, title, state, tier, description)
+// TODO(QP-68): becomes `store::TaskRow` when the store layer lands.
+type TreeTaskRow = (i64, String, String, String, Option<String>, Option<String>);
+
 #[derive(Args, Debug)]
 pub struct TreeArgs {
     /// Optional task id — when present, restrict output to this task + its transitive deps.
@@ -39,7 +43,7 @@ pub fn run(db_path: &std::path::Path, a: TreeArgs) -> Result<()> {
         None
     };
 
-    let mut tasks: Vec<(i64, String, String, String, Option<String>, Option<String>)> = Vec::new();
+    let mut tasks: Vec<TreeTaskRow> = Vec::new();
     let mut stmt = conn.prepare(
         "SELECT id, display_id, title, state, tier, description FROM task
          WHERE (?1 IS NULL OR tier = ?1) ORDER BY id ASC",

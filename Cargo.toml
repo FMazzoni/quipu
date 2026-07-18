@@ -25,6 +25,16 @@ assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
 
+# Warn locally so `cargo build` stays quiet and fast; `just lint` and CI
+# promote these to -D warnings. Deliberately NOT pedantic/nursery: this is a
+# terse SQL-adjacent CLI and pedantic fights the intentional style rather than
+# catching bugs.
+[lints.rust]
+unused = "warn"
+
+[lints.clippy]
+all = "warn"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

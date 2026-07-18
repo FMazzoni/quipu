@@ -25,6 +25,39 @@ use std::collections::HashSet;
 use std::io::Write;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
+/// (id, display_id, title, state, tier, description, agent)
+// TODO(QP-68): becomes `store::TaskRow` when the store layer lands.
+type TaskCoreRow = (
+    i64,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+/// (event id, task display_id, ts, kind, agent_id, payload)
+// TODO(QP-68): becomes `store::EventRow` when the store layer lands.
+type EventTailRow = (
+    i64,
+    Option<String>,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+);
+
+/// As `EventTailRow`, but from a LEFT JOIN where the event id may be NULL.
+type EventTailRowOptId = (
+    Option<i64>,
+    Option<String>,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+);
+
 #[derive(Args, Debug)]
 pub struct ReportArgs {
     /// Filter events to this window. Accepts `24h`, `7d`, or RFC3339 date (e.g. `2026-05-20`).
@@ -514,15 +547,7 @@ fn collect_json(
            FROM task t ORDER BY t.id ASC";
     // If subtree-scoped, we filter below (in Rust, not SQL — keeps query simple).
     let mut stmt = conn.prepare(sql)?;
-    let core: Vec<(
-        i64,
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    )> = stmt
+    let core: Vec<TaskCoreRow> = stmt
         .query_map([], |r| {
             Ok((
                 r.get(0)?,
@@ -552,8 +577,7 @@ fn collect_json(
     let mut last_event_by: std::collections::HashMap<i64, Value> = std::collections::HashMap::new();
 
     if !task_ids.is_empty() {
-        let placeholders = std::iter::repeat("?")
-            .take(task_ids.len())
+        let placeholders = std::iter::repeat_n("?", task_ids.len())
             .collect::<Vec<_>>()
             .join(",");
         let pref: Vec<&dyn rusqlite::ToSql> =
@@ -624,14 +648,7 @@ fn collect_json(
     evt_sql.push_str(" ORDER BY e.id ASC");
     let mut stmt = conn.prepare(&evt_sql)?;
     let pref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-    let evt_rows: Vec<(
-        i64,
-        Option<String>,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-    )> = stmt
+    let evt_rows: Vec<EventTailRow> = stmt
         .query_map(pref.as_slice(), |r| {
             Ok((
                 r.get(0)?,
@@ -644,11 +661,8 @@ fn collect_json(
         })?
         .collect::<Result<_, _>>()?;
 
-    let subtree_task_ids: Option<HashSet<i64>> = subtree.map(|set| {
-        // We need task rowids mapped from display_ids — but we already have task_ids vec.
-        // Reuse subtree directly (it's already task rowids).
-        set.clone()
-    });
+    // `subtree` is already a set of task rowids — reuse it directly.
+    let subtree_task_ids: Option<HashSet<i64>> = subtree.cloned();
 
     // Subtree scoping for events requires filtering by task rowid; but EventRow only has display_id.
     // We need a lookup from display_id to rowid for subtree filtering.
@@ -1001,14 +1015,7 @@ fn fetch_events(
     sql.push_str(" ORDER BY e.id DESC");
     let mut stmt = conn.prepare(&sql)?;
     let pref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-    let rows: Vec<(
-        Option<i64>,
-        Option<String>,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-    )> = stmt
+    let rows: Vec<EventTailRowOptId> = stmt
         .query_map(pref.as_slice(), |r| {
             Ok((
                 r.get(0)?,
@@ -1068,7 +1075,7 @@ fn events_in_window_for_kind(
 
 fn render_markdown(s: &Snapshot) -> String {
     let mut o = String::new();
-    o.push_str(&format!("# quipu report\n\n"));
+    o.push_str("# quipu report\n\n");
     o.push_str(&format!("_generated {} UTC_\n\n", s.generated_at));
     if let Some(since) = &s.scope_since {
         o.push_str(&format!("**Scope:** events since `{since}`"));
