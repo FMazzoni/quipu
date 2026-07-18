@@ -1,6 +1,11 @@
 //! `qp` — quipu CLI entry point. Parses subcommands and dispatches to `src/cmd/<name>.rs`.
 //! Exit codes: 0 success | 1 generic error | 2 constraint violation | 3 wait timeout |
 //! 4 wait --cohort-done matched an empty cohort.
+//!
+//! Architecture overview — state machine, guarded-transition contract, module
+//! map — lives in `docs/architecture.md`, included below rather than inlined so
+//! that reading this file costs one line instead of the whole document.
+#![doc = include_str!("../docs/architecture.md")]
 
 mod cmd;
 mod db;
