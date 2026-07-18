@@ -3,6 +3,18 @@ use anyhow::Result;
 use clap::Args;
 use std::collections::HashMap;
 
+/// (id, display_id, title, state, tier, description, agent)
+// TODO(QP-68): becomes `store::TaskRow` when the store layer lands.
+type TaskCoreRow = (
+    i64,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 #[derive(Args, Debug)]
 pub struct ListArgs {
     /// Glob pattern (e.g. claude-code:*)
@@ -42,15 +54,7 @@ pub fn run(db_path: &std::path::Path, a: ListArgs) -> Result<()> {
     sql.push_str(" ORDER BY t.id ASC");
     let mut stmt = conn.prepare(&sql)?;
     let pref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-    let core: Vec<(
-        i64,
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    )> = stmt
+    let core: Vec<TaskCoreRow> = stmt
         .query_map(pref.as_slice(), |r| {
             Ok((
                 r.get(0)?,
@@ -70,8 +74,7 @@ pub fn run(db_path: &std::path::Path, a: ListArgs) -> Result<()> {
     let mut blockers_by: HashMap<i64, Vec<String>> = HashMap::new();
     let mut last_event_by: HashMap<i64, serde_json::Value> = HashMap::new();
     if !ids.is_empty() {
-        let placeholders = std::iter::repeat("?")
-            .take(ids.len())
+        let placeholders = std::iter::repeat_n("?", ids.len())
             .collect::<Vec<_>>()
             .join(",");
         let q = format!("SELECT task_id, name FROM tag WHERE task_id IN ({placeholders})");

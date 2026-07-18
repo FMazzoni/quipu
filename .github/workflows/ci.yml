@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: tests
+        run: cargo test
+
+      # Leanness budget (CLAUDE.md): < 5 MB stripped binary.
+      # The RSS and cold-start probes stay in `just check-lean` rather than CI —
+      # they depend on GNU `/usr/bin/time -v` and on runner-dependent timing.
+      - name: binary size budget
+        run: |
+          cargo build --release
+          strip target/release/qp
+          size=$(stat -c%s target/release/qp)
+          echo "stripped binary: $size bytes ($((size / 1024 / 1024)) MB)"
+          if [ "$size" -gt 5242880 ]; then
+            echo "::error::binary exceeds the 5 MB leanness budget"
+            exit 1
+          fi

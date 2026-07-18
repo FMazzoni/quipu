@@ -788,7 +788,7 @@ fn watch_emits_new_events_as_jsonl() {
     qp(&db).args(["add", "seed"]).assert().success();
     // Start watch in a child. --max-ticks bounds the run.
     let bin = assert_cmd::cargo::cargo_bin("qp");
-    let mut child = PCommand::new(&bin)
+    let child = PCommand::new(&bin)
         .env("QP_DB", &db)
         .args([
             "watch",
@@ -813,7 +813,7 @@ fn watch_emits_new_events_as_jsonl() {
     let out = child.wait_with_output().unwrap();
     let lines: Vec<String> = BufReader::new(&out.stdout[..])
         .lines()
-        .filter_map(|l| l.ok())
+        .map_while(Result::ok)
         .filter(|l| !l.is_empty())
         .collect();
     assert!(lines.len() >= 2, "expected >=2 event lines, got: {lines:?}");
@@ -1480,7 +1480,7 @@ fn log_does_not_auto_attribute_when_not_running() {
         .expect("note event present");
     // agent_id should be absent or null.
     assert!(
-        note.get("agent_id").map_or(true, |v| v.is_null()),
+        note.get("agent_id").is_none_or(|v| v.is_null()),
         "log should NOT auto-attribute on non-running task; got {:?}",
         note["agent_id"]
     );

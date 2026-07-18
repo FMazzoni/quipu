@@ -10,9 +10,27 @@ build:
 test:
     cargo test
 
+# apply rustfmt
+fmt:
+    cargo fmt --all
+
+# rustfmt check only (no writes)
+fmt-check:
+    cargo fmt --all -- --check
+
+# the gate: formatting + clippy (denied) + tests
+lint: fmt-check
+    cargo clippy --all-targets -- -D warnings
+    cargo test
+
 # stripped-binary size + cold start (verifies leanness budget)
+# The RSS probe needs GNU time (-v); it degrades to a skip elsewhere (macOS/BSD).
 check-lean:
     cargo build --release
     @strip target/release/qp
     @du -h target/release/qp
-    @/usr/bin/time -v target/release/qp --version 2>&1 | grep "Maximum resident"
+    @if /usr/bin/time -v true >/dev/null 2>&1; then \
+        /usr/bin/time -v target/release/qp --version 2>&1 | grep "Maximum resident"; \
+    else \
+        echo "(RSS check skipped: GNU /usr/bin/time -v unavailable on this platform)"; \
+    fi

@@ -7,6 +7,17 @@ use anyhow::Result;
 use clap::Args;
 use std::time::Duration;
 
+/// (event id, task display_id, ts, kind, agent_id, payload)
+// TODO(QP-68): becomes `store::EventRow` when the store layer lands.
+type EventTailRow = (
+    i64,
+    Option<String>,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+);
+
 #[derive(Args, Debug)]
 pub struct WatchArgs {
     /// Start tailing from this event id (exclusive).
@@ -67,14 +78,7 @@ pub fn run(db_path: &std::path::Path, a: WatchArgs) -> Result<()> {
 
         let mut stmt = conn.prepare(&sql)?;
         let pref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-        let rows: Vec<(
-            i64,
-            Option<String>,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-        )> = stmt
+        let rows: Vec<EventTailRow> = stmt
             .query_map(pref.as_slice(), |r| {
                 Ok((
                     r.get(0)?,
