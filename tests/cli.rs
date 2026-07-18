@@ -2451,3 +2451,102 @@ fn schema_migrates_v1_to_v2() {
         "default_tag table should exist post-migration"
     );
 }
+
+// ─── QP-85 — latest-OPEN-row ownership semantics ───
+
+#[test]
+fn depends_uses_latest_open_assignment_not_latest_by_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success(); // QP-1
+    qp(&db).args(["add", "b"]).assert().success(); // QP-2
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "alice"])
+        .assert()
+        .success();
+
+    // Engineer divergent state directly: insert a newer CLOSED assignment row
+    // on top of the older OPEN one, so latest-by-id and latest-open disagree.
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "INSERT INTO assignment(task_id, agent_id, completed_at, outcome) \
+          VALUES (1, 'mallory', '2026-01-01T00:00:00Z', 'success')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    // The stale/closed "latest by id" agent must NOT be treated as owner.
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-2", "--as", "mallory"])
+        .assert()
+        .failure()
+        .code(2);
+
+    // The truly-open owner (older row by id, but the only OPEN one) is accepted.
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-2", "--as", "alice"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn depends_abandon_block_all_reject_wrong_agent_consistently() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+
+    // depends
+    qp(&db).args(["add", "a"]).assert().success(); // QP-1
+    qp(&db).args(["add", "b"]).assert().success(); // QP-2
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "real"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "real"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-2", "--as", "wrong"])
+        .assert()
+        .failure()
+        .code(2);
+
+    // abandon
+    qp(&db).args(["add", "c"]).assert().success(); // QP-3
+    qp(&db)
+        .args(["assign", "QP-3", "--to", "real"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-3", "--as", "real"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["abandon", "QP-3", "--as", "wrong"])
+        .assert()
+        .failure()
+        .code(2);
+
+    // block
+    qp(&db).args(["add", "d"]).assert().success(); // QP-4
+    qp(&db)
+        .args(["assign", "QP-4", "--to", "real"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-4", "--as", "real"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["block", "QP-4", "--as", "wrong", "--new", "blocker"])
+        .assert()
+        .failure()
+        .code(2);
+}

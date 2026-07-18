@@ -30,13 +30,7 @@ pub fn run(db_path: &std::path::Path, a: DependsArgs) -> Result<()> {
                 r.get(0)
             })?;
         if matches!(downstream_state.as_str(), "assigned" | "running") {
-            let assignee: Option<String> = tx
-                .query_row(
-                    "SELECT agent_id FROM assignment WHERE task_id = ? ORDER BY id DESC LIMIT 1",
-                    [task_id],
-                    |r| r.get(0),
-                )
-                .ok();
+            let assignee: Option<String> = db::current_assignment(tx, task_id)?.map(|o| o.agent_id);
             match (a.agent.as_deref(), assignee.as_deref()) {
                 (Some(want), Some(have)) if want == have => {}
                 _ => {

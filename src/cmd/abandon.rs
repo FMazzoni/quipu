@@ -15,17 +15,11 @@ pub fn run(db_path: &std::path::Path, a: AbandonArgs) -> Result<()> {
     let mut conn = db::open(db_path)?;
     let task_id = id::resolve(&conn, &a.task)?;
     db::with_tx(&mut conn, |tx| {
-        let assignment: Option<(i64, String)> = tx
-            .query_row(
-                "SELECT id, agent_id FROM assignment WHERE task_id = ? ORDER BY id DESC LIMIT 1",
-                [task_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .ok();
-        let Some((aid, assignee)) = assignment else {
+        let Some(open) = db::current_assignment(tx, task_id)? else {
             return Err(db::constraint(format!("{} has no assignment", a.task)));
         };
-        if assignee != a.agent {
+        let aid = open.id;
+        if open.agent_id != a.agent {
             return Err(db::constraint(format!("{} not yours", a.task)));
         }
 

@@ -4,7 +4,7 @@
 //! `vault decisions/ → guarded-state-transitions.md` for the contract.
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -359,6 +359,37 @@ pub fn refresh_ready(tx: &Transaction) -> Result<()> {
         [],
     )?;
     Ok(())
+}
+
+/// The single open assignment for a task, if any.
+///
+/// TODO(QP-68): migrates to store.rs in a later wave.
+pub struct OpenAssignment {
+    pub id: i64,
+    pub agent_id: String,
+    pub claimed_at: Option<String>,
+}
+
+/// The decided semantic for "who currently owns this task": latest-OPEN-row.
+/// `ORDER BY id DESC LIMIT 1` is a defensive tiebreak — Slice A's guard against
+/// more than one open assignment per task makes latest-open and latest-by-id
+/// provably equivalent, so it should never actually need to fire.
+pub fn current_assignment(tx: &Transaction, task_id: i64) -> Result<Option<OpenAssignment>> {
+    tx.query_row(
+        "SELECT id, agent_id, claimed_at FROM assignment
+          WHERE task_id = ?1 AND completed_at IS NULL
+          ORDER BY id DESC LIMIT 1",
+        [task_id],
+        |r| {
+            Ok(OpenAssignment {
+                id: r.get(0)?,
+                agent_id: r.get(1)?,
+                claimed_at: r.get(2)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 /// Recursive check: would adding `from -depends_on-> to` create a cycle?
