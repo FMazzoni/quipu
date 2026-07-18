@@ -5,6 +5,7 @@
 mod cmd;
 mod db;
 mod id;
+mod store;
 mod time;
 
 use clap::{Parser, Subcommand};
