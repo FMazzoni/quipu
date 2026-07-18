@@ -1609,6 +1609,66 @@ fn decisions_auto_only_filters_non_auto() {
 }
 
 #[test]
+fn decisions_json_and_auto_only_json_share_row_shape() {
+    // QP-68: --json and --json --auto-only used to take different code
+    // paths (timeline delegation vs. a hand-rolled query). Now both go
+    // through store::events, so their row shapes must match exactly.
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["log", "QP-1", "decision", "auto-decided", "--auto"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["log", "QP-1", "decision", "human-decided"])
+        .assert()
+        .success();
+
+    let all = qp(&db).args(["decisions", "--json"]).assert().success();
+    let all_v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&all.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    let auto = qp(&db)
+        .args(["decisions", "--json", "--auto-only"])
+        .assert()
+        .success();
+    let auto_v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&auto.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+
+    assert_eq!(all_v.as_array().unwrap().len(), 2);
+    assert_eq!(auto_v.as_array().unwrap().len(), 1);
+
+    let mut all_keys: Vec<&str> = all_v.as_array().unwrap()[0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|s| s.as_str())
+        .collect();
+    let mut auto_keys: Vec<&str> = auto_v.as_array().unwrap()[0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|s| s.as_str())
+        .collect();
+    all_keys.sort();
+    auto_keys.sort();
+    assert_eq!(all_keys, auto_keys, "row shape differs between code paths");
+    assert_eq!(
+        all_keys,
+        vec!["agent_id", "id", "kind", "payload", "task", "ts"]
+    );
+}
+
+#[test]
 fn resolve_path_finds_store_from_worktree() {
     // Simulate: a main repo with .quipu/, and a sibling "worktree" dir
     // whose only git-link points back at the main repo. qp run from inside

@@ -3,20 +3,10 @@
 //! is gap-free as seen by readers — `WHERE id > last_seen` is safe.
 
 use crate::db;
+use crate::store::{self, EventFilter};
 use anyhow::Result;
 use clap::Args;
 use std::time::Duration;
-
-/// (event id, task display_id, ts, kind, agent_id, payload)
-// TODO(QP-68): becomes `store::EventRow` when the store layer lands.
-type EventTailRow = (
-    i64,
-    Option<String>,
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-);
 
 #[derive(Args, Debug)]
 pub struct WatchArgs {
@@ -51,67 +41,31 @@ pub fn run(db_path: &std::path::Path, a: WatchArgs) -> Result<()> {
     let mut last_seen = a.since;
     let mut ticks: u64 = 0;
     loop {
-        let mut sql = String::from(
-            "SELECT e.id, t.display_id, e.ts, e.kind, e.agent_id, e.payload
-               FROM event e LEFT JOIN task t ON t.id = e.task_id
-              WHERE e.id > ?1",
-        );
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(last_seen)];
-        if let Some(tid) = task_id {
-            sql.push_str(&format!(" AND e.task_id = ?{}", params.len() + 1));
-            params.push(Box::new(tid));
-        }
-        if !a.kinds.is_empty() {
-            sql.push_str(" AND e.kind IN (");
-            for (i, _) in a.kinds.iter().enumerate() {
-                if i > 0 {
-                    sql.push(',');
-                }
-                sql.push_str(&format!("?{}", params.len() + 1 + i));
-            }
-            sql.push(')');
-            for k in &a.kinds {
-                params.push(Box::new(k.clone()));
-            }
-        }
-        sql.push_str(" ORDER BY e.id ASC");
-
-        let mut stmt = conn.prepare(&sql)?;
-        let pref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-        let rows: Vec<EventTailRow> = stmt
-            .query_map(pref.as_slice(), |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                ))
-            })?
-            .collect::<Result<_, _>>()?;
-        for (id, did, ts, kind, agent, payload) in rows {
-            let payload_v: serde_json::Value = payload
-                .as_deref()
-                .map(serde_json::from_str)
-                .transpose()
-                .ok()
-                .flatten()
-                .unwrap_or(serde_json::Value::Null);
+        let filter = EventFilter {
+            since_id: Some(last_seen),
+            task_id,
+            kinds: &a.kinds,
+            auto_only: false,
+        };
+        let rows = store::events(&conn, &filter)?;
+        for e in rows {
             let v = serde_json::json!({
-                "id": id, "task": did, "ts": ts, "kind": kind,
-                "agent_id": agent, "payload": payload_v,
+                "id": e.id, "task": e.task, "ts": e.ts, "kind": e.kind,
+                "agent_id": e.agent, "payload": e.payload,
             });
             if a.json {
                 println!("{}", serde_json::to_string(&v)?);
             } else {
                 println!(
-                    "{ts}\t{}\t{kind}\t{}\t{payload_v}",
-                    did.unwrap_or_else(|| "-".into()),
-                    agent.unwrap_or_else(|| "-".into())
+                    "{}\t{}\t{}\t{}\t{}",
+                    e.ts,
+                    e.task.unwrap_or_else(|| "-".into()),
+                    e.kind,
+                    e.agent.unwrap_or_else(|| "-".into()),
+                    e.payload
                 );
             }
-            last_seen = id;
+            last_seen = e.id;
         }
         ticks += 1;
         if a.max_ticks > 0 && ticks >= a.max_ticks {

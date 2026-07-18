@@ -178,7 +178,7 @@ fn read_project_uuid(path: &Path) -> Result<Option<String>> {
             [],
             |r| r.get(0),
         )
-        .ok();
+        .optional()?;
     Ok(v)
 }
 
@@ -218,13 +218,30 @@ pub fn open_with(path: &Path, prefix: Option<&str>, default_tags: &[String]) -> 
     // If it is missing, this is either a fresh db or a pre-versioning store —
     // apply the DDL and stamp meta rows via INSERT OR IGNORE (idempotent, no
     // read-then-write).
-    let current: Option<String> = conn
+    //
+    // On a genuinely fresh db, `meta` doesn't exist yet — that's a real
+    // `no such table` error, not a "no rows" case, so `.optional()` alone
+    // would propagate it and fail `init`. Check for the table first so a
+    // missing table is treated the same as a missing row (fresh db), while
+    // any other error on an existing table still propagates.
+    let meta_exists: bool = conn
         .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?
+        .is_some();
+    let current: Option<String> = if meta_exists {
+        conn.query_row(
             "SELECT value FROM meta WHERE key='schema_version'",
             [],
             |r| r.get(0),
         )
-        .ok();
+        .optional()?
+    } else {
+        None
+    };
     if let (Some(cur), Some(user_p)) = (current.as_deref(), prefix) {
         if cur == SCHEMA_VERSION {
             let stored: Option<String> = conn
@@ -233,7 +250,7 @@ pub fn open_with(path: &Path, prefix: Option<&str>, default_tags: &[String]) -> 
                     [],
                     |r| r.get(0),
                 )
-                .ok();
+                .optional()?;
             if let Some(s) = stored.as_deref() {
                 if s != user_p {
                     eprintln!(
@@ -300,7 +317,7 @@ pub fn display_prefix(conn: &rusqlite::Connection) -> Result<String> {
             [],
             |r| r.get(0),
         )
-        .ok();
+        .optional()?;
     Ok(v.unwrap_or_else(|| "QP".to_string()))
 }
 
