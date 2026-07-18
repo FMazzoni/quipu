@@ -867,6 +867,157 @@ fn wait_times_out_with_exit_code() {
 }
 
 #[test]
+fn wait_cohort_done_does_not_release_on_staggered_claim() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db)
+        .args(["add", "a", "--tag", "wave:9"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["add", "b", "--tag", "wave:9"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["assign", "QP-2", "--to", "y"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-2", "--as", "y"])
+        .assert()
+        .success();
+    // Complete only one of the two — the other is still `running`.
+    qp(&db)
+        .args(["complete", "QP-1", "--as", "x", "--decision", "done"])
+        .assert()
+        .success();
+
+    // The barrier must NOT release early: it should time out (exit 3) because
+    // QP-2 is still non-terminal.
+    qp(&db)
+        .args([
+            "wait",
+            "--tag",
+            "wave:9",
+            "--cohort-done",
+            "--interval-ms",
+            "50",
+            "--timeout-secs",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .code(3);
+
+    // Now complete the second task and confirm a clean, prompt return.
+    qp(&db)
+        .args(["complete", "QP-2", "--as", "y", "--decision", "done"])
+        .assert()
+        .success();
+    qp(&db)
+        .args([
+            "wait",
+            "--tag",
+            "wave:9",
+            "--cohort-done",
+            "--interval-ms",
+            "50",
+            "--timeout-secs",
+            "5",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn wait_cohort_done_does_not_release_before_any_claim() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db)
+        .args(["add", "a", "--tag", "wave:10"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    // QP-1 is `assigned`, not yet claimed/running — cohort is not done.
+    qp(&db)
+        .args([
+            "wait",
+            "--tag",
+            "wave:10",
+            "--cohort-done",
+            "--interval-ms",
+            "50",
+            "--timeout-secs",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .code(3);
+}
+
+#[test]
+fn wait_cohort_done_errors_on_empty_cohort() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db)
+        .args([
+            "wait",
+            "--tag",
+            "no-such-tag",
+            "--cohort-done",
+            "--interval-ms",
+            "50",
+            "--timeout-secs",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .code(4);
+}
+
+#[test]
+fn wait_cohort_done_treats_cancelled_as_drained() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db)
+        .args(["add", "a", "--tag", "wave:11"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["cancel", "QP-1", "--reason", "not needed"])
+        .assert()
+        .success();
+    qp(&db)
+        .args([
+            "wait",
+            "--tag",
+            "wave:11",
+            "--cohort-done",
+            "--interval-ms",
+            "50",
+            "--timeout-secs",
+            "1",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
 fn watch_emits_new_events_as_jsonl() {
     use std::io::{BufRead, BufReader};
     use std::process::{Command as PCommand, Stdio};

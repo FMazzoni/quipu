@@ -37,8 +37,10 @@ qp claim  $t --as "wave-$WAVE-agent-$i"
 # ... do work ...
 qp complete $t --as "wave-$WAVE-agent-$i" --decision "result summary"
 
-# 4) Wait for the wave to drain (running → done/pending)
-qp wait --tag wave:$WAVE --state running --empty --interval-ms 1000 --timeout-secs 1800
+# 4) Wait for the wave to drain (running → done/pending). --cohort-done blocks
+#    until total>0 && non-terminal==0 for the tagged cohort; an empty cohort
+#    (typo'd tag) is a distinct error (exit 4), never a silent instant success.
+qp wait --tag wave:$WAVE --cohort-done --interval-ms 1000 --timeout-secs 1800
 
 # 5) Critique pass (spawn a critic; for each issue):
 #    qp add "fix: <finding>" --depends-on <reviewed-QP-N> --tag wave:$WAVE --tag kind:critique
@@ -49,7 +51,7 @@ while [ -n "$(qp list --tag wave:$WAVE --tag kind:critique --state ready --json 
     qp assign $t --to "wave-$WAVE-fix-$t"
   done
   # dispatch + wait
-  qp wait --tag wave:$WAVE --state running --empty --interval-ms 1000 --timeout-secs 600
+  qp wait --tag wave:$WAVE --cohort-done --interval-ms 1000 --timeout-secs 600
 done
 
 # 7) Reclaim any orphans (e.g. subagent crashed without completing)
