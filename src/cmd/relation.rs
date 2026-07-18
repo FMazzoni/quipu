@@ -52,10 +52,19 @@ pub fn run(db_path: &std::path::Path, a: RelationArgs) -> Result<()> {
             let f = id::resolve(&conn, &from)?;
             let t = id::resolve(&conn, &to)?;
             db::with_tx(&mut conn, |tx| {
-                tx.execute(
+                let n = tx.execute(
                     "DELETE FROM relation WHERE from_task_id = ? AND to_task_id = ? AND kind = ?",
                     rusqlite::params![f, t, kind],
                 )?;
+                if n > 0 {
+                    db::insert_event(
+                        tx,
+                        Some(f),
+                        "relation_removed",
+                        None,
+                        Some(&serde_json::json!({"kind": kind, "to": to})),
+                    )?;
+                }
                 Ok(())
             })?;
         }

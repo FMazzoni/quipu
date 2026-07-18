@@ -172,54 +172,10 @@ pub fn run(db_path: &std::path::Path, a: ShowArgs) -> Result<()> {
     for (ts, kind, _agent, payload) in &events {
         // Short HH:MM:SS slice if RFC3339; otherwise full ts.
         let short_ts = ts.get(11..19).unwrap_or(ts.as_str());
-        let summary = summarize_payload(kind, payload);
+        let summary = crate::cmd::render::summarize_payload(kind, payload);
         println!("  {}  {:<14}  {}", short_ts, kind, summary);
     }
     Ok(())
-}
-
-fn summarize_payload(kind: &str, p: &Value) -> String {
-    match kind {
-        "state_change" => format!("→ {}", p.get("to").and_then(|v| v.as_str()).unwrap_or("")),
-        "decision" => {
-            let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            if p.get("auto").and_then(|v| v.as_bool()).unwrap_or(false) {
-                format!("[auto] {text}")
-            } else {
-                text.to_string()
-            }
-        }
-        "dep_added" | "dep_removed" => p
-            .get("on")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        "tag_added" | "tag_removed" => p
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        "blocker" => p
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        "edit" => {
-            if let Some(obj) = p.get("changes").and_then(|v| v.as_object()) {
-                obj.keys().cloned().collect::<Vec<_>>().join(",")
-            } else {
-                String::new()
-            }
-        }
-        _ => {
-            let s = serde_json::to_string(p).unwrap_or_default();
-            if s.len() > 80 {
-                format!("{}...", &s[..80])
-            } else {
-                s
-            }
-        }
-    }
 }
 
 /// Hard-wrap text to `width` columns, splitting on whitespace. Preserves

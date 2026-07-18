@@ -252,6 +252,38 @@ fn relation_add_list_rm() {
         .args(["relation", "rm", "QP-2", "variant-of", "QP-1"])
         .assert()
         .success();
+    let out = qp(&db)
+        .args(["timeline", "QP-2", "--json"])
+        .assert()
+        .success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let events: Vec<serde_json::Value> = serde_json::from_str(s.trim()).unwrap();
+    assert!(
+        events.iter().any(|e| e["kind"] == "relation_removed"),
+        "expected a relation_removed event in timeline, got: {events:?}"
+    );
+}
+
+#[test]
+fn payload_summary_survives_multibyte_char_at_truncation_boundary() {
+    // The fallback arm of summarize_payload truncates the JSON-serialized
+    // payload at 80 bytes. Craft a body whose serialized `{"text":"..."}`
+    // payload has a multi-byte UTF-8 character (the arrow `→`, 3 bytes)
+    // straddling byte offset 80, so a naive `&s[..80]` byte-slice would
+    // panic on a non-char-boundary. Use a kind ("note") that isn't
+    // special-cased, so it falls into the generic truncation arm.
+    let text = format!("{}→{}", "a".repeat(69), "a".repeat(20));
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["log", "QP-1", "note", &text])
+        .assert()
+        .success();
+    qp(&db).args(["timeline", "QP-1"]).assert().success();
+    qp(&db).args(["show", "QP-1"]).assert().success();
+    qp(&db).arg("report").assert().success();
 }
 
 #[test]
