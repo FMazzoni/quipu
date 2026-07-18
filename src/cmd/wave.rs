@@ -1,4 +1,4 @@
-use crate::db;
+use crate::{db, store};
 use anyhow::Result;
 use clap::Args;
 
@@ -8,61 +8,56 @@ pub struct WaveArgs {
     pub json: bool,
 }
 
-const GROUPS: &[(&str, &str)] = &[
-    ("ready",    "SELECT t.display_id, t.title, t.state, \
-                         (SELECT a.agent_id FROM assignment a WHERE a.task_id=t.id ORDER BY a.id DESC LIMIT 1), \
-                         (SELECT kind FROM event e WHERE e.task_id=t.id ORDER BY e.id DESC LIMIT 1), \
-                         (SELECT ts   FROM event e WHERE e.task_id=t.id ORDER BY e.id DESC LIMIT 1) \
-                  FROM task t WHERE t.state='ready' ORDER BY t.id ASC"),
-    ("assigned", "SELECT t.display_id, t.title, t.state, \
-                         (SELECT a.agent_id FROM assignment a WHERE a.task_id=t.id ORDER BY a.id DESC LIMIT 1), \
-                         (SELECT kind FROM event e WHERE e.task_id=t.id ORDER BY e.id DESC LIMIT 1), \
-                         (SELECT ts   FROM event e WHERE e.task_id=t.id ORDER BY e.id DESC LIMIT 1) \
-                  FROM task t WHERE t.state='assigned' ORDER BY t.id ASC"),
-    ("running",  "SELECT t.display_id, t.title, t.state, \
-                         (SELECT a.agent_id FROM assignment a WHERE a.task_id=t.id ORDER BY a.id DESC LIMIT 1), \
-                         (SELECT kind FROM event e WHERE e.task_id=t.id ORDER BY e.id DESC LIMIT 1), \
-                         (SELECT ts   FROM event e WHERE e.task_id=t.id ORDER BY e.id DESC LIMIT 1) \
-                  FROM task t WHERE t.state='running' ORDER BY t.id ASC"),
-    // Pending tasks appear here iff they have at least one unresolved dep
-    // (depends_on task is not done/cancelled). This is broader than the
-    // skill-layer `kind:blocker` convention — any unresolved dep qualifies.
-    // Pending-without-unresolved-deps tasks stay hidden from the wave view.
-    ("pending",  "SELECT t.display_id, t.title, t.state, \
-                         (SELECT a.agent_id FROM assignment a WHERE a.task_id=t.id ORDER BY a.id DESC LIMIT 1), \
-                         (SELECT kind FROM event e WHERE e.task_id=t.id ORDER BY e.id DESC LIMIT 1), \
-                         (SELECT ts   FROM event e WHERE e.task_id=t.id ORDER BY e.id DESC LIMIT 1) \
-                  FROM task t WHERE t.state='pending' \
-                    AND EXISTS (SELECT 1 FROM dep d JOIN task t2 ON t2.id=d.depends_on_task_id \
-                                 WHERE d.task_id=t.id AND t2.state NOT IN ('done','cancelled')) \
-                  ORDER BY t.id ASC"),
-];
+/// The four state groups shown by `qp wave`, in display order.
+const STATES: &[&str] = &["ready", "assigned", "running", "pending"];
 
 pub fn run(db_path: &std::path::Path, a: WaveArgs) -> Result<()> {
     let conn = db::open(db_path)?;
     let mut out = serde_json::Map::new();
-    for (label, sql) in GROUPS {
-        let mut s = conn.prepare(sql)?;
-        let rows = s.query_map([], |r| {
-            Ok(serde_json::json!({
-                "display_id": r.get::<_, String>(0)?,
-                "title":      r.get::<_, String>(1)?,
-                "state":      r.get::<_, String>(2)?,
-                "agent":      r.get::<_, Option<String>>(3)?,
-                "last_kind":  r.get::<_, Option<String>>(4)?,
-                "last_ts":    r.get::<_, Option<String>>(5)?,
-            }))
-        })?;
-        let arr: Vec<_> = rows.collect::<Result<_, _>>()?;
-        out.insert((*label).to_string(), serde_json::Value::Array(arr));
+    for &label in STATES {
+        let filter = store::TaskFilter {
+            state: Some(label),
+            assigned_to_glob: None,
+            tags: &[],
+            tier: None,
+        };
+        let mut rows = store::tasks(&conn, &filter)?;
+
+        // Pending tasks appear here iff they have at least one unresolved dep
+        // (depends_on task is not done/cancelled). This is broader than the
+        // skill-layer `kind:blocker` convention — any unresolved dep qualifies.
+        // Pending-without-unresolved-deps tasks stay hidden from the wave view.
+        if label == "pending" {
+            let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+            let blockers = store::unresolved_blockers_by_task(&conn, &ids)?;
+            rows.retain(|r| blockers.get(&r.id).is_some_and(|v| !v.is_empty()));
+        }
+
+        let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+        let last_event = store::last_event_by_task(&conn, &ids)?;
+        let arr: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| {
+                let ev = last_event.get(&r.id);
+                serde_json::json!({
+                    "display_id": r.display_id,
+                    "title": r.title,
+                    "state": r.state,
+                    "agent": r.agent,
+                    "last_kind": ev.and_then(|v| v.get("kind")).and_then(|v| v.as_str()),
+                    "last_ts": ev.and_then(|v| v.get("ts")).and_then(|v| v.as_str()),
+                })
+            })
+            .collect();
+        out.insert(label.to_string(), serde_json::Value::Array(arr));
     }
     let v = serde_json::Value::Object(out);
     if a.json {
         println!("{}", serde_json::to_string(&v)?);
     } else {
         let mut any = false;
-        for (label, _) in GROUPS {
-            let arr = v[*label].as_array().unwrap();
+        for &label in STATES {
+            let arr = v[label].as_array().unwrap();
             if arr.is_empty() {
                 continue;
             }
