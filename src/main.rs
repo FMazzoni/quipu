@@ -1,5 +1,6 @@
 //! `qp` — quipu CLI entry point. Parses subcommands and dispatches to `src/cmd/<name>.rs`.
-//! Exit codes: 0 success | 1 generic error | 2 constraint violation | 3 wait timeout.
+//! Exit codes: 0 success | 1 generic error | 2 constraint violation | 3 wait timeout |
+//! 4 wait --cohort-done matched an empty cohort.
 
 mod cmd;
 mod db;
