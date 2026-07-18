@@ -1127,6 +1127,42 @@ fn wave_lists_pending_tasks_that_have_unresolved_deps() {
 }
 
 #[test]
+fn wave_excludes_pending_task_without_unresolved_deps() {
+    // The `pending` state normally implies an unresolved dep — refresh_ready
+    // promotes to `ready` as soon as the last one clears — so this state
+    // (pending with zero unresolved deps) isn't reachable through the CLI.
+    // Force it directly to prove wave.rs's pending arm still carries its
+    // extra unresolved-dep predicate rather than showing every pending task.
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success(); // QP-1 ready
+    qp(&db)
+        .args(["add", "b", "--depends-on", "QP-1"])
+        .assert()
+        .success(); // QP-2 pending, unresolved dep on QP-1
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "INSERT INTO task(display_id, title, state) VALUES ('QP-3', 'c', 'pending')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let out = qp(&db).args(["wave", "--json"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+    let pending = v["pending"].as_array().unwrap();
+    assert_eq!(
+        pending.len(),
+        1,
+        "QP-3 has no unresolved dep and must not appear"
+    );
+    assert_eq!(pending[0]["display_id"], "QP-2");
+}
+
+#[test]
 fn add_with_custom_prefix_uses_it() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");

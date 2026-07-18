@@ -6,7 +6,7 @@
 //! JSON mode: full task record (mirroring `qp list --json` for that one task)
 //! plus a `recent_events` field with the last 10 events.
 
-use crate::{db, id};
+use crate::{db, id, store};
 use anyhow::Result;
 use clap::Args;
 use serde_json::Value;
@@ -47,13 +47,7 @@ pub fn run(db_path: &std::path::Path, a: ShowArgs) -> Result<()> {
         },
     )?;
 
-    let agent: Option<String> = conn
-        .query_row(
-            "SELECT agent_id FROM assignment WHERE task_id = ?1 ORDER BY id DESC LIMIT 1",
-            [tid],
-            |r| r.get(0),
-        )
-        .ok();
+    let agent = store::latest_agent(&conn, tid)?;
 
     let mut tag_stmt = conn.prepare("SELECT name FROM tag WHERE task_id = ?1 ORDER BY name")?;
     let mut tags: Vec<String> = tag_stmt
@@ -61,14 +55,10 @@ pub fn run(db_path: &std::path::Path, a: ShowArgs) -> Result<()> {
         .collect::<Result<_, _>>()?;
     tags.sort();
 
-    let mut blk_stmt = conn.prepare(
-        "SELECT t2.display_id FROM dep d JOIN task t2 ON t2.id = d.depends_on_task_id
-          WHERE d.task_id = ?1 AND t2.state NOT IN ('done','cancelled')
-          ORDER BY t2.id",
-    )?;
-    let blocked_by: Vec<String> = blk_stmt
-        .query_map([tid], |r| r.get::<_, String>(0))?
-        .collect::<Result<_, _>>()?;
+    let mut blocked_by = store::unresolved_blockers_by_task(&conn, &[tid])?
+        .remove(&tid)
+        .unwrap_or_default();
+    blocked_by.sort();
 
     // Recent events: last 10, newest first.
     let mut s = conn.prepare(

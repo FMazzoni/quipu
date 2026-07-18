@@ -1,11 +1,7 @@
-use crate::{db, id};
+use crate::{db, id, store};
 use anyhow::Result;
 use clap::Args;
 use std::collections::{HashMap, HashSet};
-
-/// (id, display_id, title, state, tier, description)
-// TODO(QP-68): becomes `store::TaskRow` when the store layer lands.
-type TreeTaskRow = (i64, String, String, String, Option<String>, Option<String>);
 
 #[derive(Args, Debug)]
 pub struct TreeArgs {
@@ -28,40 +24,21 @@ pub fn run(db_path: &std::path::Path, a: TreeArgs) -> Result<()> {
     // If a root task is given, compute its transitive dep subtree (inclusive).
     let subtree: Option<HashSet<i64>> = if let Some(t) = &a.task {
         let root = id::resolve(&conn, t)?;
-        let mut s = conn.prepare(
-            "WITH RECURSIVE sub(id) AS (
-                SELECT ?1
-                UNION
-                SELECT d.depends_on_task_id FROM dep d JOIN sub ON d.task_id = sub.id
-             ) SELECT id FROM sub",
-        )?;
-        let ids: HashSet<i64> = s
-            .query_map([root], |r| r.get::<_, i64>(0))?
-            .collect::<Result<_, _>>()?;
-        Some(ids)
+        Some(store::subtree_ids(&conn, root)?)
     } else {
         None
     };
 
-    let mut tasks: Vec<TreeTaskRow> = Vec::new();
-    let mut stmt = conn.prepare(
-        "SELECT id, display_id, title, state, tier, description FROM task
-         WHERE (?1 IS NULL OR tier = ?1) ORDER BY id ASC",
-    )?;
-    let rows = stmt.query_map(rusqlite::params![a.tier.as_deref()], |r| {
-        Ok((
-            r.get(0)?,
-            r.get(1)?,
-            r.get(2)?,
-            r.get(3)?,
-            r.get(4)?,
-            r.get(5)?,
-        ))
-    })?;
-    for r in rows {
-        let row = r?;
+    let filter = store::TaskFilter {
+        state: None,
+        assigned_to_glob: None,
+        tags: &[],
+        tier: a.tier.as_deref(),
+    };
+    let mut tasks: Vec<store::TaskRow> = Vec::new();
+    for row in store::tasks(&conn, &filter)? {
         if let Some(set) = &subtree {
-            if !set.contains(&row.0) {
+            if !set.contains(&row.id) {
                 continue;
             }
         }
@@ -94,13 +71,14 @@ pub fn run(db_path: &std::path::Path, a: TreeArgs) -> Result<()> {
 
     if a.json {
         let mut out = Vec::new();
-        for (id, did, title, state, tier, description) in &tasks {
+        for row in &tasks {
             let mut obj = serde_json::json!({
-                "id": id, "display_id": did, "title": title, "state": state, "tier": tier,
-                "depends_on": deps.get(id).cloned().unwrap_or_default(),
-                "tags": tags_by.get(id).cloned().unwrap_or_default(),
+                "id": row.id, "display_id": row.display_id, "title": row.title,
+                "state": row.state, "tier": row.tier,
+                "depends_on": deps.get(&row.id).cloned().unwrap_or_default(),
+                "tags": tags_by.get(&row.id).cloned().unwrap_or_default(),
             });
-            if let Some(d) = description {
+            if let Some(d) = &row.description {
                 obj.as_object_mut()
                     .unwrap()
                     .insert("description".into(), serde_json::Value::String(d.clone()));
@@ -109,9 +87,9 @@ pub fn run(db_path: &std::path::Path, a: TreeArgs) -> Result<()> {
         }
         println!("{}", serde_json::to_string(&out)?);
     } else {
-        for (id, did, title, state, tier, description) in &tasks {
+        for row in &tasks {
             let dep_s = deps
-                .get(id)
+                .get(&row.id)
                 .map(|v| {
                     v.iter()
                         .map(|d| {
@@ -124,14 +102,17 @@ pub fn run(db_path: &std::path::Path, a: TreeArgs) -> Result<()> {
                         .join(",")
                 })
                 .unwrap_or_default();
-            let tier_s = tier.as_deref().unwrap_or("-");
+            let tier_s = row.tier.as_deref().unwrap_or("-");
             let dep_part = if dep_s.is_empty() {
                 "".into()
             } else {
                 format!(" <- [{dep_s}]")
             };
             let tag_part = if a.show_tags {
-                let ts = tags_by.get(id).map(|v| v.join(",")).unwrap_or_default();
+                let ts = tags_by
+                    .get(&row.id)
+                    .map(|v| v.join(","))
+                    .unwrap_or_default();
                 if ts.is_empty() {
                     "".into()
                 } else {
@@ -140,9 +121,10 @@ pub fn run(db_path: &std::path::Path, a: TreeArgs) -> Result<()> {
             } else {
                 "".into()
             };
+            let (did, state, title) = (&row.display_id, &row.state, &row.title);
             println!("{did:>5}  {state:<9}  {tier_s:<8}  {title}{dep_part}{tag_part}");
             if a.with_description {
-                if let Some(d) = description.as_deref().filter(|s| !s.is_empty()) {
+                if let Some(d) = row.description.as_deref().filter(|s| !s.is_empty()) {
                     let lines = crate::cmd::show::wrap_text(d, 80);
                     for line in lines.iter().take(3) {
                         println!("       {}", line);

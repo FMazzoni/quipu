@@ -1,19 +1,6 @@
-use crate::db;
+use crate::{db, store};
 use anyhow::Result;
 use clap::Args;
-use std::collections::HashMap;
-
-/// (id, display_id, title, state, tier, description, agent)
-// TODO(QP-68): becomes `store::TaskRow` when the store layer lands.
-type TaskCoreRow = (
-    i64,
-    String,
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-);
 
 #[derive(Args, Debug)]
 pub struct ListArgs {
@@ -33,95 +20,30 @@ pub struct ListArgs {
 
 pub fn run(db_path: &std::path::Path, a: ListArgs) -> Result<()> {
     let conn = db::open(db_path)?;
-    // Base task query with filters.
-    let mut sql = String::from(
-        "SELECT t.id, t.display_id, t.title, t.state, t.tier, t.description,
-                (SELECT a.agent_id FROM assignment a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1) AS agent
-           FROM task t WHERE 1=1");
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-    if let Some(s) = &a.state {
-        sql.push_str(" AND t.state = ?");
-        params.push(Box::new(s.clone()));
-    }
-    if let Some(who) = &a.assigned_to {
-        sql.push_str(" AND (SELECT a.agent_id FROM assignment a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1) GLOB ?");
-        params.push(Box::new(who.clone()));
-    }
-    for tag in &a.tag {
-        sql.push_str(" AND EXISTS (SELECT 1 FROM tag WHERE tag.task_id = t.id AND tag.name = ?)");
-        params.push(Box::new(tag.clone()));
-    }
-    sql.push_str(" ORDER BY t.id ASC");
-    let mut stmt = conn.prepare(&sql)?;
-    let pref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-    let core: Vec<TaskCoreRow> = stmt
-        .query_map(pref.as_slice(), |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-                r.get(6)?,
-            ))
-        })?
-        .collect::<Result<_, _>>()?;
+    let filter = store::TaskFilter {
+        state: a.state.as_deref(),
+        assigned_to_glob: a.assigned_to.as_deref(),
+        tags: &a.tag,
+        tier: None,
+    };
+    let core = store::tasks(&conn, &filter)?;
 
     // Bulk-fetch tags, blocked_by, last_event for the selected ids.
-    let ids: Vec<i64> = core.iter().map(|r| r.0).collect();
-    let mut tags_by: HashMap<i64, Vec<String>> = HashMap::new();
-    let mut blockers_by: HashMap<i64, Vec<String>> = HashMap::new();
-    let mut last_event_by: HashMap<i64, serde_json::Value> = HashMap::new();
-    if !ids.is_empty() {
-        let placeholders = std::iter::repeat_n("?", ids.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let q = format!("SELECT task_id, name FROM tag WHERE task_id IN ({placeholders})");
-        let mut s = conn.prepare(&q)?;
-        let pref: Vec<&dyn rusqlite::ToSql> =
-            ids.iter().map(|i| i as &dyn rusqlite::ToSql).collect();
-        for r in s.query_map(pref.as_slice(), |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-        })? {
-            let (t, n) = r?;
-            tags_by.entry(t).or_default().push(n);
-        }
-        let q = format!(
-            "SELECT d.task_id, t2.display_id
-               FROM dep d JOIN task t2 ON t2.id = d.depends_on_task_id
-              WHERE d.task_id IN ({placeholders}) AND t2.state NOT IN ('done','cancelled')"
-        );
-        let mut s = conn.prepare(&q)?;
-        for r in s.query_map(pref.as_slice(), |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-        })? {
-            let (t, d) = r?;
-            blockers_by.entry(t).or_default().push(d);
-        }
-        let q = format!(
-            "SELECT task_id, kind, ts, payload FROM event
-              WHERE id IN (SELECT MAX(id) FROM event WHERE task_id IN ({placeholders}) GROUP BY task_id)");
-        let mut s = conn.prepare(&q)?;
-        for r in s.query_map(pref.as_slice(), |r| {
-            let payload: Option<String> = r.get(3)?;
-            let payload_v: serde_json::Value = payload.as_deref()
-                .map(serde_json::from_str).transpose().ok().flatten().unwrap_or(serde_json::Value::Null);
-            Ok((r.get::<_, i64>(0)?, serde_json::json!({
-                "kind": r.get::<_, String>(1)?, "ts": r.get::<_, String>(2)?, "payload": payload_v
-            })))
-        })? { let (t, v) = r?; last_event_by.insert(t, v); }
-    }
+    let ids: Vec<i64> = core.iter().map(|r| r.id).collect();
+    let mut tags_by = store::tags_by_task(&conn, &ids)?;
+    let mut blockers_by = store::unresolved_blockers_by_task(&conn, &ids)?;
+    let mut last_event_by = store::last_event_by_task(&conn, &ids)?;
 
     let mut out = Vec::with_capacity(core.len());
-    for (id, did, title, state, tier, description, agent) in core {
+    for row in core {
         let obj = serde_json::json!({
-            "id": id, "display_id": did, "title": title, "state": state, "tier": tier,
-            "description": description,
-            "agent": agent,
-            "tags": tags_by.remove(&id).unwrap_or_default(),
-            "blocked_by": blockers_by.remove(&id).unwrap_or_default(),
-            "last_event": last_event_by.remove(&id),
+            "id": row.id, "display_id": row.display_id, "title": row.title,
+            "state": row.state, "tier": row.tier,
+            "description": row.description,
+            "agent": row.agent,
+            "tags": tags_by.remove(&row.id).unwrap_or_default(),
+            "blocked_by": blockers_by.remove(&row.id).unwrap_or_default(),
+            "last_event": last_event_by.remove(&row.id),
         });
         out.push(obj);
     }
