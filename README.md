@@ -50,7 +50,6 @@ Raw `cargo install --path .` works too; the `justfile` is just a shortcut layer.
 ## Known MVP limitations
 
 - No liveness detection (no PID/heartbeat). Orchestrator runs `qp reclaim` on detected failures.
-- `decisions --auto-only` is parsed but not yet filtered.
 - Single SQLite, single machine. Remote/sync is v2.
 - Display ID prefix (`T`) is hardcoded.
 - Exit codes: `0` success, `1` generic error, `2` constraint violation, `3` wait timeout.
