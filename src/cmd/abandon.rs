@@ -29,25 +29,16 @@ pub fn run(db_path: &std::path::Path, a: AbandonArgs) -> Result<()> {
             return Err(db::constraint(format!("{} not yours", a.task)));
         }
 
-        // Single guarded UPDATE: destination is `pending` if any unresolved dep exists,
-        // else `ready`. Matches the post-MVP state machine (no `blocked`).
+        // Route through `pending`, then let `refresh_ready` promote it back to `ready`
+        // if it has no unresolved deps. Same destination logic as `reclaim`, one code path.
         let n = tx.execute(
-            "UPDATE task
-                SET state = CASE
-                    WHEN EXISTS (
-                        SELECT 1 FROM dep d
-                        JOIN task t2 ON t2.id = d.depends_on_task_id
-                        WHERE d.task_id = task.id
-                          AND t2.state NOT IN ('done','cancelled')
-                    ) THEN 'pending'
-                    ELSE 'ready'
-                END
-              WHERE id = ?1 AND state IN ('assigned','running')",
+            "UPDATE task SET state = 'pending' WHERE id = ?1 AND state IN ('assigned','running')",
             [task_id],
         )?;
         if n != 1 {
             return Err(db::constraint(format!("{} not assigned/running", a.task)));
         }
+        db::refresh_ready(tx)?;
 
         // Read back the resulting state for the event payload. Permitted exception:
         // auxiliary read for error/event-quality, not control flow.

@@ -23,10 +23,18 @@ pub fn run(db_path: &std::path::Path, a: AssignArgs) -> Result<()> {
                 a.task
             )));
         }
-        tx.execute(
-            "INSERT INTO assignment(task_id, agent_id) VALUES (?,?)",
+        let n = tx.execute(
+            "INSERT INTO assignment(task_id, agent_id)
+             SELECT ?1, ?2 WHERE NOT EXISTS (
+               SELECT 1 FROM assignment WHERE task_id = ?1 AND completed_at IS NULL)",
             rusqlite::params![task_id, a.to],
         )?;
+        if n != 1 {
+            return Err(db::constraint(format!(
+                "{} has a stale open assignment",
+                a.task
+            )));
+        }
         db::insert_event(
             tx,
             Some(task_id),

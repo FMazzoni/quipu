@@ -72,6 +72,62 @@ fn reclaim_force_releases_without_agent_id() {
 }
 
 #[test]
+fn reclaim_returns_to_pending_when_unresolved_dep_exists() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "blocker"]).assert().success(); // QP-1
+    qp(&db).args(["add", "main"]).assert().success(); // QP-2
+    qp(&db)
+        .args(["assign", "QP-2", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-2", "--as", "x"])
+        .assert()
+        .success();
+    // Inject an unresolved dep onto QP-2 while running.
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["reclaim", "QP-2", "--reason", "agent unresponsive"])
+        .assert()
+        .success();
+    // Should be pending now — assign rejected.
+    qp(&db)
+        .args(["assign", "QP-2", "--to", "y"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
+fn assign_rejects_when_stale_open_assignment_exists() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success(); // QP-1
+
+    // Directly inject a stale open assignment row — not reachable through the CLI
+    // under normal operation, but must be guarded against regardless.
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "INSERT INTO assignment(task_id, agent_id) VALUES (1, 'ghost')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
 fn version_flag_prints_version() {
     Command::cargo_bin("qp")
         .unwrap()
