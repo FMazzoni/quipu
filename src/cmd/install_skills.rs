@@ -21,16 +21,24 @@ pub fn run(a: InstallSkillsArgs) -> Result<()> {
                     .ok()
                     .and_then(|p| p.parent().map(|d| d.join("../../")))
             })
-            .unwrap_or_else(|| PathBuf::from("."));
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "could not determine skills source root: current_exe() failed and QP_SKILLS_SRC is not set"
+                )
+            })?;
         // QP_SKILLS_SRC (or the derived base) is the project root; skills live in base/skills/
         base.join("skills")
     };
-    let target = a.target.unwrap_or_else(|| {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_default();
-        home.join(".claude/skills")
-    });
+    let target = match a.target {
+        Some(t) => t,
+        None => {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .filter(|p| !p.as_os_str().is_empty())
+                .ok_or_else(|| anyhow::anyhow!("HOME is not set; pass --target explicitly"))?;
+            home.join(".claude/skills")
+        }
+    };
     std::fs::create_dir_all(&target)?;
     for entry in
         std::fs::read_dir(&src_root).with_context(|| format!("reading {}", src_root.display()))?
@@ -41,6 +49,7 @@ pub fn run(a: InstallSkillsArgs) -> Result<()> {
         }
         let name = entry.file_name();
         let dst = target.join(format!("qp-{}", name.to_string_lossy()));
+        guard_destructive_target(&dst)?;
         let _ = std::fs::remove_file(&dst);
         let _ = std::fs::remove_dir_all(&dst);
         if a.copy {
@@ -52,6 +61,23 @@ pub fn run(a: InstallSkillsArgs) -> Result<()> {
             copy_dir_recursive(&entry.path(), &dst)?;
         }
         println!("installed {} -> {}", entry.path().display(), dst.display());
+    }
+    Ok(())
+}
+
+/// Defence-in-depth: refuse to remove a path that is too shallow (e.g. a
+/// relative path resolved against an unexpected cwd) or that doesn't look
+/// like one of our own `qp-<name>` install targets.
+fn guard_destructive_target(dst: &std::path::Path) -> Result<()> {
+    let name_ok = dst
+        .file_name()
+        .map(|n| n.to_string_lossy().starts_with("qp-"))
+        .unwrap_or(false);
+    if dst.components().count() < 3 || !name_ok {
+        anyhow::bail!(
+            "refusing to remove suspicious path {}: too shallow or missing qp- prefix",
+            dst.display()
+        );
     }
     Ok(())
 }
