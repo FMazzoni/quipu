@@ -1,0 +1,5 @@
+# Bulk reformat commits -- ignore for blame.
+# Use: git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# style: apply cargo fmt across the tree (QP-74)
+6c1e3b5b0b6667ebfd9d9997e4d6a7b5374a24f9
