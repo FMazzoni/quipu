@@ -844,6 +844,28 @@ fn install_skills_symlinks_into_target() {
 }
 
 #[test]
+fn install_skills_fails_hard_when_home_unset_and_no_target() {
+    let src = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(src.path().join("skills/wave")).unwrap();
+    std::fs::write(src.path().join("skills/wave/SKILL.md"), "x").unwrap();
+
+    Command::cargo_bin("qp")
+        .unwrap()
+        .current_dir(cwd.path())
+        .env("QP_SKILLS_SRC", src.path())
+        .env_remove("HOME")
+        .args(["install-skills"])
+        .assert()
+        .failure();
+
+    assert!(
+        !cwd.path().join(".claude").exists(),
+        "install-skills must not create .claude in cwd when HOME is unset"
+    );
+}
+
+#[test]
 fn wave_lists_pending_tasks_that_have_unresolved_deps() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
