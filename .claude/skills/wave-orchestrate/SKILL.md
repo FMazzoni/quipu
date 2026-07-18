@@ -73,8 +73,17 @@ For multi-subagent waves: open a wave ticket and child impl tickets so `qp tree`
 ./target/release/qp add "Wave: <feature>" --tag kind:wave
 ./target/release/qp add "<Slice A title>" --tag kind:impl
 ./target/release/qp add "<Slice B title>" --tag kind:impl
-./target/release/qp depends QP-<wave> QP-<a> QP-<b>
+
+# One edge per call — `qp depends` takes a single --on, not a list.
+./target/release/qp depends QP-<wave> --on QP-<a>
+./target/release/qp depends QP-<wave> --on QP-<b>
 ```
+
+The wave ticket depends on its slices, so it sits `pending` until they all
+complete and then auto-promotes to `ready`. Use the same one-edge-per-call
+form to express ordering *between* slices (`qp depends QP-<b> --on QP-<a>`
+when B must land after A) — the DAG then enforces the sequence instead of
+you remembering it.
 
 **Skip ticketing** for single-subagent waves — open the impl ticket directly, no wave wrapper.
 
