@@ -64,9 +64,13 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
         }
 
         // (4) Close the in-flight assignment by specific id (mirrors abandon.rs pattern).
-        let aid: i64 = tx.query_row(
-            "SELECT id FROM assignment WHERE task_id = ? AND completed_at IS NULL ORDER BY id DESC LIMIT 1",
-            [task_id], |r| r.get(0))?;
+        let Some(open) = db::current_assignment(tx, task_id)? else {
+            return Err(db::constraint(format!(
+                "no open assignment to close for {}",
+                a.task
+            )));
+        };
+        let aid = open.id;
         let n = tx.execute(
             "UPDATE assignment SET completed_at = ?, outcome = 'abandoned' WHERE id = ?",
             rusqlite::params![crate::time::now_rfc3339(), aid],

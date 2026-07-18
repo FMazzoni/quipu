@@ -13,31 +13,18 @@ pub fn run(db_path: &std::path::Path, a: ClaimArgs) -> Result<()> {
     let mut conn = db::open(db_path)?;
     let task_id = id::resolve(&conn, &a.task)?;
     db::with_tx(&mut conn, |tx| {
-        // Latest assignment must be (a) for this agent (b) un-claimed (c) un-completed.
-        let row: Option<(i64, String, Option<String>, Option<String>)> = tx
-            .query_row(
-                "SELECT id, agent_id, claimed_at, completed_at FROM assignment
-              WHERE task_id = ? ORDER BY id DESC LIMIT 1",
-                [task_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .ok();
-        let Some((aid, assignee, claimed, completed)) = row else {
+        // Latest open assignment must be (a) for this agent (b) un-claimed.
+        let Some(open) = db::current_assignment(tx, task_id)? else {
             return Err(db::constraint(format!("{} has no assignment", a.task)));
         };
-        if completed.is_some() {
-            return Err(db::constraint(format!(
-                "{} assignment already completed",
-                a.task
-            )));
-        }
-        if claimed.is_some() {
+        let aid = open.id;
+        if open.claimed_at.is_some() {
             return Err(db::constraint(format!("{} already claimed", a.task)));
         }
-        if assignee != a.agent {
+        if open.agent_id != a.agent {
             return Err(db::constraint(format!(
-                "{} assigned to `{assignee}`, not `{}`",
-                a.task, a.agent
+                "{} assigned to `{}`, not `{}`",
+                a.task, open.agent_id, a.agent
             )));
         }
         // Guarded transition: task must currently be `assigned`.
