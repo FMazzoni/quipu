@@ -1,9 +1,12 @@
+use crate::db;
 use anyhow::Result;
 use clap::Args;
-use crate::db;
 
 #[derive(Args, Debug)]
-pub struct WaveArgs { #[arg(long)] pub json: bool }
+pub struct WaveArgs {
+    #[arg(long)]
+    pub json: bool,
+}
 
 const GROUPS: &[(&str, &str)] = &[
     ("ready",    "SELECT t.display_id, t.title, t.state, \
@@ -40,32 +43,39 @@ pub fn run(db_path: &std::path::Path, a: WaveArgs) -> Result<()> {
     let mut out = serde_json::Map::new();
     for (label, sql) in GROUPS {
         let mut s = conn.prepare(sql)?;
-        let rows = s.query_map([], |r| Ok(serde_json::json!({
-            "display_id": r.get::<_, String>(0)?,
-            "title":      r.get::<_, String>(1)?,
-            "state":      r.get::<_, String>(2)?,
-            "agent":      r.get::<_, Option<String>>(3)?,
-            "last_kind":  r.get::<_, Option<String>>(4)?,
-            "last_ts":    r.get::<_, Option<String>>(5)?,
-        })))?;
+        let rows = s.query_map([], |r| {
+            Ok(serde_json::json!({
+                "display_id": r.get::<_, String>(0)?,
+                "title":      r.get::<_, String>(1)?,
+                "state":      r.get::<_, String>(2)?,
+                "agent":      r.get::<_, Option<String>>(3)?,
+                "last_kind":  r.get::<_, Option<String>>(4)?,
+                "last_ts":    r.get::<_, Option<String>>(5)?,
+            }))
+        })?;
         let arr: Vec<_> = rows.collect::<Result<_, _>>()?;
         out.insert((*label).to_string(), serde_json::Value::Array(arr));
     }
     let v = serde_json::Value::Object(out);
-    if a.json { println!("{}", serde_json::to_string(&v)?); }
-    else {
+    if a.json {
+        println!("{}", serde_json::to_string(&v)?);
+    } else {
         let mut any = false;
         for (label, _) in GROUPS {
             let arr = v[*label].as_array().unwrap();
-            if arr.is_empty() { continue; }
+            if arr.is_empty() {
+                continue;
+            }
             any = true;
             println!("## {label}");
             for r in arr {
-                println!("  {:>7}  {:<14}  {:<10}  {}",
+                println!(
+                    "  {:>7}  {:<14}  {:<10}  {}",
                     r["display_id"].as_str().unwrap_or(""),
                     r["agent"].as_str().unwrap_or("-"),
                     r["last_kind"].as_str().unwrap_or("-"),
-                    r["title"].as_str().unwrap_or(""));
+                    r["title"].as_str().unwrap_or("")
+                );
             }
         }
         if !any {

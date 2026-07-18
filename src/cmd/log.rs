@@ -1,14 +1,16 @@
+use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
-use crate::{db, id};
 
 #[derive(Args, Debug)]
 pub struct LogArgs {
     pub task: String,
     pub kind: String,
     pub body: String,
-    #[arg(long = "as")] pub agent: Option<String>,
-    #[arg(long)] pub auto: bool,
+    #[arg(long = "as")]
+    pub agent: Option<String>,
+    #[arg(long)]
+    pub auto: bool,
 }
 
 pub fn run(db_path: &std::path::Path, a: LogArgs) -> Result<()> {
@@ -16,22 +18,32 @@ pub fn run(db_path: &std::path::Path, a: LogArgs) -> Result<()> {
     let task_id = id::resolve(&conn, &a.task)?;
     db::with_tx(&mut conn, |tx| {
         let mut payload = serde_json::json!({"text": a.body});
-        if a.auto { payload["auto"] = serde_json::Value::Bool(true); }
+        if a.auto {
+            payload["auto"] = serde_json::Value::Bool(true);
+        }
         // If --as wasn't provided, auto-attribute to the latest open assignee
         // iff the task is currently running (unambiguous owner).
         let auto_agent: Option<String> = if a.agent.is_none() {
-            let state: Option<String> = tx.query_row(
-                "SELECT state FROM task WHERE id = ?", [task_id], |r| r.get(0)
-            ).ok();
+            let state: Option<String> = tx
+                .query_row("SELECT state FROM task WHERE id = ?", [task_id], |r| {
+                    r.get(0)
+                })
+                .ok();
             if state.as_deref() == Some("running") {
                 tx.query_row(
                     "SELECT agent_id FROM assignment
                       WHERE task_id = ? AND completed_at IS NULL
                       ORDER BY id DESC LIMIT 1",
-                    [task_id], |r| r.get(0)
-                ).ok()
-            } else { None }
-        } else { None };
+                    [task_id],
+                    |r| r.get(0),
+                )
+                .ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let agent = a.agent.as_deref().or(auto_agent.as_deref());
         db::insert_event(tx, Some(task_id), &a.kind, agent, Some(&payload))?;
         Ok(())

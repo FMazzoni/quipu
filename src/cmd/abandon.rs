@@ -1,22 +1,27 @@
+use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
-use crate::{db, id};
 
 #[derive(Args, Debug)]
 pub struct AbandonArgs {
     pub task: String,
-    #[arg(long = "as")] pub agent: String,
-    #[arg(long)] pub reason: Option<String>,
+    #[arg(long = "as")]
+    pub agent: String,
+    #[arg(long)]
+    pub reason: Option<String>,
 }
 
 pub fn run(db_path: &std::path::Path, a: AbandonArgs) -> Result<()> {
     let mut conn = db::open(db_path)?;
     let task_id = id::resolve(&conn, &a.task)?;
     db::with_tx(&mut conn, |tx| {
-        let assignment: Option<(i64, String)> = tx.query_row(
-            "SELECT id, agent_id FROM assignment WHERE task_id = ? ORDER BY id DESC LIMIT 1",
-            [task_id], |r| Ok((r.get(0)?, r.get(1)?))
-        ).ok();
+        let assignment: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT id, agent_id FROM assignment WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+                [task_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok();
         let Some((aid, assignee)) = assignment else {
             return Err(db::constraint(format!("{} has no assignment", a.task)));
         };
@@ -38,27 +43,39 @@ pub fn run(db_path: &std::path::Path, a: AbandonArgs) -> Result<()> {
                     ELSE 'ready'
                 END
               WHERE id = ?1 AND state IN ('assigned','running')",
-            [task_id])?;
+            [task_id],
+        )?;
         if n != 1 {
             return Err(db::constraint(format!("{} not assigned/running", a.task)));
         }
 
         // Read back the resulting state for the event payload. Permitted exception:
         // auxiliary read for error/event-quality, not control flow.
-        let resulting: String = tx.query_row(
-            "SELECT state FROM task WHERE id = ?", [task_id], |r| r.get(0))?;
+        let resulting: String =
+            tx.query_row("SELECT state FROM task WHERE id = ?", [task_id], |r| {
+                r.get(0)
+            })?;
 
         let n2 = tx.execute(
             "UPDATE assignment SET completed_at = ?, outcome = 'abandoned' \
               WHERE id = ? AND completed_at IS NULL",
-            rusqlite::params![crate::time::now_rfc3339(), aid])?;
+            rusqlite::params![crate::time::now_rfc3339(), aid],
+        )?;
         if n2 != 1 {
-            return Err(db::constraint(format!("{} assignment already closed", a.task)));
+            return Err(db::constraint(format!(
+                "{} assignment already closed",
+                a.task
+            )));
         }
-        db::insert_event(tx, Some(task_id), "state_change", Some(&a.agent),
+        db::insert_event(
+            tx,
+            Some(task_id),
+            "state_change",
+            Some(&a.agent),
             Some(&serde_json::json!({
                 "to": resulting, "via": "abandon", "reason": a.reason
-            })))?;
+            })),
+        )?;
         Ok(())
     })?;
     println!("{} abandoned", a.task.to_uppercase());

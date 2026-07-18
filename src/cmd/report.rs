@@ -17,13 +17,13 @@
 //!   --markdown (default) | --html
 //!   --output <path>      write to file instead of stdout
 
+use crate::{db, id, time as qptime};
 use anyhow::Result;
 use clap::Args;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::io::Write;
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use crate::{db, id, time as qptime};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 #[derive(Args, Debug)]
 pub struct ReportArgs {
@@ -49,7 +49,11 @@ pub struct ReportArgs {
     #[arg(long, conflicts_with = "all_tickets")]
     pub ticket: Option<String>,
     /// Bulk mode: emit one file per ticket into --output-dir.
-    #[arg(long = "all-tickets", conflicts_with = "ticket", requires = "output_dir")]
+    #[arg(
+        long = "all-tickets",
+        conflicts_with = "ticket",
+        requires = "output_dir"
+    )]
     pub all_tickets: bool,
     /// Directory to write per-ticket files into (used with --all-tickets).
     #[arg(long = "output-dir")]
@@ -59,7 +63,11 @@ pub struct ReportArgs {
 pub fn run(db_path: &std::path::Path, a: ReportArgs) -> Result<()> {
     let conn = db::open(db_path)?;
     let since_iso = a.since.as_deref().map(parse_since).transpose()?;
-    let subtree = a.wave.as_deref().map(|t| resolve_subtree(&conn, t)).transpose()?;
+    let subtree = a
+        .wave
+        .as_deref()
+        .map(|t| resolve_subtree(&conn, t))
+        .transpose()?;
 
     // JSON mode: emit board payload.
     if a.json {
@@ -82,18 +90,26 @@ pub fn run(db_path: &std::path::Path, a: ReportArgs) -> Result<()> {
     if let Some(tref) = a.ticket.as_deref() {
         let tid = id::resolve(&conn, tref)?;
         let detail = collect_ticket(&conn, tid)?;
-        let body = if a.html { render_ticket_html(&detail) } else { render_ticket_markdown(&detail) };
+        let body = if a.html {
+            render_ticket_html(&detail)
+        } else {
+            render_ticket_markdown(&detail)
+        };
         if let Some(path) = &a.output {
             let mut f = std::fs::File::create(path)?;
             f.write_all(body.as_bytes())?;
         } else {
             print!("{body}");
-            if !body.ends_with('\n') { println!(); }
+            if !body.ends_with('\n') {
+                println!();
+            }
         }
         return Ok(());
     }
     if a.all_tickets {
-        let dir = a.output_dir.as_ref()
+        let dir = a
+            .output_dir
+            .as_ref()
             .ok_or_else(|| db::invalid_input("--all-tickets requires --output-dir"))?;
         std::fs::create_dir_all(dir)?;
         let ext = if a.html { "html" } else { "md" };
@@ -108,7 +124,11 @@ pub fn run(db_path: &std::path::Path, a: ReportArgs) -> Result<()> {
                 format!("{}-{}.{ext}", detail.display_id, slug)
             };
             let path = dir.join(fname);
-            let body = if a.html { render_ticket_html(&detail) } else { render_ticket_markdown(&detail) };
+            let body = if a.html {
+                render_ticket_html(&detail)
+            } else {
+                render_ticket_markdown(&detail)
+            };
             let mut f = std::fs::File::create(&path)?;
             f.write_all(body.as_bytes())?;
         }
@@ -129,7 +149,9 @@ pub fn run(db_path: &std::path::Path, a: ReportArgs) -> Result<()> {
         f.write_all(body.as_bytes())?;
     } else {
         print!("{body}");
-        if !body.ends_with('\n') { println!(); }
+        if !body.ends_with('\n') {
+            println!();
+        }
     }
     Ok(())
 }
@@ -145,59 +167,109 @@ struct TicketDetail {
     description: Option<String>,
     created_at: Option<String>,
     tags: Vec<String>,
-    parents: Vec<(String, String, String)>,  // display_id, title, state — this depends on
+    parents: Vec<(String, String, String)>, // display_id, title, state — this depends on
     children: Vec<(String, String, String)>, // display_id, title, state — depend on this
-    events: Vec<EventRow>,                   // chronological asc
+    events: Vec<EventRow>,                  // chronological asc
 }
 
 fn collect_ticket(conn: &rusqlite::Connection, tid: i64) -> Result<TicketDetail> {
-    let (display_id, title, state, tier, description, created_at): (String, String, String, Option<String>, Option<String>, Option<String>) =
-        conn.query_row(
-            "SELECT display_id, title, state, tier, description, created_at FROM task WHERE id = ?1",
-            [tid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
-        )?;
-    let agent: Option<String> = conn.query_row(
-        "SELECT agent_id FROM assignment WHERE task_id = ?1 ORDER BY id DESC LIMIT 1",
-        [tid], |r| r.get(0),
-    ).ok();
+    let (display_id, title, state, tier, description, created_at): (
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = conn.query_row(
+        "SELECT display_id, title, state, tier, description, created_at FROM task WHERE id = ?1",
+        [tid],
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        },
+    )?;
+    let agent: Option<String> = conn
+        .query_row(
+            "SELECT agent_id FROM assignment WHERE task_id = ?1 ORDER BY id DESC LIMIT 1",
+            [tid],
+            |r| r.get(0),
+        )
+        .ok();
     let mut tag_stmt = conn.prepare("SELECT name FROM tag WHERE task_id = ?1 ORDER BY name")?;
-    let tags: Vec<String> = tag_stmt.query_map([tid], |r| r.get::<_, String>(0))?
+    let tags: Vec<String> = tag_stmt
+        .query_map([tid], |r| r.get::<_, String>(0))?
         .collect::<Result<_, _>>()?;
 
     let mut p_stmt = conn.prepare(
         "SELECT t.display_id, t.title, t.state FROM dep d JOIN task t ON t.id = d.depends_on_task_id
           WHERE d.task_id = ?1 ORDER BY t.id")?;
-    let parents: Vec<(String, String, String)> = p_stmt.query_map([tid], |r|
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?
+    let parents: Vec<(String, String, String)> = p_stmt
+        .query_map([tid], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
         .collect::<Result<_, _>>()?;
     let mut c_stmt = conn.prepare(
         "SELECT t.display_id, t.title, t.state FROM dep d JOIN task t ON t.id = d.task_id
-          WHERE d.depends_on_task_id = ?1 ORDER BY t.id")?;
-    let children: Vec<(String, String, String)> = c_stmt.query_map([tid], |r|
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?
+          WHERE d.depends_on_task_id = ?1 ORDER BY t.id",
+    )?;
+    let children: Vec<(String, String, String)> = c_stmt
+        .query_map([tid], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
         .collect::<Result<_, _>>()?;
 
     // Full timeline for this ticket, oldest-first.
     let mut e_stmt = conn.prepare(
         "SELECT t.display_id, e.ts, e.kind, e.agent_id, e.payload
            FROM event e LEFT JOIN task t ON t.id = e.task_id
-          WHERE e.task_id = ?1 ORDER BY e.id ASC")?;
-    let events: Vec<EventRow> = e_stmt.query_map([tid], |r| {
-        let payload: Option<String> = r.get(4)?;
-        let payload_v: Value = payload.as_deref()
-            .map(serde_json::from_str).transpose().ok().flatten().unwrap_or(Value::Null);
-        Ok(EventRow {
-            task: r.get::<_, Option<String>>(0)?,
-            ts: r.get::<_, String>(1)?,
-            kind: r.get::<_, String>(2)?,
-            agent: r.get::<_, Option<String>>(3)?,
-            payload: payload_v,
-        })
-    })?.collect::<Result<_, _>>()?;
+          WHERE e.task_id = ?1 ORDER BY e.id ASC",
+    )?;
+    let events: Vec<EventRow> = e_stmt
+        .query_map([tid], |r| {
+            let payload: Option<String> = r.get(4)?;
+            let payload_v: Value = payload
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .ok()
+                .flatten()
+                .unwrap_or(Value::Null);
+            Ok(EventRow {
+                task: r.get::<_, Option<String>>(0)?,
+                ts: r.get::<_, String>(1)?,
+                kind: r.get::<_, String>(2)?,
+                agent: r.get::<_, Option<String>>(3)?,
+                payload: payload_v,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
 
     Ok(TicketDetail {
-        display_id, title, state, tier, agent, description, created_at, tags,
-        parents, children, events,
+        display_id,
+        title,
+        state,
+        tier,
+        agent,
+        description,
+        created_at,
+        tags,
+        parents,
+        children,
+        events,
     })
 }
 
@@ -207,15 +279,18 @@ fn ticket_ids_in_scope(
     subtree: Option<&HashSet<i64>>,
 ) -> Result<Vec<i64>> {
     let mut stmt = conn.prepare("SELECT id FROM task ORDER BY id ASC")?;
-    let mut ids: Vec<i64> = stmt.query_map([], |r| r.get::<_, i64>(0))?
+    let mut ids: Vec<i64> = stmt
+        .query_map([], |r| r.get::<_, i64>(0))?
         .collect::<Result<_, _>>()?;
     if let Some(set) = subtree {
         ids.retain(|i| set.contains(i));
     }
     if let Some(s) = since_iso {
         // Keep tickets with any event in the window.
-        let mut e = conn.prepare("SELECT DISTINCT task_id FROM event WHERE task_id IS NOT NULL AND ts >= ?1")?;
-        let recent: HashSet<i64> = e.query_map([s], |r| r.get::<_, i64>(0))?
+        let mut e = conn
+            .prepare("SELECT DISTINCT task_id FROM event WHERE task_id IS NOT NULL AND ts >= ?1")?;
+        let recent: HashSet<i64> = e
+            .query_map([s], |r| r.get::<_, i64>(0))?
             .collect::<Result<_, _>>()?;
         ids.retain(|i| recent.contains(i));
     }
@@ -227,17 +302,23 @@ fn slugify(title: &str) -> String {
     let mut prev_dash = false;
     for c in title.chars() {
         if c.is_ascii_alphanumeric() {
-            for lc in c.to_lowercase() { out.push(lc); }
+            for lc in c.to_lowercase() {
+                out.push(lc);
+            }
             prev_dash = false;
         } else if !prev_dash && !out.is_empty() {
             out.push('-');
             prev_dash = true;
         }
     }
-    while out.ends_with('-') { out.pop(); }
+    while out.ends_with('-') {
+        out.pop();
+    }
     if out.len() > 40 {
         out.truncate(40);
-        while out.ends_with('-') { out.pop(); }
+        while out.ends_with('-') {
+            out.pop();
+        }
     }
     out
 }
@@ -246,9 +327,16 @@ fn render_ticket_markdown(t: &TicketDetail) -> String {
     let mut o = String::new();
     o.push_str(&format!("# {} — {}\n\n", t.display_id, t.title));
     o.push_str(&format!("- **state:** `{}`\n", t.state));
-    if let Some(tier) = &t.tier { o.push_str(&format!("- **tier:** `{}`\n", tier)); }
-    o.push_str(&format!("- **agent:** {}\n", t.agent.as_deref().unwrap_or("—")));
-    if let Some(c) = &t.created_at { o.push_str(&format!("- **created:** {}\n", c)); }
+    if let Some(tier) = &t.tier {
+        o.push_str(&format!("- **tier:** `{}`\n", tier));
+    }
+    o.push_str(&format!(
+        "- **agent:** {}\n",
+        t.agent.as_deref().unwrap_or("—")
+    ));
+    if let Some(c) = &t.created_at {
+        o.push_str(&format!("- **created:** {}\n", c));
+    }
 
     // Tag extraction.
     let mut commit_sha: Option<&str> = None;
@@ -257,16 +345,30 @@ fn render_ticket_markdown(t: &TicketDetail) -> String {
     let mut harness: Option<&str> = None;
     let mut others: Vec<&str> = Vec::new();
     for tag in &t.tags {
-        if let Some(v) = tag.strip_prefix("commit:") { commit_sha = Some(v); }
-        else if let Some(v) = tag.strip_prefix("plan:") { plan = Some(v); }
-        else if let Some(v) = tag.strip_prefix("critique:") { critique = Some(v); }
-        else if let Some(v) = tag.strip_prefix("harness:") { harness = Some(v); }
-        else { others.push(tag); }
+        if let Some(v) = tag.strip_prefix("commit:") {
+            commit_sha = Some(v);
+        } else if let Some(v) = tag.strip_prefix("plan:") {
+            plan = Some(v);
+        } else if let Some(v) = tag.strip_prefix("critique:") {
+            critique = Some(v);
+        } else if let Some(v) = tag.strip_prefix("harness:") {
+            harness = Some(v);
+        } else {
+            others.push(tag);
+        }
     }
-    if let Some(v) = commit_sha { o.push_str(&format!("- **commit:** `{}`\n", v)); }
-    if let Some(v) = plan { o.push_str(&format!("- **plan:** {}\n", v)); }
-    if let Some(v) = critique { o.push_str(&format!("- **critique:** {}\n", v)); }
-    if let Some(v) = harness { o.push_str(&format!("- **harness:** {}\n", v)); }
+    if let Some(v) = commit_sha {
+        o.push_str(&format!("- **commit:** `{}`\n", v));
+    }
+    if let Some(v) = plan {
+        o.push_str(&format!("- **plan:** {}\n", v));
+    }
+    if let Some(v) = critique {
+        o.push_str(&format!("- **critique:** {}\n", v));
+    }
+    if let Some(v) = harness {
+        o.push_str(&format!("- **harness:** {}\n", v));
+    }
     if !others.is_empty() {
         o.push_str(&format!("- **tags:** {}\n", others.join(", ")));
     }
@@ -275,7 +377,9 @@ fn render_ticket_markdown(t: &TicketDetail) -> String {
     if let Some(d) = t.description.as_deref().filter(|s| !s.is_empty()) {
         o.push_str("## Description\n\n");
         o.push_str(d);
-        if !d.ends_with('\n') { o.push('\n'); }
+        if !d.ends_with('\n') {
+            o.push('\n');
+        }
         o.push('\n');
     }
 
@@ -305,10 +409,13 @@ fn render_ticket_markdown(t: &TicketDetail) -> String {
     } else {
         o.push_str("| ts | kind | agent | summary |\n|----|------|-------|---------|\n");
         for e in &t.events {
-            o.push_str(&format!("| {} | {} | {} | {} |\n",
-                e.ts, e.kind,
+            o.push_str(&format!(
+                "| {} | {} | {} | {} |\n",
+                e.ts,
+                e.kind,
                 md_esc(e.agent.as_deref().unwrap_or("-")),
-                md_esc(&summarize_payload(&e.kind, &e.payload))));
+                md_esc(&summarize_payload(&e.kind, &e.payload))
+            ));
         }
         o.push('\n');
     }
@@ -319,19 +426,29 @@ fn render_ticket_html(t: &TicketDetail) -> String {
     let mut o = String::new();
     o.push_str("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n");
     o.push_str("<meta charset=\"UTF-8\">\n");
-    o.push_str(&format!("<title>{} — {}</title>\n", html_esc(&t.display_id), html_esc(&t.title)));
+    o.push_str(&format!(
+        "<title>{} — {}</title>\n",
+        html_esc(&t.display_id),
+        html_esc(&t.title)
+    ));
     o.push_str("<style>\n");
     o.push_str(HTML_CSS);
     o.push_str("</style>\n</head>\n<body><div class=\"wrap\">\n");
 
-    o.push_str(&format!("<h1>{} <span style=\"color:var(--dim);font-weight:400\">— {}</span></h1>\n",
-        html_esc(&t.display_id), html_esc(&t.title)));
+    o.push_str(&format!(
+        "<h1>{} <span style=\"color:var(--dim);font-weight:400\">— {}</span></h1>\n",
+        html_esc(&t.display_id),
+        html_esc(&t.title)
+    ));
     o.push_str(&format!("<div class=\"subtitle\">state <span class=\"pill p-{0}\">{0}</span> · agent <code>{1}</code></div>\n",
         html_esc(&t.state), html_esc(t.agent.as_deref().unwrap_or("-"))));
 
     if let Some(d) = t.description.as_deref().filter(|s| !s.is_empty()) {
         o.push_str("<h2>Description</h2>\n");
-        o.push_str(&format!("<div class=\"panel\">{}</div>\n", html_esc(d).replace('\n', "<br>")));
+        o.push_str(&format!(
+            "<div class=\"panel\">{}</div>\n",
+            html_esc(d).replace('\n', "<br>")
+        ));
     }
 
     if !t.tags.is_empty() {
@@ -397,38 +514,69 @@ fn collect_json(
            FROM task t ORDER BY t.id ASC";
     // If subtree-scoped, we filter below (in Rust, not SQL — keeps query simple).
     let mut stmt = conn.prepare(sql)?;
-    let core: Vec<(i64, String, String, String, Option<String>, Option<String>, Option<String>)> =
-        stmt.query_map([], |r| Ok((
-            r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?,
-        )))?.collect::<Result<_, _>>()?;
+    let core: Vec<(
+        i64,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
 
     // Filter by subtree if scoped.
     let core: Vec<_> = match subtree {
-        Some(set) => core.into_iter().filter(|(id, ..)| set.contains(id)).collect(),
+        Some(set) => core
+            .into_iter()
+            .filter(|(id, ..)| set.contains(id))
+            .collect(),
         None => core,
     };
 
     let task_ids: Vec<i64> = core.iter().map(|r| r.0).collect();
     let mut tags_by: std::collections::HashMap<i64, Vec<String>> = std::collections::HashMap::new();
-    let mut blockers_by: std::collections::HashMap<i64, Vec<String>> = std::collections::HashMap::new();
+    let mut blockers_by: std::collections::HashMap<i64, Vec<String>> =
+        std::collections::HashMap::new();
     let mut last_event_by: std::collections::HashMap<i64, Value> = std::collections::HashMap::new();
 
     if !task_ids.is_empty() {
-        let placeholders = std::iter::repeat("?").take(task_ids.len()).collect::<Vec<_>>().join(",");
-        let pref: Vec<&dyn rusqlite::ToSql> = task_ids.iter().map(|i| i as &dyn rusqlite::ToSql).collect();
+        let placeholders = std::iter::repeat("?")
+            .take(task_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let pref: Vec<&dyn rusqlite::ToSql> =
+            task_ids.iter().map(|i| i as &dyn rusqlite::ToSql).collect();
 
         let q = format!("SELECT task_id, name FROM tag WHERE task_id IN ({placeholders})");
         let mut s = conn.prepare(&q)?;
-        for r in s.query_map(pref.as_slice(), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))? {
-            let (t, n) = r?; tags_by.entry(t).or_default().push(n);
+        for r in s.query_map(pref.as_slice(), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })? {
+            let (t, n) = r?;
+            tags_by.entry(t).or_default().push(n);
         }
 
         let q = format!(
             "SELECT d.task_id, t2.display_id FROM dep d JOIN task t2 ON t2.id = d.depends_on_task_id
               WHERE d.task_id IN ({placeholders}) AND t2.state NOT IN ('done','cancelled')");
         let mut s = conn.prepare(&q)?;
-        for r in s.query_map(pref.as_slice(), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))? {
-            let (t, d) = r?; blockers_by.entry(t).or_default().push(d);
+        for r in s.query_map(pref.as_slice(), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })? {
+            let (t, d) = r?;
+            blockers_by.entry(t).or_default().push(d);
         }
 
         let q = format!(
@@ -455,7 +603,9 @@ fn collect_json(
             "last_event": last_event_by.remove(&id),
         });
         if let Some(d) = description {
-            obj.as_object_mut().unwrap().insert("description".into(), Value::String(d));
+            obj.as_object_mut()
+                .unwrap()
+                .insert("description".into(), Value::String(d));
         }
         tasks.push(obj);
     }
@@ -464,7 +614,8 @@ fn collect_json(
     let mut evt_sql = String::from(
         "SELECT e.id, t.display_id, e.ts, e.kind, e.agent_id, e.payload
            FROM event e LEFT JOIN task t ON t.id = e.task_id
-          WHERE 1=1");
+          WHERE 1=1",
+    );
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     if let Some(s) = since_iso {
         evt_sql.push_str(&format!(" AND e.ts >= ?{}", params.len() + 1));
@@ -473,10 +624,25 @@ fn collect_json(
     evt_sql.push_str(" ORDER BY e.id ASC");
     let mut stmt = conn.prepare(&evt_sql)?;
     let pref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-    let evt_rows: Vec<(i64, Option<String>, String, String, Option<String>, Option<String>)> =
-        stmt.query_map(pref.as_slice(), |r| Ok((
-            r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?,
-        )))?.collect::<Result<_, _>>()?;
+    let evt_rows: Vec<(
+        i64,
+        Option<String>,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    )> = stmt
+        .query_map(pref.as_slice(), |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
 
     let subtree_task_ids: Option<HashSet<i64>> = subtree.map(|set| {
         // We need task rowids mapped from display_ids — but we already have task_ids vec.
@@ -495,7 +661,9 @@ fn collect_json(
             m.insert(did, id);
         }
         Some(m)
-    } else { None };
+    } else {
+        None
+    };
 
     let mut events: Vec<Value> = Vec::new();
     for (eid, did, ts, kind, agent, payload) in evt_rows {
@@ -506,8 +674,13 @@ fn collect_json(
                 _ => continue,
             }
         }
-        let payload_v: Value = payload.as_deref()
-            .map(serde_json::from_str).transpose().ok().flatten().unwrap_or(Value::Null);
+        let payload_v: Value = payload
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .ok()
+            .flatten()
+            .unwrap_or(Value::Null);
         events.push(serde_json::json!({
             "id": eid,
             "task": did,
@@ -516,7 +689,9 @@ fn collect_json(
             "agent_id": agent,
             "payload": payload_v,
         }));
-        if events.len() >= 200 { break; }
+        if events.len() >= 200 {
+            break;
+        }
     }
 
     // Deps: all dep edges in scope (both tasks must be in subtree if scoped).
@@ -525,16 +700,19 @@ fn collect_json(
            FROM dep d
            JOIN task tf ON tf.id = d.task_id
            JOIN task tt ON tt.id = d.depends_on_task_id
-          ORDER BY d.task_id ASC")?;
+          ORDER BY d.task_id ASC",
+    )?;
     let deps_raw: Vec<(String, String)> = dep_stmt
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
         .collect::<Result<_, _>>()?;
 
-    let task_dids: std::collections::HashSet<&str> = tasks.iter()
+    let task_dids: std::collections::HashSet<&str> = tasks
+        .iter()
         .filter_map(|t| t["display_id"].as_str())
         .collect();
 
-    let deps: Vec<Value> = deps_raw.into_iter()
+    let deps: Vec<Value> = deps_raw
+        .into_iter()
         .filter(|(from, to)| task_dids.contains(from.as_str()) && task_dids.contains(to.as_str()))
         .map(|(from, to)| serde_json::json!({"from": from, "to": to}))
         .collect();
@@ -553,14 +731,16 @@ fn collect_json(
 fn parse_since(s: &str) -> Result<String> {
     let s = s.trim();
     if let Some(rest) = s.strip_suffix('h') {
-        let hours: i64 = rest.parse()
+        let hours: i64 = rest
+            .parse()
             .map_err(|_| db::invalid_input(format!("bad --since `{s}` (expected Nh)")))?;
         let now = OffsetDateTime::now_utc();
         let then = now - time::Duration::hours(hours);
         return Ok(then.format(&Rfc3339).unwrap());
     }
     if let Some(rest) = s.strip_suffix('d') {
-        let days: i64 = rest.parse()
+        let days: i64 = rest
+            .parse()
             .map_err(|_| db::invalid_input(format!("bad --since `{s}` (expected Nd)")))?;
         let now = OffsetDateTime::now_utc();
         let then = now - time::Duration::days(days);
@@ -571,8 +751,9 @@ fn parse_since(s: &str) -> Result<String> {
         return Ok(format!("{s}T00:00:00Z"));
     }
     // Sanity check it actually parses as RFC3339.
-    OffsetDateTime::parse(s, &Rfc3339)
-        .map_err(|_| db::invalid_input(format!("bad --since `{s}` (expected Nh, Nd, or RFC3339)")))?;
+    OffsetDateTime::parse(s, &Rfc3339).map_err(|_| {
+        db::invalid_input(format!("bad --since `{s}` (expected Nh, Nd, or RFC3339)"))
+    })?;
     Ok(s.to_string())
 }
 
@@ -583,8 +764,10 @@ fn resolve_subtree(conn: &rusqlite::Connection, task: &str) -> Result<HashSet<i6
             SELECT ?1
             UNION
             SELECT d.depends_on_task_id FROM dep d JOIN sub ON d.task_id = sub.id
-         ) SELECT id FROM sub")?;
-    let ids: HashSet<i64> = s.query_map([root], |r| r.get::<_, i64>(0))?
+         ) SELECT id FROM sub",
+    )?;
+    let ids: HashSet<i64> = s
+        .query_map([root], |r| r.get::<_, i64>(0))?
         .collect::<Result<_, _>>()?;
     Ok(ids)
 }
@@ -616,10 +799,10 @@ struct Snapshot {
     scope_since: Option<String>,
     scope_wave: Option<String>,
     state_counts: Vec<(String, i64)>,
-    in_flight: Vec<TaskRow>,        // ready / assigned / running / pending-with-blockers
-    timeline: Vec<EventRow>,        // newest first, capped 50
+    in_flight: Vec<TaskRow>, // ready / assigned / running / pending-with-blockers
+    timeline: Vec<EventRow>, // newest first, capped 50
     timeline_truncated: bool,
-    friction: Vec<EventRow>,        // decision + auto, newest first
+    friction: Vec<EventRow>, // decision + auto, newest first
     open_bugs: Vec<TaskRow>,
     shipped: Vec<TaskRow>,
 }
@@ -630,16 +813,34 @@ fn collect(
     subtree: Option<&HashSet<i64>>,
 ) -> Result<Snapshot> {
     // state counts (always full, not scoped — global view)
-    let mut stmt = conn.prepare("SELECT state, COUNT(*) FROM task GROUP BY state ORDER BY state")?;
+    let mut stmt =
+        conn.prepare("SELECT state, COUNT(*) FROM task GROUP BY state ORDER BY state")?;
     let mut counts: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
     for r in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
-        let (s, c) = r?; counts.insert(s, c);
+        let (s, c) = r?;
+        counts.insert(s, c);
     }
-    for s in ["pending","ready","assigned","running","done","cancelled"] {
+    for s in [
+        "pending",
+        "ready",
+        "assigned",
+        "running",
+        "done",
+        "cancelled",
+    ] {
         counts.entry(s.to_string()).or_insert(0);
     }
-    let state_counts: Vec<(String, i64)> = ["pending","ready","assigned","running","done","cancelled"]
-        .iter().map(|s| ((*s).to_string(), *counts.get(*s).unwrap_or(&0))).collect();
+    let state_counts: Vec<(String, i64)> = [
+        "pending",
+        "ready",
+        "assigned",
+        "running",
+        "done",
+        "cancelled",
+    ]
+    .iter()
+    .map(|s| ((*s).to_string(), *counts.get(*s).unwrap_or(&0)))
+    .collect();
 
     // all tasks, then filter by subtree if scoped
     let all_tasks = fetch_all_tasks(conn)?;
@@ -667,18 +868,25 @@ fn collect(
     // Friction: decision + auto
     let friction = fetch_events(conn, since_iso, subtree, Some("decision"))?
         .into_iter()
-        .filter(|e| e.payload.get("auto").and_then(|v| v.as_bool()).unwrap_or(false))
+        .filter(|e| {
+            e.payload
+                .get("auto")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
         .collect();
 
     // Open bugs: tag = kind:bug, non-terminal, scope-filtered
-    let open_bugs: Vec<TaskRow> = scoped.iter()
+    let open_bugs: Vec<TaskRow> = scoped
+        .iter()
         .filter(|t| t.tags.iter().any(|n| n == "kind:bug"))
         .filter(|t| t.state != "done" && t.state != "cancelled")
         .map(|t| clone_row(t))
         .collect();
 
     // Shipped: done, scope-filtered. Optional --since filter via last state_change event.
-    let mut shipped: Vec<TaskRow> = scoped.iter()
+    let mut shipped: Vec<TaskRow> = scoped
+        .iter()
         .filter(|t| t.state == "done")
         .map(|t| clone_row(t))
         .collect();
@@ -723,20 +931,25 @@ fn fetch_all_tasks(conn: &rusqlite::Connection) -> Result<Vec<TaskRow>> {
         "SELECT t.id, t.display_id, t.title, t.state,
                 (SELECT a.agent_id FROM assignment a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1)
            FROM task t ORDER BY t.id ASC")?;
-    let mut rows: Vec<TaskRow> = stmt.query_map([], |r| Ok(TaskRow {
-        id: r.get(0)?,
-        display_id: r.get(1)?,
-        title: r.get(2)?,
-        state: r.get(3)?,
-        agent: r.get(4)?,
-        tags: Vec::new(),
-        commit_sha: None,
-        blockers: Vec::new(),
-    }))?.collect::<Result<_, _>>()?;
+    let mut rows: Vec<TaskRow> = stmt
+        .query_map([], |r| {
+            Ok(TaskRow {
+                id: r.get(0)?,
+                display_id: r.get(1)?,
+                title: r.get(2)?,
+                state: r.get(3)?,
+                agent: r.get(4)?,
+                tags: Vec::new(),
+                commit_sha: None,
+                blockers: Vec::new(),
+            })
+        })?
+        .collect::<Result<_, _>>()?;
 
     // tags
     let mut s = conn.prepare("SELECT task_id, name FROM tag")?;
-    let pairs: Vec<(i64, String)> = s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+    let pairs: Vec<(i64, String)> = s
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<Result<_, _>>()?;
     for (tid, name) in pairs {
         if let Some(row) = rows.iter_mut().find(|r| r.id == tid) {
@@ -751,8 +964,10 @@ fn fetch_all_tasks(conn: &rusqlite::Connection) -> Result<Vec<TaskRow>> {
     let mut s = conn.prepare(
         "SELECT d.task_id, t2.display_id
            FROM dep d JOIN task t2 ON t2.id = d.depends_on_task_id
-          WHERE t2.state NOT IN ('done','cancelled')")?;
-    let pairs: Vec<(i64, String)> = s.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+          WHERE t2.state NOT IN ('done','cancelled')",
+    )?;
+    let pairs: Vec<(i64, String)> = s
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<Result<_, _>>()?;
     for (tid, dep) in pairs {
         if let Some(row) = rows.iter_mut().find(|r| r.id == tid) {
@@ -772,7 +987,8 @@ fn fetch_events(
     let mut sql = String::from(
         "SELECT e.task_id, t.display_id, e.ts, e.kind, e.agent_id, e.payload
            FROM event e LEFT JOIN task t ON t.id = e.task_id
-          WHERE 1=1");
+          WHERE 1=1",
+    );
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     if let Some(s) = since_iso {
         sql.push_str(&format!(" AND e.ts >= ?{}", params.len() + 1));
@@ -785,10 +1001,25 @@ fn fetch_events(
     sql.push_str(" ORDER BY e.id DESC");
     let mut stmt = conn.prepare(&sql)?;
     let pref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-    let rows: Vec<(Option<i64>, Option<String>, String, String, Option<String>, Option<String>)> =
-        stmt.query_map(pref.as_slice(), |r| Ok((
-            r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?,
-        )))?.collect::<Result<_, _>>()?;
+    let rows: Vec<(
+        Option<i64>,
+        Option<String>,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    )> = stmt
+        .query_map(pref.as_slice(), |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
 
     let mut out = Vec::with_capacity(rows.len());
     for (tid, did, ts, kind, agent, payload) in rows {
@@ -798,9 +1029,20 @@ fn fetch_events(
                 _ => continue, // events without a task, or outside subtree, are dropped in scoped mode
             }
         }
-        let payload_v: Value = payload.as_deref()
-            .map(serde_json::from_str).transpose().ok().flatten().unwrap_or(Value::Null);
-        out.push(EventRow { task: did, ts, kind, agent, payload: payload_v });
+        let payload_v: Value = payload
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .ok()
+            .flatten()
+            .unwrap_or(Value::Null);
+        out.push(EventRow {
+            task: did,
+            ts,
+            kind,
+            agent,
+            payload: payload_v,
+        });
     }
     Ok(out)
 }
@@ -814,8 +1056,10 @@ fn events_in_window_for_kind(
     let mut s = conn.prepare(
         "SELECT DISTINCT task_id FROM event
           WHERE kind = ?1 AND ts >= ?2 AND task_id IS NOT NULL
-            AND json_extract(payload, '$.to') = 'done'")?;
-    let ids: HashSet<i64> = s.query_map(rusqlite::params![kind, since_iso], |r| r.get::<_, i64>(0))?
+            AND json_extract(payload, '$.to') = 'done'",
+    )?;
+    let ids: HashSet<i64> = s
+        .query_map(rusqlite::params![kind, since_iso], |r| r.get::<_, i64>(0))?
         .collect::<Result<_, _>>()?;
     Ok(ids)
 }
@@ -828,7 +1072,9 @@ fn render_markdown(s: &Snapshot) -> String {
     o.push_str(&format!("_generated {} UTC_\n\n", s.generated_at));
     if let Some(since) = &s.scope_since {
         o.push_str(&format!("**Scope:** events since `{since}`"));
-        if s.scope_wave.is_some() { o.push_str(" · wave subtree"); }
+        if s.scope_wave.is_some() {
+            o.push_str(" · wave subtree");
+        }
         o.push_str("\n\n");
     } else if s.scope_wave.is_some() {
         o.push_str("**Scope:** wave subtree\n\n");
@@ -850,9 +1096,19 @@ fn render_markdown(s: &Snapshot) -> String {
         o.push_str("| id | state | agent | blockers | title |\n|----|-------|-------|----------|-------|\n");
         for t in &s.in_flight {
             let agent = t.agent.as_deref().unwrap_or("-");
-            let blk = if t.blockers.is_empty() { "-".into() } else { t.blockers.join(",") };
-            o.push_str(&format!("| `{}` | {} | {} | {} | {} |\n",
-                t.display_id, t.state, md_esc(agent), md_esc(&blk), md_esc(&t.title)));
+            let blk = if t.blockers.is_empty() {
+                "-".into()
+            } else {
+                t.blockers.join(",")
+            };
+            o.push_str(&format!(
+                "| `{}` | {} | {} | {} | {} |\n",
+                t.display_id,
+                t.state,
+                md_esc(agent),
+                md_esc(&blk),
+                md_esc(&t.title)
+            ));
         }
         o.push('\n');
     }
@@ -862,14 +1118,18 @@ fn render_markdown(s: &Snapshot) -> String {
     if s.timeline.is_empty() {
         o.push_str("_no events_\n\n");
     } else {
-        o.push_str("| ts | task | kind | agent | summary |\n|----|------|------|-------|---------|\n");
+        o.push_str(
+            "| ts | task | kind | agent | summary |\n|----|------|------|-------|---------|\n",
+        );
         for e in &s.timeline {
-            o.push_str(&format!("| {} | {} | {} | {} | {} |\n",
+            o.push_str(&format!(
+                "| {} | {} | {} | {} | {} |\n",
                 e.ts,
                 e.task.as_deref().unwrap_or("-"),
                 e.kind,
                 md_esc(e.agent.as_deref().unwrap_or("-")),
-                md_esc(&summarize_payload(&e.kind, &e.payload))));
+                md_esc(&summarize_payload(&e.kind, &e.payload))
+            ));
         }
         if s.timeline_truncated {
             o.push_str("\n_capped at 50 events; use `--since` to narrow_\n");
@@ -884,11 +1144,13 @@ fn render_markdown(s: &Snapshot) -> String {
     } else {
         for e in &s.friction {
             let text = e.payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            o.push_str(&format!("- **{}** · `{}` · {}: {}\n",
+            o.push_str(&format!(
+                "- **{}** · `{}` · {}: {}\n",
                 e.ts,
                 e.task.as_deref().unwrap_or("-"),
                 md_esc(e.agent.as_deref().unwrap_or("-")),
-                md_esc(text)));
+                md_esc(text)
+            ));
         }
         o.push('\n');
     }
@@ -900,10 +1162,13 @@ fn render_markdown(s: &Snapshot) -> String {
     } else {
         o.push_str("| id | state | agent | title |\n|----|-------|-------|-------|\n");
         for t in &s.open_bugs {
-            o.push_str(&format!("| `{}` | {} | {} | {} |\n",
-                t.display_id, t.state,
+            o.push_str(&format!(
+                "| `{}` | {} | {} | {} |\n",
+                t.display_id,
+                t.state,
                 md_esc(t.agent.as_deref().unwrap_or("-")),
-                md_esc(&t.title)));
+                md_esc(&t.title)
+            ));
         }
         o.push('\n');
     }
@@ -916,8 +1181,12 @@ fn render_markdown(s: &Snapshot) -> String {
         o.push_str("| id | commit | title |\n|----|--------|-------|\n");
         for t in &s.shipped {
             let sha = t.commit_sha.as_deref().unwrap_or("-");
-            o.push_str(&format!("| `{}` | `{}` | {} |\n",
-                t.display_id, sha, md_esc(&t.title)));
+            o.push_str(&format!(
+                "| `{}` | `{}` | {} |\n",
+                t.display_id,
+                sha,
+                md_esc(&t.title)
+            ));
         }
         o.push('\n');
     }
@@ -935,22 +1204,39 @@ fn summarize_payload(kind: &str, p: &Value) -> String {
             let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
             if p.get("auto").and_then(|v| v.as_bool()).unwrap_or(false) {
                 format!("[auto] {text}")
-            } else { text.to_string() }
+            } else {
+                text.to_string()
+            }
         }
-        "dep_added" | "dep_removed" =>
-            p.get("on").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        "tag_added" | "tag_removed" =>
-            p.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        "blocker" =>
-            p.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        "dep_added" | "dep_removed" => p
+            .get("on")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "tag_added" | "tag_removed" => p
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "blocker" => p
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         "edit" => {
             if let Some(obj) = p.get("changes").and_then(|v| v.as_object()) {
                 obj.keys().cloned().collect::<Vec<_>>().join(",")
-            } else { String::new() }
+            } else {
+                String::new()
+            }
         }
         _ => {
             let s = serde_json::to_string(p).unwrap_or_default();
-            if s.len() > 80 { format!("{}...", &s[..80]) } else { s }
+            if s.len() > 80 {
+                format!("{}...", &s[..80])
+            } else {
+                s
+            }
         }
     }
 }
@@ -1014,7 +1300,10 @@ fn render_html(s: &Snapshot) -> String {
 
     // header
     o.push_str("<h1>quipu report</h1>\n");
-    o.push_str(&format!("<div class=\"subtitle\">generated {} UTC", html_esc(&s.generated_at)));
+    o.push_str(&format!(
+        "<div class=\"subtitle\">generated {} UTC",
+        html_esc(&s.generated_at)
+    ));
     if let Some(since) = &s.scope_since {
         o.push_str(&format!(" · events since <code>{}</code>", html_esc(since)));
     }
@@ -1028,7 +1317,9 @@ fn render_html(s: &Snapshot) -> String {
     for (st, c) in &s.state_counts {
         o.push_str(&format!(
             "<div class=\"stat\"><div class=\"label\">{}</div><div class=\"val\">{}</div></div>\n",
-            html_esc(st), c));
+            html_esc(st),
+            c
+        ));
     }
     o.push_str("</div>\n");
 
@@ -1039,7 +1330,11 @@ fn render_html(s: &Snapshot) -> String {
     } else {
         o.push_str("<table><thead><tr><th>id</th><th>state</th><th>agent</th><th>blockers</th><th>title</th></tr></thead><tbody>\n");
         for t in &s.in_flight {
-            let blk = if t.blockers.is_empty() { "-".into() } else { t.blockers.join(",") };
+            let blk = if t.blockers.is_empty() {
+                "-".into()
+            } else {
+                t.blockers.join(",")
+            };
             o.push_str(&format!(
                 "<tr><td><span class=\"id\">{}</span></td><td><span class=\"pill p-{}\">{}</span></td><td class=\"mono\">{}</td><td class=\"mono\">{}</td><td>{}</td></tr>\n",
                 html_esc(&t.display_id), html_esc(&t.state), html_esc(&t.state),
@@ -1108,7 +1403,9 @@ fn render_html(s: &Snapshot) -> String {
     if s.shipped.is_empty() {
         o.push_str("<div class=\"empty\">nothing shipped in scope</div>\n");
     } else {
-        o.push_str("<table><thead><tr><th>id</th><th>commit</th><th>title</th></tr></thead><tbody>\n");
+        o.push_str(
+            "<table><thead><tr><th>id</th><th>commit</th><th>title</th></tr></thead><tbody>\n",
+        );
         for t in &s.shipped {
             let sha = t.commit_sha.as_deref().unwrap_or("-");
             o.push_str(&format!(
