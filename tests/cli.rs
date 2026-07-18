@@ -2193,73 +2193,6 @@ fn tree_with_task_arg_filters_to_subtree() {
 }
 
 #[test]
-fn report_markdown_includes_all_sections() {
-    let tmp = tempfile::tempdir().unwrap();
-    let db = tmp.path().join("db.sqlite");
-    qp(&db).arg("init").assert().success();
-    qp(&db).args(["add", "a"]).assert().success();
-    qp(&db)
-        .args(["add", "b", "--tag", "kind:bug"])
-        .assert()
-        .success();
-    qp(&db)
-        .args(["assign", "QP-1", "--to", "x"])
-        .assert()
-        .success();
-    qp(&db)
-        .args(["claim", "QP-1", "--as", "x"])
-        .assert()
-        .success();
-    qp(&db)
-        .args(["log", "QP-1", "decision", "shipping it", "--auto"])
-        .assert()
-        .success();
-    let out = qp(&db).args(["report"]).assert().success();
-    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert!(s.contains("# ")); // header
-    assert!(s.contains("State snapshot") || s.contains("State"));
-    assert!(s.contains("In flight"));
-    assert!(s.contains("Friction") || s.contains("friction"));
-    assert!(s.contains("Open bugs") || s.contains("bug"));
-    assert!(s.contains("shipping it")); // friction note text
-    assert!(s.contains("QP-1"));
-}
-
-#[test]
-fn report_html_returns_html_with_styles() {
-    let tmp = tempfile::tempdir().unwrap();
-    let db = tmp.path().join("db.sqlite");
-    qp(&db).arg("init").assert().success();
-    qp(&db).args(["add", "a"]).assert().success();
-    let out = qp(&db).args(["report", "--html"]).assert().success();
-    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert!(s.starts_with("<!DOCTYPE") || s.starts_with("<!doctype"));
-    assert!(s.contains("<style>"));
-    assert!(s.contains("QP-1"));
-}
-
-#[test]
-fn report_wave_scope_filters_to_subtree() {
-    let tmp = tempfile::tempdir().unwrap();
-    let db = tmp.path().join("db.sqlite");
-    qp(&db).arg("init").assert().success();
-    qp(&db).args(["add", "root"]).assert().success();
-    qp(&db).args(["add", "child"]).assert().success();
-    qp(&db).args(["add", "unrelated"]).assert().success();
-    qp(&db)
-        .args(["depends", "QP-1", "--on", "QP-2"])
-        .assert()
-        .success();
-    let out = qp(&db)
-        .args(["report", "--wave", "QP-1"])
-        .assert()
-        .success();
-    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert!(s.contains("QP-1") && s.contains("QP-2"));
-    assert!(!s.contains("QP-3"), "should not contain unrelated task");
-}
-
-#[test]
 fn show_renders_title_description_and_events() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
@@ -2316,53 +2249,71 @@ fn tree_with_description_includes_description_lines() {
 }
 
 #[test]
-fn report_ticket_writes_single_document_with_description() {
+fn report_json_ticket_emits_parents_children_and_uncapped_events() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db)
         .args(["add", "alpha", "--description", "ticket detail body"])
         .assert()
-        .success();
+        .success(); // QP-1
+    qp(&db)
+        .args(["add", "beta", "--depends-on", "QP-1"])
+        .assert()
+        .success(); // QP-2, depends on QP-1
+    qp(&db).args(["add", "gamma"]).assert().success(); // QP-3
+    qp(&db)
+        .args(["depends", "QP-3", "--on", "QP-1"])
+        .assert()
+        .success(); // QP-3 also depends on QP-1 -> QP-1's children: QP-2, QP-3
+                    // Generate > 10 events on QP-1 so an uncapped event list is meaningfully testable.
+    for i in 0..12 {
+        qp(&db)
+            .args(["log", "QP-1", "note", &format!("note {i}")])
+            .assert()
+            .success();
+    }
     let out = qp(&db)
-        .args(["report", "--ticket", "QP-1"])
+        .args(["report", "--json", "--ticket", "QP-1"])
         .assert()
         .success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert!(s.contains("alpha"));
-    assert!(s.contains("ticket detail body"));
-    assert!(s.contains("QP-1"));
+    let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+    assert_eq!(v["display_id"], "QP-1");
+    assert_eq!(v["description"], "ticket detail body");
+    assert!(v["parents"].as_array().unwrap().is_empty());
+    let children: Vec<&str> = v["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["display_id"].as_str().unwrap())
+        .collect();
+    assert!(children.contains(&"QP-2") && children.contains(&"QP-3"));
+    // Uncapped: 12 note events + at least 1 add-time event.
+    assert!(v["events"].as_array().unwrap().len() > 10);
 }
 
 #[test]
-fn report_all_tickets_writes_one_file_per_ticket() {
+fn report_json_all_tickets_emits_array_of_ticket_detail() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
-    let out_dir = tmp.path().join("tickets");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "first"]).assert().success();
     qp(&db).args(["add", "second"]).assert().success();
-    qp(&db)
-        .args([
-            "report",
-            "--all-tickets",
-            "--output-dir",
-            out_dir.to_str().unwrap(),
-        ])
+    let out = qp(&db)
+        .args(["report", "--json", "--all-tickets"])
         .assert()
         .success();
-    let entries: Vec<_> = std::fs::read_dir(&out_dir)
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
-    assert_eq!(entries.len(), 2);
-    // Each filename starts with QP-1 or QP-2
-    let names: Vec<String> = entries
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    let ids: Vec<&str> = arr
         .iter()
-        .map(|e| e.file_name().to_string_lossy().to_string())
+        .map(|t| t["display_id"].as_str().unwrap())
         .collect();
-    assert!(names.iter().any(|n| n.starts_with("QP-1")));
-    assert!(names.iter().any(|n| n.starts_with("QP-2")));
+    assert!(ids.contains(&"QP-1") && ids.contains(&"QP-2"));
+    assert!(arr[0]["events"].is_array());
 }
 
 #[test]
