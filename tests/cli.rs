@@ -7,10 +7,19 @@ fn cancel_terminates_task_unblocks_dependents() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["add", "b", "--depends-on", "QP-1"]).assert().success();
-    qp(&db).args(["cancel", "QP-1", "--reason", "no longer needed"]).assert().success();
+    qp(&db)
+        .args(["add", "b", "--depends-on", "QP-1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["cancel", "QP-1", "--reason", "no longer needed"])
+        .assert()
+        .success();
     // QP-2 should be ready: dep is `cancelled` which counts as resolved.
-    qp(&db).args(["assign", "QP-2", "--to", "x"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-2", "--to", "x"])
+        .assert()
+        .success();
 }
 
 #[test]
@@ -19,11 +28,23 @@ fn abandon_returns_running_task_to_ready() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["assign", "QP-1", "--to", "x"]).assert().success();
-    qp(&db).args(["claim",  "QP-1", "--as", "x"]).assert().success();
-    qp(&db).args(["abandon","QP-1", "--as", "x"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["abandon", "QP-1", "--as", "x"])
+        .assert()
+        .success();
     // Re-assignable.
-    qp(&db).args(["assign", "QP-1", "--to", "y"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "y"])
+        .assert()
+        .success();
 }
 
 #[test]
@@ -32,26 +53,68 @@ fn reclaim_force_releases_without_agent_id() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["assign", "QP-1", "--to", "x"]).assert().success();
-    qp(&db).args(["claim",  "QP-1", "--as", "x"]).assert().success();
-    qp(&db).args(["reclaim", "QP-1", "--reason", "agent unresponsive"]).assert().success();
-    qp(&db).args(["assign", "QP-1", "--to", "y"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["reclaim", "QP-1", "--reason", "agent unresponsive"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "y"])
+        .assert()
+        .success();
 }
 
 #[test]
 fn version_flag_prints_version() {
-    Command::cargo_bin("qp").unwrap().arg("--version").assert().success()
+    Command::cargo_bin("qp")
+        .unwrap()
+        .arg("--version")
+        .assert()
+        .success()
         .stdout(contains("quipu"));
 }
 
 #[test]
 fn help_lists_core_commands() {
-    let assert = Command::cargo_bin("qp").unwrap().arg("--help").assert().success();
+    let assert = Command::cargo_bin("qp")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success();
     let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     for cmd in [
-        "init","add","assign","claim","complete","block","cancel","abandon","reclaim",
-        "log","tag","relation","tree","timeline","wave","status","list",
-        "decisions","wait","watch","install-skills","depends","edit","report","show",
+        "init",
+        "add",
+        "assign",
+        "claim",
+        "complete",
+        "block",
+        "cancel",
+        "abandon",
+        "reclaim",
+        "log",
+        "tag",
+        "relation",
+        "tree",
+        "timeline",
+        "wave",
+        "status",
+        "list",
+        "decisions",
+        "wait",
+        "watch",
+        "install-skills",
+        "depends",
+        "edit",
+        "report",
+        "show",
     ] {
         assert!(out.contains(cmd), "help missing `{cmd}`:\n{out}");
     }
@@ -69,15 +132,34 @@ fn timeline_global_includes_all_event_kinds() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["assign","QP-1","--to","x"]).assert().success();
-    qp(&db).args(["claim", "QP-1","--as","x"]).assert().success();
-    qp(&db).args(["complete","QP-1","--as","x","--decision","ok"]).assert().success();
-    let out = qp(&db).args(["timeline","--json"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["complete", "QP-1", "--as", "x", "--decision", "ok"])
+        .assert()
+        .success();
+    let out = qp(&db).args(["timeline", "--json"]).assert().success();
     let v: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
-    let kinds: Vec<&str> = v.as_array().unwrap().iter()
-        .map(|e| e["kind"].as_str().unwrap()).collect();
-    assert!(kinds.contains(&"decision") && kinds.iter().filter(|k| **k=="state_change").count() >= 3);
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    let kinds: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    assert!(
+        kinds.contains(&"decision") && kinds.iter().filter(|k| **k == "state_change").count() >= 3
+    );
 }
 
 #[test]
@@ -85,12 +167,22 @@ fn decisions_filters_to_decision_events() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
-    qp(&db).args(["add","a"]).assert().success();
-    qp(&db).args(["log","QP-1","decision","X","--auto"]).assert().success();
-    qp(&db).args(["log","QP-1","note","Y"]).assert().success();
-    let out = qp(&db).args(["decisions","--json"]).assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["log", "QP-1", "decision", "X", "--auto"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["log", "QP-1", "note", "Y"])
+        .assert()
+        .success();
+    let out = qp(&db).args(["decisions", "--json"]).assert().success();
     let v: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
     assert_eq!(v.as_array().unwrap().len(), 1);
 }
 
@@ -100,8 +192,14 @@ fn log_writes_event_with_kind_and_body() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "t"]).assert().success();
-    qp(&db).args(["log", "QP-1", "decision", "chose B", "--as", "x", "--auto"]).assert().success();
-    qp(&db).args(["log", "QP-1", "note", "edge case observed"]).assert().success();
+    qp(&db)
+        .args(["log", "QP-1", "decision", "chose B", "--as", "x", "--auto"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["log", "QP-1", "note", "edge case observed"])
+        .assert()
+        .success();
 }
 
 #[test]
@@ -110,10 +208,19 @@ fn tag_add_and_rm() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "t"]).assert().success();
-    qp(&db).args(["tag", "QP-1", "add", "kind:critique"]).assert().success();
-    qp(&db).args(["tag", "QP-1", "rm",  "kind:critique"]).assert().success();
+    qp(&db)
+        .args(["tag", "QP-1", "add", "kind:critique"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["tag", "QP-1", "rm", "kind:critique"])
+        .assert()
+        .success();
     // Re-removing a tag that doesn't exist should be idempotent (success).
-    qp(&db).args(["tag", "QP-1", "rm",  "kind:critique"]).assert().success();
+    qp(&db)
+        .args(["tag", "QP-1", "rm", "kind:critique"])
+        .assert()
+        .success();
 }
 
 #[test]
@@ -124,15 +231,27 @@ fn relation_add_list_rm() {
     qp(&db).args(["add", "root"]).assert().success();
     qp(&db).args(["add", "a"]).assert().success();
     qp(&db).args(["add", "b"]).assert().success();
-    qp(&db).args(["relation", "add", "QP-2", "variant-of", "QP-1"]).assert().success();
-    qp(&db).args(["relation", "add", "QP-3", "variant-of", "QP-1"]).assert().success();
-    let out = qp(&db).args(["relation", "list", "QP-1", "--json"]).assert().success();
+    qp(&db)
+        .args(["relation", "add", "QP-2", "variant-of", "QP-1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["relation", "add", "QP-3", "variant-of", "QP-1"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["relation", "list", "QP-1", "--json"])
+        .assert()
+        .success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
     // incoming variant-of edges from QP-2, QP-3.
     let incoming = v["incoming"].as_array().unwrap();
     assert_eq!(incoming.len(), 2);
-    qp(&db).args(["relation", "rm", "QP-2", "variant-of", "QP-1"]).assert().success();
+    qp(&db)
+        .args(["relation", "rm", "QP-2", "variant-of", "QP-1"])
+        .assert()
+        .success();
 }
 
 #[test]
@@ -156,7 +275,11 @@ fn init_enables_wal_journal_mode() {
     let mode: String = conn
         .query_row("PRAGMA journal_mode", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(mode.to_lowercase(), "wal", "expected WAL journal mode, got {mode}");
+    assert_eq!(
+        mode.to_lowercase(),
+        "wal",
+        "expected WAL journal mode, got {mode}"
+    );
 }
 
 #[test]
@@ -177,7 +300,10 @@ fn add_with_deps_starts_pending_then_unblocks() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    let out = qp(&db).args(["add", "b", "--depends-on", "QP-1", "--json"]).assert().success();
+    let out = qp(&db)
+        .args(["add", "b", "--depends-on", "QP-1", "--json"])
+        .assert()
+        .success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
     assert_eq!(v["state"], "pending");
@@ -188,12 +314,26 @@ fn add_with_tags_persists_them() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
-    let out = qp(&db).args(["add", "c", "--tag", "kind:critique", "--tag", "wave:7", "--json"])
-        .assert().success();
+    let out = qp(&db)
+        .args([
+            "add",
+            "c",
+            "--tag",
+            "kind:critique",
+            "--tag",
+            "wave:7",
+            "--json",
+        ])
+        .assert()
+        .success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
-    let tags: Vec<String> = v["tags"].as_array().unwrap().iter()
-        .map(|x| x.as_str().unwrap().to_string()).collect();
+    let tags: Vec<String> = v["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap().to_string())
+        .collect();
     assert!(tags.contains(&"kind:critique".into()) && tags.contains(&"wave:7".into()));
 }
 
@@ -206,12 +346,18 @@ fn add_rejects_cycle_on_self_dep() {
     // only at creation time in MVP, so cycle is only possible self-on-existing. Skip
     // multi-step cycle; assert the self-dep case via direct error path.
     qp(&db).args(["add", "x"]).assert().success();
-    qp(&db).args(["add", "y", "--depends-on", "QP-1"]).assert().success();
+    qp(&db)
+        .args(["add", "y", "--depends-on", "QP-1"])
+        .assert()
+        .success();
     // QP-2 depending on QP-1 — fine. Now imagine QP-1 declaring dep on QP-2: not supported via add
     // (you'd need a future `qp dep add` command). For MVP, just verify self-cycle is rejected
     // via an error path; we test would_cycle() indirectly via dep-add in Task 10 if added.
     // Stub assertion: adding with a non-existent dep errors clearly.
-    qp(&db).args(["add", "z", "--depends-on", "QP-99"]).assert().failure();
+    qp(&db)
+        .args(["add", "z", "--depends-on", "QP-99"])
+        .assert()
+        .failure();
 }
 
 #[test]
@@ -219,8 +365,11 @@ fn tree_renders_tasks_with_state_and_deps() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
-    qp(&db).args(["add","root"]).assert().success();
-    qp(&db).args(["add","child","--depends-on","QP-1"]).assert().success();
+    qp(&db).args(["add", "root"]).assert().success();
+    qp(&db)
+        .args(["add", "child", "--depends-on", "QP-1"])
+        .assert()
+        .success();
     let out = qp(&db).args(["tree"]).assert().success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(s.contains("QP-1") && s.contains("QP-2"));
@@ -231,11 +380,15 @@ fn status_counts_by_state() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
-    qp(&db).args(["add","a"]).assert().success();
-    qp(&db).args(["add","b"]).assert().success();
-    let out = qp(&db).args(["status","--json"]).assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["add", "b"]).assert().success();
+    let out = qp(&db).args(["status", "--json"]).assert().success();
     let v: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
     assert_eq!(v["ready"], 2);
 }
 
@@ -244,15 +397,37 @@ fn list_embeds_tags_blocked_by_last_event() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
-    qp(&db).args(["add","a"]).assert().success();
-    qp(&db).args(["add","b","--depends-on","QP-1","--tag","kind:critique"]).assert().success();
-    let out = qp(&db).args(["list","--json"]).assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["add", "b", "--depends-on", "QP-1", "--tag", "kind:critique"])
+        .assert()
+        .success();
+    let out = qp(&db).args(["list", "--json"]).assert().success();
     let v: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
-    let t2 = v.as_array().unwrap().iter().find(|t| t["display_id"]=="QP-2").unwrap();
-    let tags: Vec<&str> = t2["tags"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    let t2 = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["display_id"] == "QP-2")
+        .unwrap();
+    let tags: Vec<&str> = t2["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap())
+        .collect();
     assert!(tags.contains(&"kind:critique"));
-    let blocked: Vec<&str> = t2["blocked_by"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
+    let blocked: Vec<&str> = t2["blocked_by"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap())
+        .collect();
     assert_eq!(blocked, vec!["QP-1"]);
     assert!(t2["last_event"].is_object() || t2["last_event"].is_null());
 }
@@ -262,16 +437,36 @@ fn list_filters_by_tag_and_state_and_assignee() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
-    qp(&db).args(["add","a","--tag","kind:critique"]).assert().success();
-    qp(&db).args(["add","b"]).assert().success();
-    qp(&db).args(["assign","QP-1","--to","agent-1"]).assert().success();
-    let out = qp(&db).args(["list","--tag","kind:critique","--json"]).assert().success();
+    qp(&db)
+        .args(["add", "a", "--tag", "kind:critique"])
+        .assert()
+        .success();
+    qp(&db).args(["add", "b"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "agent-1"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["list", "--tag", "kind:critique", "--json"])
+        .assert()
+        .success();
     let v: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
     assert_eq!(v.as_array().unwrap().len(), 1);
-    let out = qp(&db).args(["list","--assigned-to","agent-1","--json"]).assert().success();
+    let out = qp(&db)
+        .args(["list", "--assigned-to", "agent-1", "--json"])
+        .assert()
+        .success();
     let v: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
     assert_eq!(v.as_array().unwrap().len(), 1);
 }
 
@@ -289,15 +484,19 @@ fn mismatched_project_uuid_emits_warning() {
     std::fs::create_dir_all(cwd_b.join(".quipu")).unwrap();
     std::fs::copy(&dbb, cwd_b.join(".quipu/db.sqlite")).unwrap();
 
-    let assert = Command::cargo_bin("qp").unwrap()
+    let assert = Command::cargo_bin("qp")
+        .unwrap()
         .current_dir(&cwd_b)
         .env("QP_DB", &dba)
-        .arg("status").arg("--json")
+        .arg("status")
+        .arg("--json")
         .assert()
         .success();
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
-    assert!(stderr.contains("project_uuid mismatch") || stderr.contains("warning"),
-        "expected mismatch warning in stderr:\n{stderr}");
+    assert!(
+        stderr.contains("project_uuid mismatch") || stderr.contains("warning"),
+        "expected mismatch warning in stderr:\n{stderr}"
+    );
 }
 
 #[test]
@@ -306,8 +505,14 @@ fn assign_then_claim_happy_path() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "t"]).assert().success();
-    qp(&db).args(["assign", "QP-1", "--to", "agent-a"]).assert().success();
-    qp(&db).args(["claim", "QP-1", "--as", "agent-a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "agent-a"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "agent-a"])
+        .assert()
+        .success();
 }
 
 #[test]
@@ -316,8 +521,15 @@ fn assign_rejects_double_assign() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "t"]).assert().success();
-    qp(&db).args(["assign", "QP-1", "--to", "a"]).assert().success();
-    qp(&db).args(["assign", "QP-1", "--to", "b"]).assert().failure().code(2);
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "a"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "b"])
+        .assert()
+        .failure()
+        .code(2);
 }
 
 #[test]
@@ -326,8 +538,15 @@ fn claim_rejects_wrong_assignee() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "t"]).assert().success();
-    qp(&db).args(["assign", "QP-1", "--to", "a"]).assert().success();
-    qp(&db).args(["claim", "QP-1", "--as", "b"]).assert().failure().code(2);
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "a"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "b"])
+        .assert()
+        .failure()
+        .code(2);
 }
 
 #[test]
@@ -336,8 +555,15 @@ fn assign_rejects_pending_task() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["add", "b", "--depends-on", "QP-1"]).assert().success();
-    qp(&db).args(["assign", "QP-2", "--to", "x"]).assert().failure().code(2);
+    qp(&db)
+        .args(["add", "b", "--depends-on", "QP-1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["assign", "QP-2", "--to", "x"])
+        .assert()
+        .failure()
+        .code(2);
 }
 
 #[test]
@@ -346,13 +572,36 @@ fn complete_marks_done_records_decisions_unblocks_deps() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["add", "b", "--depends-on", "QP-1"]).assert().success();
-    qp(&db).args(["assign", "QP-1", "--to", "x"]).assert().success();
-    qp(&db).args(["claim", "QP-1", "--as", "x"]).assert().success();
-    qp(&db).args(["complete", "QP-1", "--as", "x",
-        "--decision", "chose path A", "--decision", "deferred B"]).assert().success();
+    qp(&db)
+        .args(["add", "b", "--depends-on", "QP-1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args([
+            "complete",
+            "QP-1",
+            "--as",
+            "x",
+            "--decision",
+            "chose path A",
+            "--decision",
+            "deferred B",
+        ])
+        .assert()
+        .success();
     // QP-2 should now be assignable (ready).
-    qp(&db).args(["assign", "QP-2", "--to", "y"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-2", "--to", "y"])
+        .assert()
+        .success();
 }
 
 #[test]
@@ -361,13 +610,32 @@ fn block_creates_blocker_task_and_demotes_original() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "main"]).assert().success();
-    qp(&db).args(["assign", "QP-1", "--to", "alice"]).assert().success();
-    qp(&db).args(["claim",  "QP-1", "--as", "alice"]).assert().success();
-    qp(&db).args(["block",  "QP-1", "--as", "alice",
-                  "--new", "obtain prod API key"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args([
+            "block",
+            "QP-1",
+            "--as",
+            "alice",
+            "--new",
+            "obtain prod API key",
+        ])
+        .assert()
+        .success();
 
     // QP-1 should now be pending (blocked on QP-2). assign should fail.
-    qp(&db).args(["assign", "QP-1", "--to", "bob"]).assert().failure().code(2);
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "bob"])
+        .assert()
+        .failure()
+        .code(2);
 
     // QP-2 should exist as a ready task tagged kind:blocker.
     let out = qp(&db).args(["list", "--json"]).assert().success();
@@ -376,11 +644,23 @@ fn block_creates_blocker_task_and_demotes_original() {
     assert!(s.contains("kind:blocker"));
 
     // Resolve the blocker → original auto-thaws.
-    qp(&db).args(["assign", "QP-2", "--to", "alice"]).assert().success();
-    qp(&db).args(["claim",  "QP-2", "--as", "alice"]).assert().success();
-    qp(&db).args(["complete","QP-2", "--as", "alice"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-2", "--to", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-2", "--as", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["complete", "QP-2", "--as", "alice"])
+        .assert()
+        .success();
     // QP-1 auto-thaws to ready.
-    qp(&db).args(["assign", "QP-1", "--to", "alice"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "alice"])
+        .assert()
+        .success();
 }
 
 #[test]
@@ -388,15 +668,33 @@ fn wave_groups_by_state_and_includes_last_event() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
-    qp(&db).args(["add","a"]).assert().success();
-    qp(&db).args(["add","b"]).assert().success();
-    qp(&db).args(["assign","QP-1","--to","x"]).assert().success();
-    qp(&db).args(["claim","QP-1","--as","x"]).assert().success();
-    let out = qp(&db).args(["wave","--json"]).assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["add", "b"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    let out = qp(&db).args(["wave", "--json"]).assert().success();
     let v: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
-    assert!(v["running"].as_array().unwrap().iter().any(|t| t["display_id"]=="QP-1"));
-    assert!(v["ready"].as_array().unwrap().iter().any(|t| t["display_id"]=="QP-2"));
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    assert!(v["running"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["display_id"] == "QP-1"));
+    assert!(v["ready"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["display_id"] == "QP-2"));
     assert!(v["assigned"].is_array());
     assert!(v.get("blocked").is_none(), "blocked group removed");
     assert!(v["pending"].is_array());
@@ -407,22 +705,46 @@ fn wait_returns_when_filter_set_empties() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
-    qp(&db).args(["add","a","--tag","wave:7"]).assert().success();
-    qp(&db).args(["assign","QP-1","--to","x"]).assert().success();
-    qp(&db).args(["claim", "QP-1","--as","x"]).assert().success();
+    qp(&db)
+        .args(["add", "a", "--tag", "wave:7"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
 
     // Start `wait` in the background.
     let db2 = db.clone();
     let join = std::thread::spawn(move || {
-        Command::cargo_bin("qp").unwrap()
+        Command::cargo_bin("qp")
+            .unwrap()
             .env("QP_DB", &db2)
-            .args(["wait","--tag","wave:7","--state","running","--empty",
-                   "--interval-ms","50","--timeout-secs","5"])
-            .assert().success();
+            .args([
+                "wait",
+                "--tag",
+                "wave:7",
+                "--state",
+                "running",
+                "--empty",
+                "--interval-ms",
+                "50",
+                "--timeout-secs",
+                "5",
+            ])
+            .assert()
+            .success();
     });
     std::thread::sleep(std::time::Duration::from_millis(150));
     // Complete the task — wait should return.
-    qp(&db).args(["complete","QP-1","--as","x","--decision","done"]).assert().success();
+    qp(&db)
+        .args(["complete", "QP-1", "--as", "x", "--decision", "done"])
+        .assert()
+        .success();
     join.join().unwrap();
 }
 
@@ -431,11 +753,29 @@ fn wait_times_out_with_exit_code() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
-    qp(&db).args(["add","a"]).assert().success();
-    qp(&db).args(["assign","QP-1","--to","x"]).assert().success();
-    qp(&db).args(["claim","QP-1","--as","x"]).assert().success();
-    qp(&db).args(["wait","--state","running","--empty","--interval-ms","50","--timeout-secs","1"])
-        .assert().failure().code(3);
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args([
+            "wait",
+            "--state",
+            "running",
+            "--empty",
+            "--interval-ms",
+            "50",
+            "--timeout-secs",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .code(3);
 }
 
 #[test]
@@ -450,14 +790,26 @@ fn watch_emits_new_events_as_jsonl() {
     let bin = assert_cmd::cargo::cargo_bin("qp");
     let mut child = PCommand::new(&bin)
         .env("QP_DB", &db)
-        .args(["watch", "--since", "0", "--max-ticks", "5", "--interval-ms", "50", "--json"])
+        .args([
+            "watch",
+            "--since",
+            "0",
+            "--max-ticks",
+            "5",
+            "--interval-ms",
+            "50",
+            "--json",
+        ])
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(75));
     // Emit a few more events.
     qp(&db).args(["add", "another"]).assert().success();
-    qp(&db).args(["log", "QP-1", "note", "hello"]).assert().success();
+    qp(&db)
+        .args(["log", "QP-1", "note", "hello"])
+        .assert()
+        .success();
     let out = child.wait_with_output().unwrap();
     let lines: Vec<String> = BufReader::new(&out.stdout[..])
         .lines()
@@ -466,8 +818,8 @@ fn watch_emits_new_events_as_jsonl() {
         .collect();
     assert!(lines.len() >= 2, "expected >=2 event lines, got: {lines:?}");
     for line in &lines {
-        let _v: serde_json::Value = serde_json::from_str(line)
-            .expect("each watch line must be valid JSON");
+        let _v: serde_json::Value =
+            serde_json::from_str(line).expect("each watch line must be valid JSON");
     }
 }
 
@@ -478,10 +830,16 @@ fn install_skills_symlinks_into_target() {
     std::fs::create_dir_all(src.path().join("skills/wave")).unwrap();
     std::fs::write(src.path().join("skills/wave/SKILL.md"), "x").unwrap();
 
-    Command::cargo_bin("qp").unwrap()
+    Command::cargo_bin("qp")
+        .unwrap()
         .env("QP_SKILLS_SRC", src.path())
-        .args(["install-skills", "--target", target.path().to_str().unwrap()])
-        .assert().success();
+        .args([
+            "install-skills",
+            "--target",
+            target.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success();
     assert!(target.path().join("qp-wave/SKILL.md").exists());
 }
 
@@ -490,12 +848,18 @@ fn wave_lists_pending_tasks_that_have_unresolved_deps() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
-    qp(&db).args(["add", "a"]).assert().success();                       // QP-1 ready
-    qp(&db).args(["add", "b", "--depends-on", "QP-1"]).assert().success(); // QP-2 pending
+    qp(&db).args(["add", "a"]).assert().success(); // QP-1 ready
+    qp(&db)
+        .args(["add", "b", "--depends-on", "QP-1"])
+        .assert()
+        .success(); // QP-2 pending
     let out = qp(&db).args(["wave", "--json"]).assert().success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
-    assert!(v.get("blocked").is_none(), "should not have `blocked` group");
+    assert!(
+        v.get("blocked").is_none(),
+        "should not have `blocked` group"
+    );
     let pending = v["pending"].as_array().unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0]["display_id"], "QP-2");
@@ -505,7 +869,10 @@ fn wave_lists_pending_tasks_that_have_unresolved_deps() {
 fn add_with_custom_prefix_uses_it() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
-    qp(&db).args(["init", "--prefix", "ACME"]).assert().success();
+    qp(&db)
+        .args(["init", "--prefix", "ACME"])
+        .assert()
+        .success();
     let out = qp(&db).args(["add", "first", "--json"]).assert().success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
@@ -516,18 +883,32 @@ fn add_with_custom_prefix_uses_it() {
 fn init_with_invalid_prefix_errors() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
-    qp(&db).args(["init", "--prefix", "qp"]).assert().failure().code(2);
-    qp(&db).args(["init", "--prefix", "TOOLONG"]).assert().failure().code(2);
+    qp(&db)
+        .args(["init", "--prefix", "qp"])
+        .assert()
+        .failure()
+        .code(2);
+    qp(&db)
+        .args(["init", "--prefix", "TOOLONG"])
+        .assert()
+        .failure()
+        .code(2);
 }
 
 #[test]
 fn init_prefix_is_immutable_after_first_init() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
-    qp(&db).args(["init", "--prefix", "ACME"]).assert().success();
+    qp(&db)
+        .args(["init", "--prefix", "ACME"])
+        .assert()
+        .success();
     // Second init with a different prefix should be silently idempotent —
     // prefix is NOT changed.
-    qp(&db).args(["init", "--prefix", "OTHER"]).assert().success();
+    qp(&db)
+        .args(["init", "--prefix", "OTHER"])
+        .assert()
+        .success();
     let out = qp(&db).args(["add", "x", "--json"]).assert().success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(s.contains("ACME-1"), "prefix should remain ACME, got: {s}");
@@ -542,9 +923,16 @@ fn depends_links_two_ready_tasks_no_agent_required() {
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
     qp(&db).args(["add", "b"]).assert().success();
-    qp(&db).args(["depends", "QP-2", "--on", "QP-1"]).assert().success();
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1"])
+        .assert()
+        .success();
     // QP-2 should now be pending (has an unresolved dep on QP-1).
-    qp(&db).args(["assign", "QP-2", "--to", "x"]).assert().failure().code(2);
+    qp(&db)
+        .args(["assign", "QP-2", "--to", "x"])
+        .assert()
+        .failure()
+        .code(2);
 }
 
 #[test]
@@ -553,7 +941,11 @@ fn depends_rejects_self_cycle() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["depends", "QP-1", "--on", "QP-1"]).assert().failure().code(2);
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-1"])
+        .assert()
+        .failure()
+        .code(2);
 }
 
 #[test]
@@ -562,9 +954,16 @@ fn depends_rejects_transitive_cycle() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["add", "b", "--depends-on", "QP-1"]).assert().success();
+    qp(&db)
+        .args(["add", "b", "--depends-on", "QP-1"])
+        .assert()
+        .success();
     // Adding QP-1 → depends-on → QP-2 would close the loop.
-    qp(&db).args(["depends", "QP-1", "--on", "QP-2"]).assert().failure().code(2);
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-2"])
+        .assert()
+        .failure()
+        .code(2);
 }
 
 #[test]
@@ -574,14 +973,31 @@ fn depends_on_running_task_requires_matching_agent() {
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
     qp(&db).args(["add", "b"]).assert().success();
-    qp(&db).args(["assign", "QP-1", "--to", "alice"]).assert().success();
-    qp(&db).args(["claim",  "QP-1", "--as", "alice"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "alice"])
+        .assert()
+        .success();
     // No --as flag → rejected.
-    qp(&db).args(["depends", "QP-1", "--on", "QP-2"]).assert().failure().code(2);
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-2"])
+        .assert()
+        .failure()
+        .code(2);
     // Wrong --as → rejected.
-    qp(&db).args(["depends", "QP-1", "--on", "QP-2", "--as", "bob"]).assert().failure().code(2);
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-2", "--as", "bob"])
+        .assert()
+        .failure()
+        .code(2);
     // Matching --as → success.
-    qp(&db).args(["depends", "QP-1", "--on", "QP-2", "--as", "alice"]).assert().success();
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-2", "--as", "alice"])
+        .assert()
+        .success();
 }
 
 #[test]
@@ -590,11 +1006,20 @@ fn depends_rm_can_unblock_pending_task() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["add", "b", "--depends-on", "QP-1"]).assert().success();
+    qp(&db)
+        .args(["add", "b", "--depends-on", "QP-1"])
+        .assert()
+        .success();
     // QP-2 is pending.
-    qp(&db).args(["depends", "QP-2", "--on", "QP-1", "--rm"]).assert().success();
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1", "--rm"])
+        .assert()
+        .success();
     // Now assignable.
-    qp(&db).args(["assign", "QP-2", "--to", "x"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-2", "--to", "x"])
+        .assert()
+        .success();
 }
 
 #[test]
@@ -603,11 +1028,23 @@ fn abandon_returns_to_ready_when_no_unresolved_deps() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["assign", "QP-1", "--to", "x"]).assert().success();
-    qp(&db).args(["claim",  "QP-1", "--as", "x"]).assert().success();
-    qp(&db).args(["abandon","QP-1", "--as", "x"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["abandon", "QP-1", "--as", "x"])
+        .assert()
+        .success();
     // Re-assignable: state must be 'ready'.
-    qp(&db).args(["assign", "QP-1", "--to", "y"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "y"])
+        .assert()
+        .success();
 }
 
 #[test]
@@ -615,15 +1052,31 @@ fn abandon_returns_to_pending_when_unresolved_dep_exists() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
-    qp(&db).args(["add", "blocker"]).assert().success();    // QP-1
-    qp(&db).args(["add", "main"]).assert().success();       // QP-2
-    qp(&db).args(["assign", "QP-2", "--to", "x"]).assert().success();
-    qp(&db).args(["claim",  "QP-2", "--as", "x"]).assert().success();
+    qp(&db).args(["add", "blocker"]).assert().success(); // QP-1
+    qp(&db).args(["add", "main"]).assert().success(); // QP-2
+    qp(&db)
+        .args(["assign", "QP-2", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-2", "--as", "x"])
+        .assert()
+        .success();
     // Inject an unresolved dep onto QP-2 while running.
-    qp(&db).args(["depends", "QP-2", "--on", "QP-1", "--as", "x"]).assert().success();
-    qp(&db).args(["abandon","QP-2", "--as", "x"]).assert().success();
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["abandon", "QP-2", "--as", "x"])
+        .assert()
+        .success();
     // Should be pending now — assign rejected.
-    qp(&db).args(["assign", "QP-2", "--to", "y"]).assert().failure().code(2);
+    qp(&db)
+        .args(["assign", "QP-2", "--to", "y"])
+        .assert()
+        .failure()
+        .code(2);
 }
 
 #[test]
@@ -632,10 +1085,19 @@ fn block_rejects_wrong_agent() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "main"]).assert().success();
-    qp(&db).args(["assign", "QP-1", "--to", "alice"]).assert().success();
-    qp(&db).args(["claim",  "QP-1", "--as", "alice"]).assert().success();
-    qp(&db).args(["block",  "QP-1", "--as", "bob", "--new", "x"])
-        .assert().failure().code(2);
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["block", "QP-1", "--as", "bob", "--new", "x"])
+        .assert()
+        .failure()
+        .code(2);
 }
 
 #[test]
@@ -645,14 +1107,30 @@ fn depends_demote_emits_state_change_event() {
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
     qp(&db).args(["add", "b"]).assert().success();
-    qp(&db).args(["depends", "QP-2", "--on", "QP-1"]).assert().success();
-    let out = qp(&db).args(["timeline", "QP-2", "--json"]).assert().success();
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["timeline", "QP-2", "--json"])
+        .assert()
+        .success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
-    let kinds: Vec<&str> = v.as_array().unwrap().iter()
-        .map(|e| e["kind"].as_str().unwrap()).collect();
-    assert!(kinds.contains(&"dep_added"), "expected dep_added in {kinds:?}");
-    assert!(kinds.contains(&"state_change"), "expected state_change in {kinds:?}");
+    let kinds: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    assert!(
+        kinds.contains(&"dep_added"),
+        "expected dep_added in {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&"state_change"),
+        "expected state_change in {kinds:?}"
+    );
 }
 
 #[test]
@@ -670,16 +1148,28 @@ fn edit_updates_title_and_emits_edit_event() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "old title"]).assert().success();
-    qp(&db).args(["edit", "QP-1", "--title", "new title"]).assert().success();
+    qp(&db)
+        .args(["edit", "QP-1", "--title", "new title"])
+        .assert()
+        .success();
     let out = qp(&db).args(["list", "--json"]).assert().success();
     let v: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
     assert_eq!(v.as_array().unwrap()[0]["title"], "new title");
-    let tl = qp(&db).args(["timeline", "QP-1", "--json"]).assert().success();
-    let tv: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&tl.get_output().stdout).unwrap().trim()).unwrap();
-    assert!(tv.as_array().unwrap().iter().any(|e| e["kind"] == "edit"),
-        "expected an `edit` event in timeline");
+    let tl = qp(&db)
+        .args(["timeline", "QP-1", "--json"])
+        .assert()
+        .success();
+    let tv: serde_json::Value =
+        serde_json::from_str(std::str::from_utf8(&tl.get_output().stdout).unwrap().trim()).unwrap();
+    assert!(
+        tv.as_array().unwrap().iter().any(|e| e["kind"] == "edit"),
+        "expected an `edit` event in timeline"
+    );
 }
 
 #[test]
@@ -688,12 +1178,20 @@ fn edit_no_op_skips_event() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["edit", "QP-1", "--title", "a"]).assert().success();
-    let tl = qp(&db).args(["timeline", "QP-1", "--json"]).assert().success();
-    let tv: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&tl.get_output().stdout).unwrap().trim()).unwrap();
-    assert!(!tv.as_array().unwrap().iter().any(|e| e["kind"] == "edit"),
-        "no-op edit should not emit event");
+    qp(&db)
+        .args(["edit", "QP-1", "--title", "a"])
+        .assert()
+        .success();
+    let tl = qp(&db)
+        .args(["timeline", "QP-1", "--json"])
+        .assert()
+        .success();
+    let tv: serde_json::Value =
+        serde_json::from_str(std::str::from_utf8(&tl.get_output().stdout).unwrap().trim()).unwrap();
+    assert!(
+        !tv.as_array().unwrap().iter().any(|e| e["kind"] == "edit"),
+        "no-op edit should not emit event"
+    );
 }
 
 #[test]
@@ -701,14 +1199,26 @@ fn edit_can_clear_tier_with_empty_string() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
-    qp(&db).args(["add", "a", "--tier", "p1"]).assert().success();
-    qp(&db).args(["edit", "QP-1", "--tier", ""]).assert().success();
+    qp(&db)
+        .args(["add", "a", "--tier", "p1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["edit", "QP-1", "--tier", ""])
+        .assert()
+        .success();
     let out = qp(&db).args(["list", "--json"]).assert().success();
     let v: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
     // tier becomes null/absent in JSON.
-    assert!(v.as_array().unwrap()[0]["tier"].is_null()
-        || v.as_array().unwrap()[0].get("tier").is_none());
+    assert!(
+        v.as_array().unwrap()[0]["tier"].is_null()
+            || v.as_array().unwrap()[0].get("tier").is_none()
+    );
 }
 
 #[test]
@@ -716,12 +1226,21 @@ fn add_with_description_stores_and_lists_it() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
-    qp(&db).args(["add", "a", "--description", "long form scope notes"])
-        .assert().success();
+    qp(&db)
+        .args(["add", "a", "--description", "long form scope notes"])
+        .assert()
+        .success();
     let out = qp(&db).args(["list", "--json"]).assert().success();
     let v: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
-    assert_eq!(v.as_array().unwrap()[0]["description"], "long form scope notes");
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    assert_eq!(
+        v.as_array().unwrap()[0]["description"],
+        "long form scope notes"
+    );
 }
 
 #[test]
@@ -730,11 +1249,19 @@ fn edit_during_running_state_allowed() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["assign", "QP-1", "--to", "alice"]).assert().success();
-    qp(&db).args(["claim",  "QP-1", "--as", "alice"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "alice"])
+        .assert()
+        .success();
     // Scope refinement mid-flight should be allowed.
-    qp(&db).args(["edit", "QP-1", "--description", "scope refined"])
-        .assert().success();
+    qp(&db)
+        .args(["edit", "QP-1", "--description", "scope refined"])
+        .assert()
+        .success();
 }
 
 #[test]
@@ -743,10 +1270,23 @@ fn edit_rejected_on_done_task() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["assign", "QP-1", "--to", "x"]).assert().success();
-    qp(&db).args(["claim",  "QP-1", "--as", "x"]).assert().success();
-    qp(&db).args(["complete","QP-1", "--as", "x"]).assert().success();
-    qp(&db).args(["edit", "QP-1", "--title", "no go"]).assert().failure().code(2);
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["complete", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["edit", "QP-1", "--title", "no go"])
+        .assert()
+        .failure()
+        .code(2);
 }
 
 #[test]
@@ -755,8 +1295,15 @@ fn edit_rejected_on_cancelled_task() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["cancel", "QP-1", "--reason", "obsolete"]).assert().success();
-    qp(&db).args(["edit", "QP-1", "--title", "no go"]).assert().failure().code(2);
+    qp(&db)
+        .args(["cancel", "QP-1", "--reason", "obsolete"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["edit", "QP-1", "--title", "no go"])
+        .assert()
+        .failure()
+        .code(2);
 }
 
 #[test]
@@ -765,7 +1312,11 @@ fn edit_rejects_empty_title() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["edit", "QP-1", "--title", ""]).assert().failure().code(1);
+    qp(&db)
+        .args(["edit", "QP-1", "--title", ""])
+        .assert()
+        .failure()
+        .code(1);
 }
 
 #[test]
@@ -774,11 +1325,24 @@ fn decisions_auto_only_filters_non_auto() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["log", "QP-1", "decision", "auto-decided", "--auto"]).assert().success();
-    qp(&db).args(["log", "QP-1", "decision", "human-decided"]).assert().success();
-    let out = qp(&db).args(["decisions", "--auto-only", "--json"]).assert().success();
+    qp(&db)
+        .args(["log", "QP-1", "decision", "auto-decided", "--auto"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["log", "QP-1", "decision", "human-decided"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["decisions", "--auto-only", "--json"])
+        .assert()
+        .success();
     let v: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
     assert_eq!(v.as_array().unwrap().len(), 1);
     assert_eq!(v.as_array().unwrap()[0]["payload"]["text"], "auto-decided");
 }
@@ -793,27 +1357,57 @@ fn resolve_path_finds_store_from_worktree() {
     let main = tmp.path().join("repo-main");
     std::fs::create_dir(&main).unwrap();
     // Init a git repo + initial commit so worktree-add works.
-    PCommand::new("git").args(["init", "-q"]).current_dir(&main).status().unwrap();
-    PCommand::new("git").args(["commit", "--allow-empty", "-q", "-m", "init"])
-        .current_dir(&main).status().unwrap();
+    PCommand::new("git")
+        .args(["init", "-q"])
+        .current_dir(&main)
+        .status()
+        .unwrap();
+    PCommand::new("git")
+        .args(["commit", "--allow-empty", "-q", "-m", "init"])
+        .current_dir(&main)
+        .status()
+        .unwrap();
     // Initialize a qp store in the main repo.
-    Command::cargo_bin("qp").unwrap().current_dir(&main)
-        .arg("init").assert().success();
+    Command::cargo_bin("qp")
+        .unwrap()
+        .current_dir(&main)
+        .arg("init")
+        .assert()
+        .success();
     // Create a worktree as a sibling.
     let wt = tmp.path().join("repo-wt");
     PCommand::new("git")
-        .args(["worktree", "add", "-q", "-b", "tmpbranch",
-               wt.to_str().unwrap()])
-        .current_dir(&main).status().unwrap();
+        .args([
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "tmpbranch",
+            wt.to_str().unwrap(),
+        ])
+        .current_dir(&main)
+        .status()
+        .unwrap();
     // Without QP_DB, running qp from the worktree should still work
     // and create the task in the MAIN repo's store.
-    Command::cargo_bin("qp").unwrap().current_dir(&wt)
-        .args(["add", "from-worktree"]).assert().success();
+    Command::cargo_bin("qp")
+        .unwrap()
+        .current_dir(&wt)
+        .args(["add", "from-worktree"])
+        .assert()
+        .success();
     // Verify the task landed in the main store.
-    let out = Command::cargo_bin("qp").unwrap().current_dir(&main)
-        .args(["list", "--json"]).assert().success();
+    let out = Command::cargo_bin("qp")
+        .unwrap()
+        .current_dir(&main)
+        .args(["list", "--json"])
+        .assert()
+        .success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert!(s.contains("from-worktree"), "task should be in main store: {s}");
+    assert!(
+        s.contains("from-worktree"),
+        "task should be in main store: {s}"
+    );
 }
 
 #[test]
@@ -822,16 +1416,39 @@ fn log_auto_attributes_to_running_assignee() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["assign", "QP-1", "--to", "alice"]).assert().success();
-    qp(&db).args(["claim",  "QP-1", "--as", "alice"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "alice"])
+        .assert()
+        .success();
     // No --as — should still attribute to alice because QP-1 is running.
-    qp(&db).args(["log", "QP-1", "note", "from inside the run"]).assert().success();
-    let out = qp(&db).args(["timeline", "QP-1", "--json"]).assert().success();
+    qp(&db)
+        .args(["log", "QP-1", "note", "from inside the run"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["timeline", "QP-1", "--json"])
+        .assert()
+        .success();
     let v: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
-    let note = v.as_array().unwrap().iter()
-        .find(|e| e["kind"] == "note").expect("note event present");
-    assert_eq!(note["agent_id"], "alice", "log should auto-attribute to running assignee");
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    let note = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "note")
+        .expect("note event present");
+    assert_eq!(
+        note["agent_id"], "alice",
+        "log should auto-attribute to running assignee"
+    );
 }
 
 #[test]
@@ -841,15 +1458,32 @@ fn log_does_not_auto_attribute_when_not_running() {
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
     // Task is ready, never assigned/claimed.
-    qp(&db).args(["log", "QP-1", "note", "from the void"]).assert().success();
-    let out = qp(&db).args(["timeline", "QP-1", "--json"]).assert().success();
+    qp(&db)
+        .args(["log", "QP-1", "note", "from the void"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["timeline", "QP-1", "--json"])
+        .assert()
+        .success();
     let v: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
-    let note = v.as_array().unwrap().iter()
-        .find(|e| e["kind"] == "note").expect("note event present");
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    let note = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "note")
+        .expect("note event present");
     // agent_id should be absent or null.
-    assert!(note.get("agent_id").map_or(true, |v| v.is_null()),
-        "log should NOT auto-attribute on non-running task; got {:?}", note["agent_id"]);
+    assert!(
+        note.get("agent_id").map_or(true, |v| v.is_null()),
+        "log should NOT auto-attribute on non-running task; got {:?}",
+        note["agent_id"]
+    );
 }
 
 #[test]
@@ -858,15 +1492,35 @@ fn log_explicit_as_always_wins() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["assign", "QP-1", "--to", "alice"]).assert().success();
-    qp(&db).args(["claim",  "QP-1", "--as", "alice"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "alice"])
+        .assert()
+        .success();
     // Explicit --as overrides the auto default.
-    qp(&db).args(["log", "QP-1", "note", "orchestrator log", "--as", "orch"]).assert().success();
-    let out = qp(&db).args(["timeline", "QP-1", "--json"]).assert().success();
+    qp(&db)
+        .args(["log", "QP-1", "note", "orchestrator log", "--as", "orch"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["timeline", "QP-1", "--json"])
+        .assert()
+        .success();
     let v: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
-    let note = v.as_array().unwrap().iter()
-        .find(|e| e["kind"] == "note").expect("note event present");
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    let note = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "note")
+        .expect("note event present");
     assert_eq!(note["agent_id"], "orch");
 }
 
@@ -874,12 +1528,23 @@ fn log_explicit_as_always_wins() {
 fn init_default_tag_is_applied_to_subsequent_adds() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
-    qp(&db).args(["init", "--default-tag", "harness:claude-code"]).assert().success();
+    qp(&db)
+        .args(["init", "--default-tag", "harness:claude-code"])
+        .assert()
+        .success();
     let out = qp(&db).args(["add", "t", "--json"]).assert().success();
     let v: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
-    let tags: Vec<&str> = v["tags"].as_array().unwrap()
-        .iter().map(|t| t.as_str().unwrap()).collect();
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    let tags: Vec<&str> = v["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap())
+        .collect();
     assert!(tags.contains(&"harness:claude-code"));
 }
 
@@ -887,13 +1552,27 @@ fn init_default_tag_is_applied_to_subsequent_adds() {
 fn init_default_tag_is_additive_across_reinits() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
-    qp(&db).args(["init", "--default-tag", "a"]).assert().success();
-    qp(&db).args(["init", "--default-tag", "b"]).assert().success();
+    qp(&db)
+        .args(["init", "--default-tag", "a"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["init", "--default-tag", "b"])
+        .assert()
+        .success();
     let out = qp(&db).args(["add", "t", "--json"]).assert().success();
     let v: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
-    let tags: Vec<&str> = v["tags"].as_array().unwrap()
-        .iter().map(|t| t.as_str().unwrap()).collect();
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    let tags: Vec<&str> = v["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap())
+        .collect();
     assert!(tags.contains(&"a") && tags.contains(&"b"));
 }
 
@@ -901,12 +1580,26 @@ fn init_default_tag_is_additive_across_reinits() {
 fn default_tag_dedupes_against_explicit_tag() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
-    qp(&db).args(["init", "--default-tag", "foo"]).assert().success();
-    let out = qp(&db).args(["add", "t", "--tag", "foo", "--json"]).assert().success();
+    qp(&db)
+        .args(["init", "--default-tag", "foo"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["add", "t", "--tag", "foo", "--json"])
+        .assert()
+        .success();
     let v: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
-    let tags: Vec<&str> = v["tags"].as_array().unwrap()
-        .iter().map(|t| t.as_str().unwrap()).collect();
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    let tags: Vec<&str> = v["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap())
+        .collect();
     assert_eq!(tags.iter().filter(|t| **t == "foo").count(), 1);
 }
 
@@ -918,15 +1611,34 @@ fn list_assigned_to_supports_glob_pattern() {
     qp(&db).args(["add", "a"]).assert().success();
     qp(&db).args(["add", "b"]).assert().success();
     qp(&db).args(["add", "c"]).assert().success();
-    qp(&db).args(["assign", "QP-1", "--to", "claude-code:agent-x"]).assert().success();
-    qp(&db).args(["assign", "QP-2", "--to", "claude-code:agent-y"]).assert().success();
-    qp(&db).args(["assign", "QP-3", "--to", "cli:nando"]).assert().success();
-    let out = qp(&db).args(["list", "--assigned-to", "claude-code:*", "--json"])
-        .assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "claude-code:agent-x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["assign", "QP-2", "--to", "claude-code:agent-y"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["assign", "QP-3", "--to", "cli:nando"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["list", "--assigned-to", "claude-code:*", "--json"])
+        .assert()
+        .success();
     let v: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
-    let ids: Vec<&str> = v.as_array().unwrap()
-        .iter().map(|t| t["display_id"].as_str().unwrap()).collect();
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    let ids: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["display_id"].as_str().unwrap())
+        .collect();
     assert!(ids.contains(&"QP-1") && ids.contains(&"QP-2"));
     assert!(!ids.contains(&"QP-3"));
 }
@@ -938,14 +1650,30 @@ fn list_assigned_to_exact_match_still_works() {
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
     qp(&db).args(["add", "b"]).assert().success();
-    qp(&db).args(["assign", "QP-1", "--to", "alice"]).assert().success();
-    qp(&db).args(["assign", "QP-2", "--to", "alicia"]).assert().success();
-    let out = qp(&db).args(["list", "--assigned-to", "alice", "--json"])
-        .assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["assign", "QP-2", "--to", "alicia"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["list", "--assigned-to", "alice", "--json"])
+        .assert()
+        .success();
     let v: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
-    let ids: Vec<&str> = v.as_array().unwrap()
-        .iter().map(|t| t["display_id"].as_str().unwrap()).collect();
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    let ids: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["display_id"].as_str().unwrap())
+        .collect();
     assert_eq!(ids, vec!["QP-1"]);
 }
 
@@ -957,7 +1685,14 @@ fn status_shows_all_states_including_zero() {
     qp(&db).args(["add", "a"]).assert().success();
     let out = qp(&db).arg("status").assert().success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    for state in ["pending","ready","assigned","running","done","cancelled"] {
+    for state in [
+        "pending",
+        "ready",
+        "assigned",
+        "running",
+        "done",
+        "cancelled",
+    ] {
         assert!(s.contains(state), "status missing `{state}`:\n{s}");
     }
 }
@@ -969,7 +1704,10 @@ fn wave_human_mode_says_nothing_in_flight_when_empty() {
     qp(&db).arg("init").assert().success();
     let out = qp(&db).arg("wave").assert().success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert!(s.contains("nothing in flight"), "wave missing guidance:\n{s}");
+    assert!(
+        s.contains("nothing in flight"),
+        "wave missing guidance:\n{s}"
+    );
 }
 
 #[test]
@@ -978,7 +1716,10 @@ fn decisions_human_mode_renders_readable_text() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["log", "QP-1", "decision", "the decision body", "--auto"]).assert().success();
+    qp(&db)
+        .args(["log", "QP-1", "decision", "the decision body", "--auto"])
+        .assert()
+        .success();
     let out = qp(&db).arg("decisions").assert().success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(s.contains("the decision body"), "missing text:\n{s}");
@@ -991,13 +1732,25 @@ fn timeline_human_mode_renders_columns() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["assign", "QP-1", "--to", "x"]).assert().success();
-    qp(&db).args(["claim", "QP-1", "--as", "x"]).assert().success();
-    qp(&db).args(["complete", "QP-1", "--as", "x", "--decision", "all-good"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["complete", "QP-1", "--as", "x", "--decision", "all-good"])
+        .assert()
+        .success();
     let out = qp(&db).arg("timeline").assert().success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     for line in s.lines() {
-        assert!(!line.starts_with('{'), "line starts with JSON brace: {line}");
+        assert!(
+            !line.starts_with('{'),
+            "line starts with JSON brace: {line}"
+        );
     }
     assert!(s.contains("state_change"), "missing state_change:\n{s}");
     assert!(s.contains("decision"), "missing decision:\n{s}");
@@ -1013,9 +1766,17 @@ fn list_human_mode_has_header_row() {
     let out = qp(&db).arg("list").assert().success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     let first = s.lines().next().unwrap_or("");
-    assert!(first.starts_with("ID"), "expected header starting with ID, got: {first}");
-    assert!(first.contains("STATE") && first.contains("AGENT") && first.contains("TAGS") && first.contains("TITLE"),
-        "header missing columns: {first}");
+    assert!(
+        first.starts_with("ID"),
+        "expected header starting with ID, got: {first}"
+    );
+    assert!(
+        first.contains("STATE")
+            && first.contains("AGENT")
+            && first.contains("TAGS")
+            && first.contains("TITLE"),
+        "header missing columns: {first}"
+    );
 }
 
 #[test]
@@ -1024,11 +1785,20 @@ fn tree_uses_display_id_format_for_dep_refs() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["add", "b", "--depends-on", "QP-1"]).assert().success();
+    qp(&db)
+        .args(["add", "b", "--depends-on", "QP-1"])
+        .assert()
+        .success();
     let out = qp(&db).arg("tree").assert().success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert!(s.contains("QP-1") && s.contains("QP-2"), "tree missing display ids:\n{s}");
-    assert!(s.contains("[QP-1]"), "dep ref not in display-id format:\n{s}");
+    assert!(
+        s.contains("QP-1") && s.contains("QP-2"),
+        "tree missing display ids:\n{s}"
+    );
+    assert!(
+        s.contains("[QP-1]"),
+        "dep ref not in display-id format:\n{s}"
+    );
     assert!(!s.contains("[T1]"), "old T-prefix format leaked:\n{s}");
 }
 
@@ -1037,18 +1807,32 @@ fn tree_with_task_arg_filters_to_subtree() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
-    qp(&db).args(["add", "unrelated-1"]).assert().success();   // QP-1
-    qp(&db).args(["add", "unrelated-2"]).assert().success();   // QP-2
-    qp(&db).args(["add", "unrelated-3"]).assert().success();   // QP-3
-    qp(&db).args(["add", "leaf-a"]).assert().success();        // QP-4
-    qp(&db).args(["add", "leaf-b"]).assert().success();        // QP-5
-    qp(&db).args(["add", "root", "--depends-on", "QP-4", "--depends-on", "QP-5"]).assert().success(); // QP-6
+    qp(&db).args(["add", "unrelated-1"]).assert().success(); // QP-1
+    qp(&db).args(["add", "unrelated-2"]).assert().success(); // QP-2
+    qp(&db).args(["add", "unrelated-3"]).assert().success(); // QP-3
+    qp(&db).args(["add", "leaf-a"]).assert().success(); // QP-4
+    qp(&db).args(["add", "leaf-b"]).assert().success(); // QP-5
+    qp(&db)
+        .args([
+            "add",
+            "root",
+            "--depends-on",
+            "QP-4",
+            "--depends-on",
+            "QP-5",
+        ])
+        .assert()
+        .success(); // QP-6
     let out = qp(&db).args(["tree", "QP-6"]).assert().success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert!(s.contains("QP-6") && s.contains("QP-4") && s.contains("QP-5"),
-        "subtree missing root/deps:\n{s}");
-    assert!(!s.contains("unrelated-1") && !s.contains("unrelated-2") && !s.contains("unrelated-3"),
-        "subtree leaked unrelated tasks:\n{s}");
+    assert!(
+        s.contains("QP-6") && s.contains("QP-4") && s.contains("QP-5"),
+        "subtree missing root/deps:\n{s}"
+    );
+    assert!(
+        !s.contains("unrelated-1") && !s.contains("unrelated-2") && !s.contains("unrelated-3"),
+        "subtree leaked unrelated tasks:\n{s}"
+    );
 }
 
 #[test]
@@ -1057,18 +1841,30 @@ fn report_markdown_includes_all_sections() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["add", "b", "--tag", "kind:bug"]).assert().success();
-    qp(&db).args(["assign", "QP-1", "--to", "x"]).assert().success();
-    qp(&db).args(["claim",  "QP-1", "--as", "x"]).assert().success();
-    qp(&db).args(["log",    "QP-1", "decision", "shipping it", "--auto"]).assert().success();
+    qp(&db)
+        .args(["add", "b", "--tag", "kind:bug"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["log", "QP-1", "decision", "shipping it", "--auto"])
+        .assert()
+        .success();
     let out = qp(&db).args(["report"]).assert().success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert!(s.contains("# "));                // header
+    assert!(s.contains("# ")); // header
     assert!(s.contains("State snapshot") || s.contains("State"));
     assert!(s.contains("In flight"));
     assert!(s.contains("Friction") || s.contains("friction"));
     assert!(s.contains("Open bugs") || s.contains("bug"));
-    assert!(s.contains("shipping it"));        // friction note text
+    assert!(s.contains("shipping it")); // friction note text
     assert!(s.contains("QP-1"));
 }
 
@@ -1093,8 +1889,14 @@ fn report_wave_scope_filters_to_subtree() {
     qp(&db).args(["add", "root"]).assert().success();
     qp(&db).args(["add", "child"]).assert().success();
     qp(&db).args(["add", "unrelated"]).assert().success();
-    qp(&db).args(["depends", "QP-1", "--on", "QP-2"]).assert().success();
-    let out = qp(&db).args(["report", "--wave", "QP-1"]).assert().success();
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-2"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["report", "--wave", "QP-1"])
+        .assert()
+        .success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(s.contains("QP-1") && s.contains("QP-2"));
     assert!(!s.contains("QP-3"), "should not contain unrelated task");
@@ -1105,7 +1907,10 @@ fn show_renders_title_description_and_events() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
-    qp(&db).args(["add", "ticket title", "--description", "long form notes"]).assert().success();
+    qp(&db)
+        .args(["add", "ticket title", "--description", "long form notes"])
+        .assert()
+        .success();
     let out = qp(&db).args(["show", "QP-1"]).assert().success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(s.contains("ticket title"));
@@ -1119,10 +1924,17 @@ fn show_json_includes_recent_events() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["assign", "QP-1", "--to", "x"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
     let out = qp(&db).args(["show", "QP-1", "--json"]).assert().success();
     let v: serde_json::Value = serde_json::from_str(
-        std::str::from_utf8(&out.get_output().stdout).unwrap().trim()).unwrap();
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
     assert_eq!(v["display_id"], "QP-1");
     assert!(v["recent_events"].is_array());
     assert!(v["recent_events"].as_array().unwrap().len() >= 2); // ready + assigned
@@ -1133,8 +1945,14 @@ fn tree_with_description_includes_description_lines() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
-    qp(&db).args(["add", "alpha", "--description", "first task notes"]).assert().success();
-    let out = qp(&db).args(["tree", "--with-description"]).assert().success();
+    qp(&db)
+        .args(["add", "alpha", "--description", "first task notes"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["tree", "--with-description"])
+        .assert()
+        .success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(s.contains("alpha"));
     assert!(s.contains("first task notes"));
@@ -1145,8 +1963,14 @@ fn report_ticket_writes_single_document_with_description() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
-    qp(&db).args(["add", "alpha", "--description", "ticket detail body"]).assert().success();
-    let out = qp(&db).args(["report", "--ticket", "QP-1"]).assert().success();
+    qp(&db)
+        .args(["add", "alpha", "--description", "ticket detail body"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["report", "--ticket", "QP-1"])
+        .assert()
+        .success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(s.contains("alpha"));
     assert!(s.contains("ticket detail body"));
@@ -1161,11 +1985,25 @@ fn report_all_tickets_writes_one_file_per_ticket() {
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "first"]).assert().success();
     qp(&db).args(["add", "second"]).assert().success();
-    qp(&db).args(["report", "--all-tickets", "--output-dir", out_dir.to_str().unwrap()]).assert().success();
-    let entries: Vec<_> = std::fs::read_dir(&out_dir).unwrap().collect::<Result<_,_>>().unwrap();
+    qp(&db)
+        .args([
+            "report",
+            "--all-tickets",
+            "--output-dir",
+            out_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let entries: Vec<_> = std::fs::read_dir(&out_dir)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
     assert_eq!(entries.len(), 2);
     // Each filename starts with QP-1 or QP-2
-    let names: Vec<String> = entries.iter().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+    let names: Vec<String> = entries
+        .iter()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
     assert!(names.iter().any(|n| n.starts_with("QP-1")));
     assert!(names.iter().any(|n| n.starts_with("QP-2")));
 }
@@ -1175,8 +2013,14 @@ fn list_with_description_includes_description_lines() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
-    qp(&db).args(["add", "alpha", "--description", "second task notes"]).assert().success();
-    let out = qp(&db).args(["list", "--with-description"]).assert().success();
+    qp(&db)
+        .args(["add", "alpha", "--description", "second task notes"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["list", "--with-description"])
+        .assert()
+        .success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(s.contains("alpha"));
     assert!(s.contains("second task notes"));
@@ -1188,8 +2032,14 @@ fn report_json_emits_tasks_events_deps_shape() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["add", "b", "--depends-on", "QP-1"]).assert().success();
-    qp(&db).args(["log", "QP-1", "decision", "ok", "--auto"]).assert().success();
+    qp(&db)
+        .args(["add", "b", "--depends-on", "QP-1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["log", "QP-1", "decision", "ok", "--auto"])
+        .assert()
+        .success();
     let out = qp(&db).args(["report", "--json"]).assert().success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
@@ -1199,7 +2049,9 @@ fn report_json_emits_tasks_events_deps_shape() {
     assert_eq!(v["tasks"].as_array().unwrap().len(), 2);
     // The dep we added
     let deps = v["deps"].as_array().unwrap();
-    assert!(deps.iter().any(|d| d["from"] == "QP-2" && d["to"] == "QP-1"));
+    assert!(deps
+        .iter()
+        .any(|d| d["from"] == "QP-2" && d["to"] == "QP-1"));
 }
 
 #[test]
@@ -1210,12 +2062,22 @@ fn report_json_wave_scope_filters_subtree() {
     qp(&db).args(["add", "root"]).assert().success();
     qp(&db).args(["add", "child"]).assert().success();
     qp(&db).args(["add", "unrelated"]).assert().success();
-    qp(&db).args(["depends", "QP-1", "--on", "QP-2"]).assert().success();
-    let out = qp(&db).args(["report", "--json", "--wave", "QP-1"]).assert().success();
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-2"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["report", "--json", "--wave", "QP-1"])
+        .assert()
+        .success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
-    let ids: Vec<&str> = v["tasks"].as_array().unwrap().iter()
-        .map(|t| t["display_id"].as_str().unwrap()).collect();
+    let ids: Vec<&str> = v["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["display_id"].as_str().unwrap())
+        .collect();
     assert!(ids.contains(&"QP-1") && ids.contains(&"QP-2"));
     assert!(!ids.contains(&"QP-3"));
 }
@@ -1225,18 +2087,33 @@ fn depends_rm_emits_state_change_on_promote() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
-    qp(&db).args(["add", "A"]).assert().success();   // QP-1
-    qp(&db).args(["add", "B", "--depends-on", "QP-1"]).assert().success(); // QP-2 pending
-    qp(&db).args(["depends", "QP-2", "--on", "QP-1", "--rm"]).assert().success();
-    let out = qp(&db).args(["timeline", "QP-2", "--json"]).output().unwrap();
+    qp(&db).args(["add", "A"]).assert().success(); // QP-1
+    qp(&db)
+        .args(["add", "B", "--depends-on", "QP-1"])
+        .assert()
+        .success(); // QP-2 pending
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1", "--rm"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["timeline", "QP-2", "--json"])
+        .output()
+        .unwrap();
     let events: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let arr = events.as_array().expect("timeline json is an array");
-    let saw = arr.iter().any(|e|
+    let saw = arr.iter().any(|e| {
         e["kind"] == "state_change"
-        && e.get("payload").and_then(|p| p.get("to")) == Some(&serde_json::Value::String("ready".into()))
-        && e.get("payload").and_then(|p| p.get("via")) == Some(&serde_json::Value::String("depends_rm".into()))
+            && e.get("payload").and_then(|p| p.get("to"))
+                == Some(&serde_json::Value::String("ready".into()))
+            && e.get("payload").and_then(|p| p.get("via"))
+                == Some(&serde_json::Value::String("depends_rm".into()))
+    });
+    assert!(
+        saw,
+        "expected state_change to ready via depends_rm in timeline: {:?}",
+        arr
     );
-    assert!(saw, "expected state_change to ready via depends_rm in timeline: {:?}", arr);
 }
 
 #[test]
@@ -1258,13 +2135,21 @@ fn tag_add_emits_event() {
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success();
-    qp(&db).args(["tag", "QP-1", "add", "foo"]).assert().success();
-    let out = qp(&db).args(["timeline", "QP-1", "--json"]).output().unwrap();
+    qp(&db)
+        .args(["tag", "QP-1", "add", "foo"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["timeline", "QP-1", "--json"])
+        .output()
+        .unwrap();
     let events: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let arr = events.as_array().unwrap();
-    let saw = arr.iter().any(|e|
+    let saw = arr.iter().any(|e| {
         e["kind"] == "tag_added"
-        && e.get("payload").and_then(|p| p.get("name")) == Some(&serde_json::Value::String("foo".into())));
+            && e.get("payload").and_then(|p| p.get("name"))
+                == Some(&serde_json::Value::String("foo".into()))
+    });
     assert!(saw, "expected tag_added event: {:?}", arr);
 }
 
@@ -1285,11 +2170,23 @@ fn schema_migrates_v1_to_v2() {
     // qp init on the existing v1 store should migrate it forward.
     qp(&db_path).arg("init").assert().success();
     let conn = rusqlite::Connection::open(&db_path).unwrap();
-    let v: String = conn.query_row(
-        "SELECT value FROM meta WHERE key='schema_version'", [], |r| r.get(0)).unwrap();
+    let v: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(v, "2", "schema_version should be migrated to 2");
-    let has_default_tag: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='default_tag'",
-        [], |r| r.get(0)).unwrap();
-    assert_eq!(has_default_tag, 1, "default_tag table should exist post-migration");
+    let has_default_tag: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='default_tag'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        has_default_tag, 1,
+        "default_tag table should exist post-migration"
+    );
 }

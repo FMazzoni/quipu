@@ -9,7 +9,14 @@ mod time;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "quipu", bin_name = "qp", version, about = "Structured task substrate for agent orchestration", subcommand_required = true, arg_required_else_help = true)]
+#[command(
+    name = "quipu",
+    bin_name = "qp",
+    version,
+    about = "Structured task substrate for agent orchestration",
+    subcommand_required = true,
+    arg_required_else_help = true
+)]
 struct Cli {
     #[arg(long, global = true, env = "QP_DB")]
     db: Option<std::path::PathBuf>,
@@ -83,10 +90,12 @@ fn main() {
         eprintln!("error: {e:#}");
         let code = if let Some(err) = e.downcast_ref::<db::QuipuError>() {
             match err {
-                db::QuipuError::Constraint(_)  => 2,
-                db::QuipuError::InvalidInput(_)=> 1,
+                db::QuipuError::Constraint(_) => 2,
+                db::QuipuError::InvalidInput(_) => 1,
             }
-        } else { 1 };
+        } else {
+            1
+        };
         std::process::exit(code);
     }
 }
@@ -96,7 +105,14 @@ fn real_main() -> anyhow::Result<()> {
     let db_path = db::resolve_path(cli.db.clone())?;
     db::warn_on_project_mismatch(&cli.db)?;
     match cli.cmd {
-        Cmd::Init { prefix, default_tag } => { let _ = db::open_with(&db_path, prefix.as_deref(), &default_tag)?; println!("initialized at {}", db_path.display()); Ok(()) }
+        Cmd::Init {
+            prefix,
+            default_tag,
+        } => {
+            let _ = db::open_with(&db_path, prefix.as_deref(), &default_tag)?;
+            println!("initialized at {}", db_path.display());
+            Ok(())
+        }
         Cmd::Add(a) => cmd::add::run(&db_path, a),
         Cmd::Assign(a) => cmd::assign::run(&db_path, a),
         Cmd::Claim(a) => cmd::claim::run(&db_path, a),
@@ -122,6 +138,9 @@ fn real_main() -> anyhow::Result<()> {
         Cmd::Report(a) => cmd::report::run(&db_path, a),
         Cmd::Show(a) => cmd::show::run(&db_path, a),
         #[allow(unreachable_patterns)]
-        _ => { eprintln!("not implemented yet"); std::process::exit(1); }
+        _ => {
+            eprintln!("not implemented yet");
+            std::process::exit(1);
+        }
     }
 }

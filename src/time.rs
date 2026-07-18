@@ -1,7 +1,7 @@
 //! Single canonical UTC-timestamp source. All RFC3339 strings the rest of the crate
 //! emits must come from `now_rfc3339()`. Tested for the `Z` UTC suffix.
 
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 pub fn now_rfc3339() -> String {
     OffsetDateTime::now_utc().format(&Rfc3339).unwrap()

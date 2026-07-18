@@ -26,11 +26,11 @@ pub enum State {
 impl State {
     pub const fn as_str(&self) -> &'static str {
         match self {
-            Self::Pending   => "pending",
-            Self::Ready     => "ready",
-            Self::Assigned  => "assigned",
-            Self::Running   => "running",
-            Self::Done      => "done",
+            Self::Pending => "pending",
+            Self::Ready => "ready",
+            Self::Assigned => "assigned",
+            Self::Running => "running",
+            Self::Done => "done",
             Self::Cancelled => "cancelled",
         }
     }
@@ -38,13 +38,13 @@ impl State {
     #[allow(dead_code)] // paired with as_str; used in tests
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
-            "pending"   => Some(Self::Pending),
-            "ready"     => Some(Self::Ready),
-            "assigned"  => Some(Self::Assigned),
-            "running"   => Some(Self::Running),
-            "done"      => Some(Self::Done),
+            "pending" => Some(Self::Pending),
+            "ready" => Some(Self::Ready),
+            "assigned" => Some(Self::Assigned),
+            "running" => Some(Self::Running),
+            "done" => Some(Self::Done),
             "cancelled" => Some(Self::Cancelled),
-            _           => None,
+            _ => None,
         }
     }
 }
@@ -63,14 +63,14 @@ impl rusqlite::ToSql for State {
 
 // Legacy `&str` constants — kept as thin aliases over `State::*.as_str()` so
 // existing call sites keep working. New code should prefer the typed `State` variant.
-pub const STATE_PENDING:   &str = State::Pending.as_str();
-pub const STATE_READY:     &str = State::Ready.as_str();
+pub const STATE_PENDING: &str = State::Pending.as_str();
+pub const STATE_READY: &str = State::Ready.as_str();
 #[allow(dead_code)] // kept for family consistency; STATE_PENDING/READY used in add.rs
-pub const STATE_ASSIGNED:  &str = State::Assigned.as_str();
+pub const STATE_ASSIGNED: &str = State::Assigned.as_str();
 #[allow(dead_code)] // kept for family consistency
-pub const STATE_RUNNING:   &str = State::Running.as_str();
+pub const STATE_RUNNING: &str = State::Running.as_str();
 #[allow(dead_code)] // kept for family consistency
-pub const STATE_DONE:      &str = State::Done.as_str();
+pub const STATE_DONE: &str = State::Done.as_str();
 #[allow(dead_code)] // kept for family consistency
 pub const STATE_CANCELLED: &str = State::Cancelled.as_str();
 
@@ -94,11 +94,15 @@ pub fn invalid_input(msg: impl Into<String>) -> anyhow::Error {
 }
 
 pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
-    if let Some(p) = explicit { return Ok(p); }
+    if let Some(p) = explicit {
+        return Ok(p);
+    }
     let cwd = std::env::current_dir()?;
     for a in cwd.ancestors() {
         let c = a.join(".quipu").join("db.sqlite");
-        if c.exists() { return Ok(c); }
+        if c.exists() {
+            return Ok(c);
+        }
     }
     // Git-aware fallback: when invoked from a worktree, the main repo's
     // `.quipu/` is a sibling of the worktree, not an ancestor. Ask git for
@@ -121,7 +125,9 @@ pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
                 let git_dir = git_dir.canonicalize().unwrap_or(git_dir);
                 if let Some(repo_root) = git_dir.parent() {
                     let c = repo_root.join(".quipu").join("db.sqlite");
-                    if c.exists() { return Ok(c); }
+                    if c.exists() {
+                        return Ok(c);
+                    }
                 }
             }
         }
@@ -132,17 +138,26 @@ pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
 /// Detect when `--db`/`QP_DB` points at a different repo than the cwd's discovered store.
 /// Prints a warning to stderr; never errors.
 pub fn warn_on_project_mismatch(explicit: &Option<PathBuf>) -> Result<()> {
-    let Some(explicit_path) = explicit else { return Ok(()); };
+    let Some(explicit_path) = explicit else {
+        return Ok(());
+    };
     let cwd = std::env::current_dir()?;
     let mut local: Option<PathBuf> = None;
     for a in cwd.ancestors() {
         let c = a.join(".quipu").join("db.sqlite");
-        if c.exists() { local = Some(c); break; }
+        if c.exists() {
+            local = Some(c);
+            break;
+        }
     }
-    let Some(local) = local else { return Ok(()); };
-    if local.canonicalize().ok() == explicit_path.canonicalize().ok() { return Ok(()); }
+    let Some(local) = local else {
+        return Ok(());
+    };
+    if local.canonicalize().ok() == explicit_path.canonicalize().ok() {
+        return Ok(());
+    }
     let uuid_explicit = read_project_uuid(explicit_path).ok().flatten();
-    let uuid_local    = read_project_uuid(&local).ok().flatten();
+    let uuid_local = read_project_uuid(&local).ok().flatten();
     if let (Some(a), Some(b)) = (uuid_explicit, uuid_local) {
         if a != b {
             eprintln!("warning: project_uuid mismatch — QP_DB={} (uuid {}) but cwd resolves to {} (uuid {})",
@@ -153,11 +168,17 @@ pub fn warn_on_project_mismatch(explicit: &Option<PathBuf>) -> Result<()> {
 }
 
 fn read_project_uuid(path: &Path) -> Result<Option<String>> {
-    if !path.exists() { return Ok(None); }
+    if !path.exists() {
+        return Ok(None);
+    }
     let conn = Connection::open(path)?;
-    let v: Option<String> = conn.query_row(
-        "SELECT value FROM meta WHERE key = 'project_uuid'", [], |r| r.get(0)
-    ).ok();
+    let v: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'project_uuid'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
     Ok(v)
 }
 
@@ -177,9 +198,11 @@ pub fn open_with_prefix(path: &Path, prefix: Option<&str>) -> Result<Connection>
 }
 
 pub fn open_with(path: &Path, prefix: Option<&str>, default_tags: &[String]) -> Result<Connection> {
-    if let Some(p) = path.parent() { std::fs::create_dir_all(p)?; }
-    let conn = Connection::open(path)
-        .with_context(|| format!("opening sqlite at {}", path.display()))?;
+    if let Some(p) = path.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    let conn =
+        Connection::open(path).with_context(|| format!("opening sqlite at {}", path.display()))?;
 
     // PRAGMAs must run outside any transaction. `PRAGMA journal_mode = WAL` is
     // silently a no-op inside an implicit BEGIN/COMMIT wrapper, which is what
@@ -195,16 +218,28 @@ pub fn open_with(path: &Path, prefix: Option<&str>, default_tags: &[String]) -> 
     // If it is missing, this is either a fresh db or a pre-versioning store —
     // apply the DDL and stamp meta rows via INSERT OR IGNORE (idempotent, no
     // read-then-write).
-    let current: Option<String> = conn.query_row(
-        "SELECT value FROM meta WHERE key='schema_version'", [], |r| r.get(0)
-    ).ok();
+    let current: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
     if let (Some(cur), Some(user_p)) = (current.as_deref(), prefix) {
         if cur == SCHEMA_VERSION {
-            let stored: Option<String> = conn.query_row(
-                "SELECT value FROM meta WHERE key='display_prefix'", [], |r| r.get(0)).ok();
+            let stored: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM meta WHERE key='display_prefix'",
+                    [],
+                    |r| r.get(0),
+                )
+                .ok();
             if let Some(s) = stored.as_deref() {
                 if s != user_p {
-                    eprintln!("warn: prefix already set to {}; --prefix {} ignored", s, user_p);
+                    eprintln!(
+                        "warn: prefix already set to {}; --prefix {} ignored",
+                        s, user_p
+                    );
                 }
             }
         }
@@ -221,11 +256,13 @@ pub fn open_with(path: &Path, prefix: Option<&str>, default_tags: &[String]) -> 
                 ('project_uuid', ?1), \
                 ('schema_version', ?2), \
                 ('display_prefix', ?3)",
-            rusqlite::params![uuid::Uuid::new_v4().to_string(), SCHEMA_VERSION, p])?;
+            rusqlite::params![uuid::Uuid::new_v4().to_string(), SCHEMA_VERSION, p],
+        )?;
         // schema_version must advance even on existing stores being migrated forward.
         conn.execute(
             "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
-            rusqlite::params![SCHEMA_VERSION])?;
+            rusqlite::params![SCHEMA_VERSION],
+        )?;
     }
 
     insert_default_tags(&conn, default_tags)?;
@@ -240,11 +277,15 @@ pub fn default_tags(conn: &Connection) -> Result<Vec<String>> {
 }
 
 pub fn insert_default_tags(conn: &Connection, tags: &[String]) -> Result<usize> {
-    if tags.is_empty() { return Ok(0); }
+    if tags.is_empty() {
+        return Ok(0);
+    }
     let mut total = 0;
     let mut stmt = conn.prepare("INSERT OR IGNORE INTO default_tag(name) VALUES (?)")?;
     for t in tags {
-        if t.is_empty() { continue; }
+        if t.is_empty() {
+            continue;
+        }
         total += stmt.execute([t])?;
     }
     Ok(total)
@@ -253,19 +294,23 @@ pub fn insert_default_tags(conn: &Connection, tags: &[String]) -> Result<usize> 
 /// Read the display-id prefix from the `meta` table. Defaults to `"QP"` if absent
 /// (older databases predating the prefix work).
 pub fn display_prefix(conn: &rusqlite::Connection) -> Result<String> {
-    let v: Option<String> = conn.query_row(
-        "SELECT value FROM meta WHERE key = 'display_prefix'", [], |r| r.get(0)
-    ).ok();
+    let v: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'display_prefix'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
     Ok(v.unwrap_or_else(|| "QP".to_string()))
 }
 
 /// Validate a user-supplied prefix: 2–5 ASCII uppercase letters.
 pub fn validate_prefix(s: &str) -> Result<()> {
-    let ok = (2..=5).contains(&s.len())
-        && s.bytes().all(|b| b.is_ascii_uppercase());
+    let ok = (2..=5).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_uppercase());
     if !ok {
         return Err(constraint(format!(
-            "invalid --prefix `{s}` (must be 2-5 uppercase ASCII letters)")));
+            "invalid --prefix `{s}` (must be 2-5 uppercase ASCII letters)"
+        )));
     }
     Ok(())
 }
@@ -273,8 +318,14 @@ pub fn validate_prefix(s: &str) -> Result<()> {
 pub fn with_tx<T>(conn: &mut Connection, f: impl FnOnce(&Transaction) -> Result<T>) -> Result<T> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     match f(&tx) {
-        Ok(v) => { tx.commit()?; Ok(v) }
-        Err(e) => { let _ = tx.rollback(); Err(e) }
+        Ok(v) => {
+            tx.commit()?;
+            Ok(v)
+        }
+        Err(e) => {
+            let _ = tx.rollback();
+            Err(e)
+        }
     }
 }
 
@@ -288,7 +339,8 @@ pub fn insert_event(
     let s = payload.map(|p| p.to_string());
     tx.execute(
         "INSERT INTO event(task_id, kind, agent_id, payload) VALUES (?,?,?,?)",
-        rusqlite::params![task_id, kind, agent_id, s])?;
+        rusqlite::params![task_id, kind, agent_id, s],
+    )?;
     Ok(tx.last_insert_rowid())
 }
 
@@ -304,13 +356,16 @@ pub fn refresh_ready(tx: &Transaction) -> Result<()> {
               WHERE d.task_id = task.id
                 AND t2.state NOT IN ('done','cancelled')
             )",
-        [])?;
+        [],
+    )?;
     Ok(())
 }
 
 /// Recursive check: would adding `from -depends_on-> to` create a cycle?
 pub fn would_cycle(tx: &Transaction, from: i64, to: i64) -> Result<bool> {
-    if from == to { return Ok(true); }
+    if from == to {
+        return Ok(true);
+    }
     // From `to`, can we reach `from` via depends_on edges? If yes → cycle.
     let n: i64 = tx.query_row(
         "WITH RECURSIVE reach(id) AS (
@@ -319,7 +374,9 @@ pub fn would_cycle(tx: &Transaction, from: i64, to: i64) -> Result<bool> {
            SELECT d.depends_on_task_id FROM dep d JOIN reach r ON r.id = d.task_id
          )
          SELECT COUNT(*) FROM reach WHERE id = ?2",
-        [to, from], |r| r.get(0))?;
+        [to, from],
+        |r| r.get(0),
+    )?;
     Ok(n > 0)
 }
 
@@ -330,8 +387,12 @@ mod tests {
     #[test]
     fn state_str_round_trip() {
         for s in [
-            State::Pending, State::Ready, State::Assigned, State::Running,
-            State::Done, State::Cancelled,
+            State::Pending,
+            State::Ready,
+            State::Assigned,
+            State::Running,
+            State::Done,
+            State::Cancelled,
         ] {
             assert_eq!(State::from_str(s.as_str()), Some(s));
             assert_eq!(s.to_string(), s.as_str());
@@ -342,11 +403,11 @@ mod tests {
 
     #[test]
     fn state_constants_alias_enum() {
-        assert_eq!(STATE_PENDING,   State::Pending.as_str());
-        assert_eq!(STATE_READY,     State::Ready.as_str());
-        assert_eq!(STATE_ASSIGNED,  State::Assigned.as_str());
-        assert_eq!(STATE_RUNNING,   State::Running.as_str());
-        assert_eq!(STATE_DONE,      State::Done.as_str());
+        assert_eq!(STATE_PENDING, State::Pending.as_str());
+        assert_eq!(STATE_READY, State::Ready.as_str());
+        assert_eq!(STATE_ASSIGNED, State::Assigned.as_str());
+        assert_eq!(STATE_RUNNING, State::Running.as_str());
+        assert_eq!(STATE_DONE, State::Done.as_str());
         assert_eq!(STATE_CANCELLED, State::Cancelled.as_str());
     }
 }

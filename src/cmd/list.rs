@@ -1,17 +1,22 @@
+use crate::db;
 use anyhow::Result;
 use clap::Args;
 use std::collections::HashMap;
-use crate::db;
 
 #[derive(Args, Debug)]
 pub struct ListArgs {
     /// Glob pattern (e.g. claude-code:*)
-    #[arg(long = "assigned-to")] pub assigned_to: Option<String>,
-    #[arg(long = "state")]       pub state: Option<String>,
-    #[arg(long)]                 pub tag: Vec<String>,
-    #[arg(long)]                 pub json: bool,
+    #[arg(long = "assigned-to")]
+    pub assigned_to: Option<String>,
+    #[arg(long = "state")]
+    pub state: Option<String>,
+    #[arg(long)]
+    pub tag: Vec<String>,
+    #[arg(long)]
+    pub json: bool,
     /// Print each task's description on indented continuation lines.
-    #[arg(long = "with-description")] pub with_description: bool,
+    #[arg(long = "with-description")]
+    pub with_description: bool,
 }
 
 pub fn run(db_path: &std::path::Path, a: ListArgs) -> Result<()> {
@@ -23,7 +28,8 @@ pub fn run(db_path: &std::path::Path, a: ListArgs) -> Result<()> {
            FROM task t WHERE 1=1");
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     if let Some(s) = &a.state {
-        sql.push_str(" AND t.state = ?"); params.push(Box::new(s.clone()));
+        sql.push_str(" AND t.state = ?");
+        params.push(Box::new(s.clone()));
     }
     if let Some(who) = &a.assigned_to {
         sql.push_str(" AND (SELECT a.agent_id FROM assignment a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1) GLOB ?");
@@ -36,10 +42,27 @@ pub fn run(db_path: &std::path::Path, a: ListArgs) -> Result<()> {
     sql.push_str(" ORDER BY t.id ASC");
     let mut stmt = conn.prepare(&sql)?;
     let pref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-    let core: Vec<(i64, String, String, String, Option<String>, Option<String>, Option<String>)> =
-        stmt.query_map(pref.as_slice(), |r| Ok((
-            r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?,
-        )))?.collect::<Result<_, _>>()?;
+    let core: Vec<(
+        i64,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = stmt
+        .query_map(pref.as_slice(), |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
 
     // Bulk-fetch tags, blocked_by, last_event for the selected ids.
     let ids: Vec<i64> = core.iter().map(|r| r.0).collect();
@@ -47,20 +70,31 @@ pub fn run(db_path: &std::path::Path, a: ListArgs) -> Result<()> {
     let mut blockers_by: HashMap<i64, Vec<String>> = HashMap::new();
     let mut last_event_by: HashMap<i64, serde_json::Value> = HashMap::new();
     if !ids.is_empty() {
-        let placeholders = std::iter::repeat("?").take(ids.len()).collect::<Vec<_>>().join(",");
+        let placeholders = std::iter::repeat("?")
+            .take(ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
         let q = format!("SELECT task_id, name FROM tag WHERE task_id IN ({placeholders})");
         let mut s = conn.prepare(&q)?;
-        let pref: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|i| i as &dyn rusqlite::ToSql).collect();
-        for r in s.query_map(pref.as_slice(), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))? {
-            let (t, n) = r?; tags_by.entry(t).or_default().push(n);
+        let pref: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|i| i as &dyn rusqlite::ToSql).collect();
+        for r in s.query_map(pref.as_slice(), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })? {
+            let (t, n) = r?;
+            tags_by.entry(t).or_default().push(n);
         }
         let q = format!(
             "SELECT d.task_id, t2.display_id
                FROM dep d JOIN task t2 ON t2.id = d.depends_on_task_id
-              WHERE d.task_id IN ({placeholders}) AND t2.state NOT IN ('done','cancelled')");
+              WHERE d.task_id IN ({placeholders}) AND t2.state NOT IN ('done','cancelled')"
+        );
         let mut s = conn.prepare(&q)?;
-        for r in s.query_map(pref.as_slice(), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))? {
-            let (t, d) = r?; blockers_by.entry(t).or_default().push(d);
+        for r in s.query_map(pref.as_slice(), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })? {
+            let (t, d) = r?;
+            blockers_by.entry(t).or_default().push(d);
         }
         let q = format!(
             "SELECT task_id, kind, ts, payload FROM event
@@ -88,18 +122,32 @@ pub fn run(db_path: &std::path::Path, a: ListArgs) -> Result<()> {
         });
         out.push(obj);
     }
-    if a.json { println!("{}", serde_json::to_string(&out)?); }
-    else {
+    if a.json {
+        println!("{}", serde_json::to_string(&out)?);
+    } else {
         println!("ID\tSTATE\tAGENT\tTAGS\tTITLE");
         for r in &out {
-            println!("{}\t{}\t{}\t{}\t{}",
+            println!(
+                "{}\t{}\t{}\t{}\t{}",
                 r["display_id"].as_str().unwrap_or(""),
                 r["state"].as_str().unwrap_or(""),
                 r["agent"].as_str().unwrap_or("-"),
-                r["tags"].as_array().map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(",")).unwrap_or_default(),
-                r["title"].as_str().unwrap_or(""));
+                r["tags"]
+                    .as_array()
+                    .map(|a| a
+                        .iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(","))
+                    .unwrap_or_default(),
+                r["title"].as_str().unwrap_or("")
+            );
             if a.with_description {
-                if let Some(d) = r.get("description").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                if let Some(d) = r
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
                     let lines = crate::cmd::show::wrap_text(d, 80);
                     for line in lines.iter().take(3) {
                         println!("    {}", line);

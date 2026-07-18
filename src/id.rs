@@ -22,7 +22,9 @@ pub fn parse(s: &str) -> Result<i64> {
             && tail.bytes().all(|b| b.is_ascii_digit())
         {
             let n: i64 = tail.parse().map_err(|_| anyhow!("invalid id `{s}`"))?;
-            if n <= 0 { return Err(anyhow!("invalid id `{s}`")); }
+            if n <= 0 {
+                return Err(anyhow!("invalid id `{s}`"));
+            }
             return Ok(n);
         }
     }
@@ -30,7 +32,9 @@ pub fn parse(s: &str) -> Result<i64> {
     if let Some(rest) = s.strip_prefix('T').or_else(|| s.strip_prefix('t')) {
         if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) {
             let n: i64 = rest.parse().map_err(|_| anyhow!("invalid id `{s}`"))?;
-            if n <= 0 { return Err(anyhow!("invalid id `{s}`")); }
+            if n <= 0 {
+                return Err(anyhow!("invalid id `{s}`"));
+            }
             return Ok(n);
         }
     }
@@ -40,12 +44,14 @@ pub fn parse(s: &str) -> Result<i64> {
 pub fn resolve(conn: &rusqlite::Connection, s: &str) -> Result<i64> {
     let _ = parse(s)?;
     let normed = s.trim().to_uppercase();
-    let id: i64 = conn.query_row(
-        "SELECT id FROM task WHERE display_id = ?", [&normed], |r| r.get(0)
-    ).map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => anyhow!("no such task: {s}"),
-        other => other.into(),
-    })?;
+    let id: i64 = conn
+        .query_row("SELECT id FROM task WHERE display_id = ?", [&normed], |r| {
+            r.get(0)
+        })
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => anyhow!("no such task: {s}"),
+            other => other.into(),
+        })?;
     Ok(id)
 }
 
@@ -74,7 +80,9 @@ mod tests {
 
     #[test]
     fn parse_rejects_bad_input() {
-        for bad in ["", "7", "-7", "QP-", "QP-0", "QP-abc", "1-QP", "QP--1", "Q1-1"] {
+        for bad in [
+            "", "7", "-7", "QP-", "QP-0", "QP-abc", "1-QP", "QP--1", "Q1-1",
+        ] {
             assert!(parse(bad).is_err(), "should reject `{bad}`");
         }
     }
@@ -87,7 +95,8 @@ mod tests {
         conn.execute(
             "INSERT INTO task(display_id, title) VALUES ('QP-1', 'first')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         let rowid = conn.last_insert_rowid();
         assert_eq!(resolve(&conn, "QP-1").unwrap(), rowid);
         assert_eq!(resolve(&conn, "qp-1").unwrap(), rowid);
