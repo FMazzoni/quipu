@@ -2,7 +2,7 @@
 //!
 //! Verifies the caller owns the latest open assignment before transitioning.
 //! Two agents racing the same task produce exactly one winner and one
-//! constraint error — this is the atomicity the whole design rests on.
+//! conflict error — this is the atomicity the whole design rests on.
 
 use crate::outcome::{emit, Outcome};
 use crate::{db, id};
