@@ -30,6 +30,11 @@ verified" after one.
 Read anything the caller typed after the argument; it is usually the specific
 complaint and the most valuable input you have.
 
+A targeted run names a source file, but the page is still where you look for
+anything beyond the single claim: `just docs`, then
+`w3m -dump -cols 100 target/doc/qp/<module>/index.html`. See "Source or
+rendered page".
+
 ### Resolving `#<anchor>`
 
 Anchors are rustdoc heading slugs: lowercased heading text, non-alphanumerics
@@ -267,33 +272,130 @@ past the boundary: stop and file the ticket.
 **Say nothing** when the claim is correct. Do not manufacture findings to look
 thorough — a clean result is a real result.
 
+## Source or rendered page: which one you read
+
+Both get read, for different jobs. Confusing them produces either a false PASS
+or a reverted skill, so the split is stated before anything else:
+
+- **Mechanical tests read SOURCE, always.** `tests/docs.rs` checks `//!` header
+  shape, summary length, the blank `//!` before every pointer, and `///` first
+  paragraphs — by regex, over `src/**/*.rs`. Its own header explains why it must
+  never read HTML: rustdoc injects `<wbr>` into long module names, so
+  `install_skills` renders as `install_<wbr>skills` and a naive name regex over
+  the HTML gives a false PASS on exactly the module most likely to drift. That
+  warning is correct and stays. Do not "fix" `tests/docs.rs` to read rendered
+  output.
+
+- **Reading sweeps read the RENDERED PAGE.** A judgement about redundancy,
+  ordering, or whether a copied command still runs is a judgement about the
+  artifact a reader sees. No regex is involved, so the `<wbr>` hazard does not
+  apply — an agent reading `install_skills` on the page reads it correctly.
+
+These do not conflict. The rule is about method: pattern-matching needs source
+because rendering perturbs the bytes; reading needs the page because
+composition is where the defects live. Do not revert this skill to per-file
+sweeping on the strength of the `tests/docs.rs` warning — it warns about
+regexes, not about eyes.
+
+**Why the page, concretely.** A module's rendered page is three sources merged:
+its `//!` header, plus the `include_str!`'d `docs/modules/<name>.md`, plus an
+item table built from the first paragraph of each `///`. The crate front page is
+`main.rs`'s header plus all of `docs/architecture.md`. Per-file review sees one
+third at a time, so every sentence can be true in isolation while the page is
+redundant, misordered, or uncopyable. Two real misses prove it: a five-agent
+per-file sweep passed a duplicated exit-code table (`main.rs`'s header restates
+architecture.md's `## Exit codes` section, both on `qp/index.html`) and passed
+rustdoc turning an unbackticked `--cohort-done` into `–cohort-done`, which does
+not run when pasted.
+
 ## Sweep mode
 
-**Establish the denominator first.** Before checking anything, enumerate the
-full list and count it:
+Sweeps are per **rendered page**, not per source file. Build first:
 
 ```
-rg -l '^//!' src/ ; find docs/ -name '*.md'
+just docs          # → target/doc/
+just docs-dump     # every module page dumped as text, for skimming
 ```
 
-Never accept a file count from the prompt, a previous sweep, or a ticket — the
+**Dump pages; do not read raw HTML.** `w3m -dump -cols 100 <page>` is the tool.
+It is installed and renders rustdoc cleanly at roughly half the bytes of the
+HTML — the front page goes 44629 → 21131 — which is the difference between the
+sweep fitting in context and not. `lynx`, `pandoc` and `html2text` are **not
+installed**; do not reach for them.
+
+**Establish the denominator first.** Enumerate the pages and count them:
+
+```
+find target/doc/qp -name 'index.html' | sort
+```
+
+That is the crate front page plus one page per module — 32 at this writing. Two
+traps in the wider tree: `find target/doc -name '*.html'` picks up
+`target/doc/src/`, the syntax-highlighted source mirror, which is not
+documentation; and `find target/doc/qp -name '*.html'` stays out of that mirror
+but still returns every per-item page (`struct.*.html`, `fn.*.html`), five times
+the real count. Neither is the denominator. Restrict to `index.html`.
+
+Never accept a page count from the prompt, a previous sweep, or a ticket — the
 set grows every wave, and a briefed "23" against an actual 25 turns a 92% sweep
 into a reported-complete one. If your enumeration disagrees with the number you
 were given, say so and use yours.
 
-Check each file independently; a stale header in one says nothing about
-another.
+Check each page independently; a stale claim on one says nothing about another.
+
+### Page-level checks
+
+These run *in addition to* the per-claim work in "What to check", which is
+unchanged — every sentence on the page still gets classified and verified. What
+follows is the set of defects that exist only at page scale:
+
+- **Redundancy across the seam.** The `//!` header and the included markdown
+  were written at different times by different agents. Does the header restate a
+  section of the markdown? Said twice, a reader trusts neither copy once they
+  drift. File this rather than fixing it: choosing which copy survives is a
+  judgement call.
+
+- **Commands that do not survive being copied.** Read every command on the page
+  as if pasting it into a shell. rustdoc's markdown applies smart typography, so
+  an unbackticked `--flag` becomes `–flag` and fails silently. Grep the dump for
+  `–` adjacent to a word character; numeric ranges (`2–5`, `1–3 ms`) are correct
+  typography, not findings. Check too that `<placeholder>` did not vanish as an
+  unknown HTML tag — same class, different mechanism, both invisible in source.
+
+- **Item-table walls of text.** The module page prints each `///` first
+  paragraph untruncated, so one that runs several lines turns the table into
+  prose. `tests/docs.rs` rule 7 catches the length; you catch whether the
+  summary is a *summary*.
+
+- **Order of answer.** A reader arrives with a question. Does the page answer in
+  the order they would ask — what this is, then how it behaves, then why it has
+  this shape — or does it open with a caveat about something they have not met
+  yet? Resequencing is a ticket; see the structural clause under "File a
+  ticket".
+
+- **Composition gaps.** Does the header's one-line summary still describe what
+  the markdown below it covers? The `.rs` summary and the `.md` body drift apart
+  because nothing renders them together except this page.
+
+When a finding is visible only on the page, say so in the report. That is the
+evidence per-file sweeping would have missed it, and the reason this mode exists.
+
+### Verdicts
 
 A sweep does not change the fix-or-ticket boundary — apply it claim by claim as
-you go. Fix the mechanical drift inline; file **one ticket per file that still
-has unfixed drift** once you have. A file whose drift you fixed entirely inline
+you go. Fix the mechanical drift inline; file **one ticket per page that still
+has unfixed drift** once you have. A page whose drift you fixed entirely inline
 gets no ticket.
 
-Report a per-file verdict — `ok`, `fixed`, `drifted`, or `unverifiable`, where
+Fixes land in the **source** — the `.rs` header or the `docs/modules/*.md` that
+composes the page. Never edit `target/doc/`; it is a build artifact and the next
+`just docs` overwrites it. Rebuild and re-dump to confirm a page-level fix.
+
+Report a per-page verdict — `ok`, `fixed`, `drifted`, or `unverifiable`, where
 `fixed` means all drift repaired inline and `drifted` means a ticket is open. A
-file where you did both is `drifted` — an open ticket outranks a partial fix.
-Then state checked-of-total against the denominator you enumerated, so a
-partial sweep is never mistaken for a complete one.
+page where you did both is `drifted` — an open ticket outranks a partial fix.
+Then state checked-of-total against the denominator you enumerated, so a partial
+sweep is never mistaken for a complete one.
 
 **Commit the whole sweep as one commit**, not one per file. The repo convention
 is one conventional commit per slice, and a sweep is one slice. List the files
