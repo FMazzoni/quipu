@@ -1,6 +1,6 @@
 //! `qp add` — create a task.
 //!
-//! Lands in `ready` when it has no unresolved deps, `pending` otherwise.
+#![doc = include_str!("../../docs/modules/add.md")]
 
 use crate::outcome::{emit, Outcome};
 use crate::{db, id};

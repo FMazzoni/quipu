@@ -1,6 +1,6 @@
 //! The `running` → `done` edge.
 //!
-//! Records decisions and artifacts as events on the way through.
+#![doc = include_str!("../../docs/modules/complete.md")]
 
 use crate::outcome::{emit, Outcome};
 use crate::{db, id};

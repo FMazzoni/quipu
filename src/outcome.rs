@@ -1,9 +1,6 @@
 //! Shared success-output plumbing for mutating commands.
 //!
-//! Every mutation models its result once as a small `Outcome` struct
-//! (`Serialize` for `--json`, `human()` for the prose line printed today),
-//! then renders it through `emit`. This generalizes the pattern already used
-//! by `qp add`'s `Created` struct.
+#![doc = include_str!("../docs/modules/outcome.md")]
 
 /// A command's success payload. `human()` is the one-line prose summary;
 /// `Serialize` gives the bare JSON object (no `{"ok":true,...}` wrapper —

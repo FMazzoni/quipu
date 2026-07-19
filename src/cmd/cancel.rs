@@ -1,7 +1,6 @@
 //! The terminal edge: any non-terminal state → `cancelled`.
 //!
-//! `cancelled` counts as resolved for dependency purposes, so cancelling a
-//! blocker promotes whatever it was blocking.
+#![doc = include_str!("../../docs/modules/cancel.md")]
 
 use crate::outcome::{emit, Outcome};
 use crate::{db, id};

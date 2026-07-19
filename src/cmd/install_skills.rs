@@ -1,6 +1,6 @@
 //! Install the bundled skills into Claude Code's skill directory.
 //!
-//! Each `skills/<name>/` is installed as `qp-<name>`, symlinked by default.
+#![doc = include_str!("../../docs/modules/install_skills.md")]
 
 use anyhow::{Context, Result};
 use clap::Args;

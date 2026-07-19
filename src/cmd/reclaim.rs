@@ -1,7 +1,6 @@
 //! The orchestrator-side release edge: `assigned`/`running` → `pending`.
 //!
-//! Force-release with no ownership check, for when an agent has died and
-//! cannot release its own claim. Compare `abandon`.
+#![doc = include_str!("../../docs/modules/reclaim.md")]
 
 use crate::outcome::{emit, Outcome};
 use crate::{db, id};

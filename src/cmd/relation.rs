@@ -1,9 +1,6 @@
 //! Manage typed, non-blocking references between tasks.
 //!
-//! Unlike deps, relations never affect readiness — they are provenance
-//! (`variant-of`, `supersedes`, `fixes`), not scheduling. `add` and `rm` are
-//! idempotent: the outcome reports whether a row actually changed, and the
-//! `relation_add`/`relation_removed` event is only written when one did.
+#![doc = include_str!("../../docs/modules/relation.md")]
 
 use crate::outcome::{emit, Outcome};
 use crate::{db, id};
