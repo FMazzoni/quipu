@@ -3362,3 +3362,173 @@ fn show_missing_task_human_message_stays_readable() {
         "expected readable message: {s:?}"
     );
 }
+
+// --- QP-118: db::State as clap::ValueEnum for --state on list/wait ---------
+
+#[test]
+fn list_state_rejects_invalid_spelling_at_parse_time() {
+    // Previously `--state redy` silently matched zero rows and exited 0. Now
+    // it's a clap parse error: non-zero exit, message naming valid values.
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["list", "--state", "redy"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(contains("pending"))
+        .stderr(contains("ready"));
+}
+
+#[test]
+fn wait_state_rejects_invalid_spelling_at_parse_time() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db)
+        .args(["wait", "--empty", "--state", "bogus"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(contains("pending"))
+        .stderr(contains("ready"));
+}
+
+#[test]
+fn list_state_accepts_all_six_valid_spellings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success(); // QP-1, starts ready
+    for state in [
+        "pending",
+        "ready",
+        "assigned",
+        "running",
+        "done",
+        "cancelled",
+    ] {
+        qp(&db).args(["list", "--state", state]).assert().success();
+    }
+}
+
+#[test]
+fn list_state_ready_filters_to_matching_task_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success(); // QP-1, ready
+    qp(&db)
+        .args(["add", "b", "--depends-on", "QP-1"])
+        .assert()
+        .success(); // QP-2, pending (blocked on QP-1)
+
+    let out = qp(&db)
+        .args(["list", "--state", "ready", "--json"])
+        .assert()
+        .success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["display_id"], "QP-1");
+}
+
+#[test]
+fn wait_state_pending_blocks_until_task_leaves_pending() {
+    // Cohort of one pending task (blocked on an undone dep): --wait --state
+    // pending --empty should report non-empty (n=1), so with --timeout-secs 1
+    // it hits the timeout exit code (3) rather than returning immediately.
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success(); // QP-1, ready
+    qp(&db)
+        .args(["add", "b", "--depends-on", "QP-1"])
+        .assert()
+        .success(); // QP-2, pending
+
+    qp(&db)
+        .args([
+            "wait",
+            "--empty",
+            "--state",
+            "pending",
+            "--timeout-secs",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .code(3);
+
+    // Resolve the dep; the pending cohort drains and --wait returns success.
+    qp(&db)
+        .args(["cancel", "QP-1", "--reason", "done"])
+        .assert()
+        .success();
+    qp(&db)
+        .args([
+            "wait",
+            "--empty",
+            "--state",
+            "pending",
+            "--timeout-secs",
+            "1",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn assign_claim_complete_transitions_unchanged_by_state_enum_sweep() {
+    // Same transitions as before QP-118's `db::State` param sweep — spelling
+    // change only, not semantics. Exercises assign/claim/complete's guarded
+    // UPDATEs end to end.
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success(); // QP-1, ready
+
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "agent-x"])
+        .assert()
+        .success();
+    // Re-assigning an already-assigned task must still fail (guard unchanged).
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "agent-y"])
+        .assert()
+        .failure()
+        .code(2);
+
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "agent-x"])
+        .assert()
+        .success();
+    // Claiming again must still fail — task is no longer `assigned`.
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "agent-x"])
+        .assert()
+        .failure()
+        .code(2);
+
+    qp(&db)
+        .args(["complete", "QP-1", "--as", "agent-x"])
+        .assert()
+        .success();
+    // Completing a done task must still fail — no longer `running`.
+    qp(&db)
+        .args(["complete", "QP-1", "--as", "agent-x"])
+        .assert()
+        .failure()
+        .code(2);
+
+    let out = qp(&db)
+        .args(["list", "--state", "done", "--json"])
+        .assert()
+        .success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 1);
+}

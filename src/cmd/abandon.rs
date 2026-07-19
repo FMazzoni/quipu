@@ -51,8 +51,8 @@ pub fn run(db_path: &std::path::Path, a: AbandonArgs) -> Result<()> {
         // Route through `pending`, then let `refresh_ready` promote it back to `ready`
         // if it has no unresolved deps. Same destination logic as `reclaim`, one code path.
         let n = tx.execute(
-            "UPDATE task SET state = 'pending' WHERE id = ?1 AND state IN ('assigned','running')",
-            [task_id],
+            "UPDATE task SET state = ?1 WHERE id = ?2 AND state IN ('assigned','running')",
+            rusqlite::params![db::State::Pending, task_id],
         )?;
         if n != 1 {
             return Err(db::conflict(

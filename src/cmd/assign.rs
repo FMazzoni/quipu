@@ -31,8 +31,8 @@ pub fn run(db_path: &std::path::Path, a: AssignArgs) -> Result<()> {
     let task_id = resolved.id;
     db::with_tx(&mut conn, |tx| {
         let n = tx.execute(
-            "UPDATE task SET state = 'assigned' WHERE id = ? AND state = 'ready'",
-            [task_id],
+            "UPDATE task SET state = ?1 WHERE id = ?2 AND state = ?3",
+            rusqlite::params![db::State::Assigned, task_id, db::State::Ready],
         )?;
         if n != 1 {
             return Err(db::conflict(

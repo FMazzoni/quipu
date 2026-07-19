@@ -11,9 +11,12 @@ use thiserror::Error;
 const SCHEMA: &str = include_str!("schema.sql");
 
 /// Typed state of a task in the workflow. Use this anywhere the database
-/// schema's `state` column is read or written; the `&str` constants below
-/// remain as aliases for ergonomic `WHERE state IN (...)` SQL.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// schema's `state` column is read or written. Also the CLI-facing `--state`
+/// vocabulary (`clap::ValueEnum`) — one definition for both surfaces, so they
+/// can't drift. clap's default `ValueEnum` rendering is kebab-case, which for
+/// these single-word variants is identical to `as_str()`'s lowercase spelling;
+/// `state_enum_values_match_as_str` in the test module below pins that down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, clap::ValueEnum)]
 pub enum State {
     Pending,
     Ready,
@@ -61,18 +64,12 @@ impl rusqlite::ToSql for State {
     }
 }
 
-// Legacy `&str` constants — kept as thin aliases over `State::*.as_str()` so
-// existing call sites keep working. New code should prefer the typed `State` variant.
+// Legacy `&str` constants — kept as thin aliases over `State::*.as_str()` for
+// `add.rs`, the only remaining call site that hasn't been converted to the
+// typed `State` variant directly. The ASSIGNED/RUNNING/DONE/CANCELLED
+// siblings were deleted in QP-118 once the SQL sweep left them unused.
 pub const STATE_PENDING: &str = State::Pending.as_str();
 pub const STATE_READY: &str = State::Ready.as_str();
-#[allow(dead_code)] // kept for family consistency; STATE_PENDING/READY used in add.rs
-pub const STATE_ASSIGNED: &str = State::Assigned.as_str();
-#[allow(dead_code)] // kept for family consistency
-pub const STATE_RUNNING: &str = State::Running.as_str();
-#[allow(dead_code)] // kept for family consistency
-pub const STATE_DONE: &str = State::Done.as_str();
-#[allow(dead_code)] // kept for family consistency
-pub const STATE_CANCELLED: &str = State::Cancelled.as_str();
 
 /// Typed errors. `main` matches on the variant to pick an exit code and (in
 /// `--json` mode) a `kind` string for the `{"error": {...}}` envelope.
@@ -593,10 +590,19 @@ mod tests {
     fn state_constants_alias_enum() {
         assert_eq!(STATE_PENDING, State::Pending.as_str());
         assert_eq!(STATE_READY, State::Ready.as_str());
-        assert_eq!(STATE_ASSIGNED, State::Assigned.as_str());
-        assert_eq!(STATE_RUNNING, State::Running.as_str());
-        assert_eq!(STATE_DONE, State::Done.as_str());
-        assert_eq!(STATE_CANCELLED, State::Cancelled.as_str());
+    }
+
+    #[test]
+    fn state_enum_values_match_as_str() {
+        use clap::ValueEnum;
+        for s in State::value_variants() {
+            let pv = s.to_possible_value().expect("no skipped variants");
+            assert_eq!(
+                pv.get_name(),
+                s.as_str(),
+                "clap spelling must match as_str for {s:?}"
+            );
+        }
     }
 }
 

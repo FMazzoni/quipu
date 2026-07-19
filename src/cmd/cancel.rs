@@ -30,10 +30,14 @@ pub fn run(db_path: &std::path::Path, a: CancelArgs) -> Result<()> {
     let resolved = id::resolve_full(&conn, &a.task)?;
     let task_id = resolved.id;
     db::with_tx(&mut conn, |tx| {
+        // The `state` value being set is a bound `db::State` param (see below); the
+        // `NOT IN ('done','cancelled')` guard stays a literal on purpose — multi-state
+        // predicates don't parametrize idiomatically in rusqlite, and `db::State` remains
+        // the single source of truth for what those literals may spell.
         let n = tx.execute(
-            "UPDATE task SET state = 'cancelled'
-              WHERE id = ? AND state NOT IN ('done','cancelled')",
-            [task_id],
+            "UPDATE task SET state = ?1
+              WHERE id = ?2 AND state NOT IN ('done','cancelled')",
+            rusqlite::params![db::State::Cancelled, task_id],
         )?;
         if n != 1 {
             return Err(db::conflict(

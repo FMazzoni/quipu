@@ -46,8 +46,8 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
         // (1) Create the blocker task. State = ready (no deps of its own).
         let prefix = db::display_prefix(tx)?;
         tx.execute(
-            "INSERT INTO task(display_id, title, state) VALUES ('', ?, 'ready')",
-            rusqlite::params![a.new],
+            "INSERT INTO task(display_id, title, state) VALUES ('', ?1, ?2)",
+            rusqlite::params![a.new, db::State::Ready],
         )?;
         let blocker_id = tx.last_insert_rowid();
         let blocker_display = id::encode(blocker_id, &prefix);
@@ -71,11 +71,11 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
         // contract. If it fails, the diagnostic reads below are for error reporting only (not
         // control flow) so the caller can tell wrong-agent (NotOwner) from wrong-state (Conflict).
         let n = tx.execute(
-            "UPDATE task SET state = 'pending'
-              WHERE id = ?1 AND state IN ('assigned','running')
+            "UPDATE task SET state = ?1
+              WHERE id = ?2 AND state IN ('assigned','running')
                 AND EXISTS (SELECT 1 FROM assignment
-                             WHERE task_id = ?1 AND agent_id = ?2 AND completed_at IS NULL)",
-            rusqlite::params![task_id, a.agent],
+                             WHERE task_id = ?2 AND agent_id = ?3 AND completed_at IS NULL)",
+            rusqlite::params![db::State::Pending, task_id, a.agent],
         )?;
         if n != 1 {
             let cur_state: Option<String> = tx
