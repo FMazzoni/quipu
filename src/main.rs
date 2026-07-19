@@ -156,6 +156,17 @@ impl Outcome for InitOutcome {
 /// those). So: extract the flag from the *parsed* `Cmd` up front, before
 /// dispatch, and thread it separately into both the success path (per
 /// command, via `outcome::emit`) and the error path (here, in `main`).
+///
+/// **Invariant: if a variant's args carry a `json` field, this must return it.**
+/// Collapsing a variant into a `_ => false` arm is silent and survives review —
+/// the command still emits JSON on success, so only the failure path diverges,
+/// and a `--json` consumer that hits an error gets prose it cannot parse.
+/// That was QP-158: seven read-only commands (`list`, `tree`, `timeline`,
+/// `wave`, `status`, `decisions`, `watch`) sat in one such arm and broke the
+/// "stderr is JSON Lines" contract exactly when a consumer most needed it.
+/// The match is deliberately exhaustive with no wildcard so a new command
+/// cannot inherit the bug by default — adding a variant fails to compile until
+/// its `--json` story is decided.
 fn wants_json(cmd: &Cmd) -> bool {
     match cmd {
         Cmd::Init { json, .. } => *json,
@@ -174,15 +185,18 @@ fn wants_json(cmd: &Cmd) -> bool {
         Cmd::Show(a) => a.json,
         Cmd::Report(a) => a.json,
         Cmd::Relation(a) => a.json(),
-        Cmd::Tree(_)
-        | Cmd::Timeline(_)
-        | Cmd::Wave(_)
-        | Cmd::Status(_)
-        | Cmd::List(_)
-        | Cmd::Decisions(_)
-        | Cmd::Wait(_)
-        | Cmd::Watch(_)
-        | Cmd::InstallSkills(_) => false,
+        Cmd::Tree(a) => a.json,
+        Cmd::Timeline(a) => a.json,
+        Cmd::Wave(a) => a.json,
+        Cmd::Status(a) => a.json,
+        Cmd::List(a) => a.json,
+        Cmd::Decisions(a) => a.json,
+        Cmd::Watch(a) => a.json,
+        // The only two variants that are genuinely `false`: neither declares a
+        // `--json` flag, so there is no flag to read. Giving `wait` one would be
+        // a contract change, not a bug fix — its signal is the exit code
+        // (4 = empty cohort), not its output.
+        Cmd::Wait(_) | Cmd::InstallSkills(_) => false,
     }
 }
 
