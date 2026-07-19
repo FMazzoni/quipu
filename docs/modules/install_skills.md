@@ -25,6 +25,13 @@ somewhere it should not be. The check is redundant with how the path is
 constructed today, and stays because the cost of being wrong here is not bounded
 by the database.
 
+The source root is `QP_SKILLS_SRC` if set, else `current_exe()`'s parent joined
+with `../../` — then `skills/` under that. The fallback is shaped for a cargo
+target directory (`<root>/target/release/qp` → `<root>/skills`) and does not
+survive the binary being moved: from `~/.cargo/bin/qp` it derives `~/skills`.
+That is why `QP_SKILLS_SRC` exists, and why the tests set it
+(`install_skills_symlinks_into_target`) rather than relying on the derivation.
+
 `HOME` being unset is a hard error rather than a fallback to a default path
 (`install_skills_fails_hard_when_home_unset_and_no_target`). Guessing a
 destination is how files end up somewhere the user will never find them.
