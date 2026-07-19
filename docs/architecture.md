@@ -29,19 +29,69 @@ Almost everything in the codebase is one of these three things.
 
 ### 1. A state machine, one per task
 
+<svg viewBox="0 0 820 200" width="100%" style="max-width:820px" role="img"
+     aria-label="Task state machine: pending to ready via refresh_ready, ready to assigned via assign, assigned to running via claim, running to done via complete. Abandon or reclaim return assigned or running to pending. Any non-terminal state can be cancelled."
+     xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor">
+  <defs>
+    <marker id="qp-arrow" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor" stroke="none"/>
+    </marker>
+  </defs>
+  <g font-family="ui-sans-serif,system-ui,sans-serif" font-size="13"
+     fill="currentColor" stroke="none" text-anchor="middle">
+    <text x="52"  y="58">pending</text>
+    <text x="207" y="58">ready</text>
+    <text x="367" y="58">assigned</text>
+    <text x="533" y="58">running</text>
+    <text x="688" y="58">done</text>
+    <text x="610" y="177">cancelled</text>
+    <g font-size="11" opacity="0.85">
+      <text x="132" y="30">refresh_ready</text>
+      <text x="282" y="30">assign</text>
+      <text x="452" y="30">claim</text>
+      <text x="614" y="30">complete</text>
+      <text x="300" y="136">abandon / reclaim</text>
+      <text x="345" y="165">cancel</text>
+    </g>
+    <text x="14" y="177" text-anchor="start" font-size="11" opacity="0.85">any non-terminal</text>
+  </g>
+  <g stroke-width="1.2">
+    <rect x="10"  y="36" width="84" height="34" rx="5"/>
+    <rect x="170" y="36" width="74" height="34" rx="5"/>
+    <rect x="320" y="36" width="94" height="34" rx="5"/>
+    <rect x="490" y="36" width="86" height="34" rx="5"/>
+    <rect x="652" y="36" width="72" height="34" rx="5" stroke-width="2.2"/>
+    <rect x="568" y="155" width="84" height="34" rx="5" stroke-width="2.2"/>
+  </g>
+  <g stroke-width="1.2" marker-end="url(#qp-arrow)">
+    <path d="M94,53 H164"/>
+    <path d="M244,53 H314"/>
+    <path d="M414,53 H484"/>
+    <path d="M576,53 H646"/>
+    <path d="M533,70 V118 H52 V76"/>
+    <path d="M130,172 H562" stroke-dasharray="5 4"/>
+  </g>
+  <g stroke-width="1.2">
+    <path d="M367,70 V118"/>
+  </g>
+</svg>
+
+<details>
+<summary>Same diagram as text (for viewers that strip inline SVG)</summary>
+
 ```text
                    assign            claim           complete
   pending ──▶ ready ──────▶ assigned ──────▶ running ──────────▶ done
-     ▲          ▲                │               │
-     │          │                └───────────────┘
-     │          │                  abandon / reclaim
-     │          │                        │
-     │          └──── refresh_ready ─────┘
-     │                (deps resolved)    ▼
-     └──────────────────────────────── pending
+     ▲                           │               │
+     │  refresh_ready            └───────────────┘
+     │  (deps resolved)            abandon / reclaim
+     └─────────────────────────────────┘
 
   any non-terminal ──cancel──▶ cancelled
 ```
+
+</details>
 
 Terminal states are `done` and `cancelled`. Everything else is in flight.
 
