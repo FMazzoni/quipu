@@ -1,7 +1,6 @@
 //! Add or remove dependency edges between tasks.
 //!
-//! Cycle-checked before insert. Adding or removing an edge can change what
-//! is ready, so both paths re-derive readiness.
+#![doc = include_str!("../../docs/modules/depends.md")]
 
 use crate::outcome::{emit, Outcome};
 use crate::{db, id};

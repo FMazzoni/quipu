@@ -1,8 +1,6 @@
 //! Tail new events as they are recorded.
 //!
-//! Polling. Relies on the watch-correctness invariant: events are only
-//! inserted inside `db::with_tx` (IMMEDIATE), so `event.id` is gap-free as
-//! seen by readers — `WHERE id > last_seen` is safe.
+#![doc = include_str!("../../docs/modules/watch.md")]
 
 use crate::db;
 use crate::store::{self, EventFilter};

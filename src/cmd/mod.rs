@@ -1,7 +1,6 @@
 //! Subcommand implementations, one module per `qp` command.
 //!
-//! Mutators are edges in the task state machine; projections are read-only
-//! views over the same data. See the crate docs for which is which.
+#![doc = include_str!("../../docs/modules/cmd.md")]
 
 pub mod abandon;
 pub mod add;

@@ -1,6 +1,6 @@
 //! Show decision events.
 //!
-//! A filter over the same event-tail query `timeline` uses.
+#![doc = include_str!("../../docs/modules/decisions.md")]
 
 use crate::db;
 use crate::store::{self, EventFilter};

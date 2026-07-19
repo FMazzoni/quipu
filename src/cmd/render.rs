@@ -1,7 +1,6 @@
 //! Shared human-readable rendering of event payloads.
 //!
-//! Used by `timeline` and `show` so that one event kind reads the same
-//! wherever it appears.
+#![doc = include_str!("../../docs/modules/render.md")]
 
 use serde_json::Value;
 
