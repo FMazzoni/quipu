@@ -2992,6 +2992,68 @@ fn show_header_and_body_agree_on_agent_after_abandon() {
     assert!(l.contains("alice"), "list disagrees with show:\n{l}");
 }
 
+/// QP-156: the `show` header carries exactly `list`'s columns in `list`'s order
+/// (id, state, agent, tags) and nothing else. `tier` is a labelled body field.
+/// The header must therefore have the same shape whether or not a tier is set —
+/// an unlabelled column `list` does not have is what made a `-` read as "no
+/// agent" in QP-154.
+#[test]
+fn show_header_mirrors_list_columns_and_tier_is_labelled() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "no tier"]).assert().success();
+    qp(&db)
+        .args(["add", "with tier", "--tier", "p1"])
+        .assert()
+        .success();
+    for t in ["QP-1", "QP-2"] {
+        qp(&db)
+            .args(["assign", t, "--to", "alice"])
+            .assert()
+            .success();
+    }
+
+    let header = |t: &str| -> (String, String) {
+        let out = qp(&db).args(["show", t]).assert().success();
+        let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+        (s.lines().next().unwrap().to_string(), s)
+    };
+
+    let (h1, s1) = header("QP-1");
+    let (h2, s2) = header("QP-2");
+
+    // Four columns, tier-independent.
+    let cols = |h: &str| h.split("  ").filter(|c| !c.is_empty()).count();
+    assert_eq!(cols(&h1), 4, "header must be id/state/agent/tags:\n{s1}");
+    assert_eq!(cols(&h2), 4, "tier must not add a column:\n{s2}");
+    assert!(h1.starts_with("QP-1  assigned  alice  "), "{s1}");
+    assert!(h2.starts_with("QP-2  assigned  alice  "), "{s2}");
+    // The tier value never appears in the header, only in the labelled block.
+    assert!(!h2.contains("p1"), "tier leaked into the header:\n{s2}");
+    assert!(s2.contains("  tier: p1"), "tier must be labelled:\n{s2}");
+    assert!(!s1.contains("tier:"), "no tier line when unset:\n{s1}");
+
+    // Column order matches `list`'s header exactly.
+    let out = qp(&db).args(["list"]).assert().success();
+    let l = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert_eq!(
+        l.lines().next().unwrap(),
+        "ID\tSTATE\tAGENT\tTAGS\tTITLE",
+        "list header changed; show's header must be kept in step"
+    );
+
+    // `--json` is the supported contract and still carries tier.
+    let out = qp(&db).args(["show", "QP-2", "--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    assert_eq!(v["tier"], "p1");
+}
+
 /// QP-152: `--json` is complete (matching `report --ticket`); human mode caps
 /// for readability but must announce what it dropped.
 #[test]
