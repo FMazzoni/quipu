@@ -1,6 +1,6 @@
 //! `qp` — quipu CLI entry point. Parses subcommands and dispatches to `src/cmd/<name>.rs`.
-//! Exit codes: 0 success | 1 generic error | 2 constraint violation | 3 wait timeout |
-//! 4 wait --cohort-done matched an empty cohort.
+//! Exit codes: 0 success | 1 invalid input or untyped error | 2 conflict, not-owner,
+//! not-found or invariant | 3 wait timed out | 4 wait --cohort-done matched an empty cohort.
 //!
 //! Architecture overview — state machine, guarded-transition contract, module
 //! map — lives in `docs/architecture.md`, included below rather than inlined so

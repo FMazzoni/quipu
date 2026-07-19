@@ -6,10 +6,10 @@ store.rs   — canonical read queries + the row types they return
 cmd/*.rs   — argument parsing and rendering only, no SQL
 ```
 
-**The last line is the goal, not the current state.** `show.rs`, `status.rs` and
-`tree.rs` still hand-roll `SELECT`s that have not migrated here. Extraction is
-incremental by design; treat an un-migrated query as unfinished work rather than
-as a counter-example to the rule.
+**The last line is the goal, not the current state.** Several command modules
+still hand-roll `SELECT`s that have not migrated here. Extraction is incremental
+by design; treat an un-migrated query as unfinished work rather than as a
+counter-example to the rule.
 
 ## Why this module exists
 
