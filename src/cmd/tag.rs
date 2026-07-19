@@ -1,6 +1,8 @@
+use crate::outcome::{emit, Outcome};
 use crate::{db, id};
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use clap::{Args, Subcommand};
+use serde::Serialize;
 
 #[derive(Args, Debug)]
 pub struct TagArgs {
@@ -10,6 +12,8 @@ pub struct TagArgs {
     /// Agent performing the tag operation (optional attribution).
     #[arg(long = "as")]
     pub agent: Option<String>,
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -18,20 +22,37 @@ pub enum TagOp {
     Rm { name: String },
 }
 
+#[derive(Serialize)]
+struct Tagged {
+    display_id: String,
+    op: &'static str,
+    name: String,
+}
+impl Outcome for Tagged {
+    fn human(&self) -> String {
+        match self.op {
+            "added" => format!("{} tagged {}", self.display_id, self.name),
+            "removed" => format!("{} untagged {}", self.display_id, self.name),
+            _ => format!("{} already {}", self.display_id, self.name),
+        }
+    }
+}
+
 pub fn run(db_path: &std::path::Path, a: TagArgs) -> Result<()> {
     let mut conn = db::open(db_path)?;
-    let task_id = id::resolve(&conn, &a.task)?;
-    db::with_tx(&mut conn, |tx| {
+    let resolved = id::resolve_full(&conn, &a.task)?;
+    let task_id = resolved.id;
+    let (op, name) = db::with_tx(&mut conn, |tx| -> Result<(&'static str, String)> {
         match &a.op {
             TagOp::Add { name } => {
                 if name.is_empty() {
-                    return Err(anyhow!("tag name required"));
+                    return Err(db::invalid_input("tag name required"));
                 }
                 tx.execute(
                     "INSERT OR IGNORE INTO tag(task_id, name) VALUES (?,?)",
                     rusqlite::params![task_id, name],
                 )?;
-                if tx.changes() == 1 {
+                let op = if tx.changes() == 1 {
                     db::insert_event(
                         tx,
                         Some(task_id),
@@ -39,14 +60,18 @@ pub fn run(db_path: &std::path::Path, a: TagArgs) -> Result<()> {
                         a.agent.as_deref(),
                         Some(&serde_json::json!({"name": name})),
                     )?;
-                }
+                    "added"
+                } else {
+                    "noop"
+                };
+                Ok((op, name.clone()))
             }
             TagOp::Rm { name } => {
                 tx.execute(
                     "DELETE FROM tag WHERE task_id = ? AND name = ?",
                     rusqlite::params![task_id, name],
                 )?;
-                if tx.changes() == 1 {
+                let op = if tx.changes() == 1 {
                     db::insert_event(
                         tx,
                         Some(task_id),
@@ -54,10 +79,20 @@ pub fn run(db_path: &std::path::Path, a: TagArgs) -> Result<()> {
                         a.agent.as_deref(),
                         Some(&serde_json::json!({"name": name})),
                     )?;
-                }
+                    "removed"
+                } else {
+                    "noop"
+                };
+                Ok((op, name.clone()))
             }
         }
-        Ok(())
     })?;
-    Ok(())
+    emit(
+        a.json,
+        &Tagged {
+            display_id: resolved.display_id,
+            op,
+            name,
+        },
+    )
 }

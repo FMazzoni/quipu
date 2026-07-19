@@ -1,12 +1,28 @@
+use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
+use serde::Serialize;
 
 #[derive(Args, Debug)]
 pub struct ClaimArgs {
     pub task: String,
     #[arg(long = "as")]
     pub agent: String,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Serialize)]
+struct Claimed {
+    display_id: String,
+    agent_id: String,
+    state: String,
+}
+impl Outcome for Claimed {
+    fn human(&self) -> String {
+        format!("{} claimed by {}", self.display_id, self.agent_id)
+    }
 }
 
 pub fn run(db_path: &std::path::Path, a: ClaimArgs) -> Result<()> {
@@ -16,17 +32,29 @@ pub fn run(db_path: &std::path::Path, a: ClaimArgs) -> Result<()> {
     db::with_tx(&mut conn, |tx| {
         // Latest open assignment must be (a) for this agent (b) un-claimed.
         let Some(open) = db::current_assignment(tx, task_id)? else {
-            return Err(db::constraint(format!("{} has no assignment", a.task)));
+            return Err(db::conflict(
+                "no_open_assignment",
+                format!("{} has no assignment", a.task),
+                Some(resolved.display_id.clone()),
+            ));
         };
         let aid = open.id;
         if open.claimed_at.is_some() {
-            return Err(db::constraint(format!("{} already claimed", a.task)));
+            return Err(db::conflict(
+                "already_claimed",
+                format!("{} already claimed", a.task),
+                Some(resolved.display_id.clone()),
+            ));
         }
         if open.agent_id != a.agent {
-            return Err(db::constraint(format!(
-                "{} assigned to `{}`, not `{}`",
-                a.task, open.agent_id, a.agent
-            )));
+            return Err(db::not_owner(
+                format!(
+                    "{} assigned to `{}`, not `{}`",
+                    a.task, open.agent_id, a.agent
+                ),
+                Some(resolved.display_id.clone()),
+                Some(open.agent_id.clone()),
+            ));
         }
         // Guarded transition: task must currently be `assigned`.
         let n = tx.execute(
@@ -34,7 +62,14 @@ pub fn run(db_path: &std::path::Path, a: ClaimArgs) -> Result<()> {
             [task_id],
         )?;
         if n != 1 {
-            return Err(db::constraint(format!("{} state changed under us", a.task)));
+            return Err(db::conflict(
+                "state_changed_under_us",
+                format!(
+                    "{} changed state before the claim landed; re-check and retry",
+                    a.task
+                ),
+                Some(resolved.display_id.clone()),
+            ));
         }
         tx.execute(
             "UPDATE assignment SET claimed_at = ? WHERE id = ?",
@@ -49,6 +84,12 @@ pub fn run(db_path: &std::path::Path, a: ClaimArgs) -> Result<()> {
         )?;
         Ok(())
     })?;
-    println!("{} claimed by {}", resolved.display_id, a.agent);
-    Ok(())
+    emit(
+        a.json,
+        &Claimed {
+            display_id: resolved.display_id,
+            agent_id: a.agent,
+            state: "running".to_string(),
+        },
+    )
 }

@@ -7,9 +7,11 @@
 //!
 //! collapsed into one transaction so partial failures can't leave a dangling task.
 
+use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
+use serde::Serialize;
 
 #[derive(Args, Debug)]
 pub struct BlockArgs {
@@ -18,6 +20,21 @@ pub struct BlockArgs {
     pub agent: String,
     #[arg(long = "new", value_name = "TITLE")]
     pub new: String,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Serialize)]
+struct Blocked {
+    display_id: String,
+    blocker_id: String,
+    blocker_title: String,
+    state: String,
+}
+impl Outcome for Blocked {
+    fn human(&self) -> String {
+        format!("{} blocked by {}", self.display_id, self.blocker_id)
+    }
 }
 
 pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
@@ -49,7 +66,10 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
             rusqlite::params![task_id, blocker_id],
         )?;
 
-        // (3) Guarded UPDATE: demote orig to pending. Folds ownership into WHERE via EXISTS.
+        // (3) Guarded UPDATE: demote orig to pending. Folds ownership into WHERE via EXISTS —
+        // this remains the single source of truth for the mutation, per the guarded-transition
+        // contract. If it fails, the diagnostic reads below are for error reporting only (not
+        // control flow) so the caller can tell wrong-agent (NotOwner) from wrong-state (Conflict).
         let n = tx.execute(
             "UPDATE task SET state = 'pending'
               WHERE id = ?1 AND state IN ('assigned','running')
@@ -58,18 +78,39 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
             rusqlite::params![task_id, a.agent],
         )?;
         if n != 1 {
-            return Err(db::constraint(format!(
-                "{} not yours or not blockable",
-                a.task
-            )));
+            let cur_state: Option<String> = tx
+                .query_row("SELECT state FROM task WHERE id = ?", [task_id], |r| {
+                    r.get(0)
+                })
+                .ok();
+            let state_ok = matches!(cur_state.as_deref(), Some("assigned") | Some("running"));
+            if !state_ok {
+                return Err(db::conflict(
+                    "not_blockable",
+                    format!(
+                        "{} is not assigned/running (state={})",
+                        a.task,
+                        cur_state.as_deref().unwrap_or("unknown")
+                    ),
+                    Some(resolved.display_id.clone()),
+                ));
+            }
+            return Err(db::not_owner(
+                format!("{} is not yours to block", a.task),
+                Some(resolved.display_id.clone()),
+                None,
+            ));
         }
 
         // (4) Close the in-flight assignment by specific id (mirrors abandon.rs pattern).
+        // Unreachable in practice given (3) just confirmed an open assignment for this agent —
+        // defensive only.
         let Some(open) = db::current_assignment(tx, task_id)? else {
-            return Err(db::constraint(format!(
-                "no open assignment to close for {}",
-                a.task
-            )));
+            return Err(db::conflict(
+                "no_open_assignment",
+                format!("no open assignment to close for {}", a.task),
+                Some(resolved.display_id.clone()),
+            ));
         };
         let aid = open.id;
         let n = tx.execute(
@@ -77,10 +118,11 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
             rusqlite::params![crate::time::now_rfc3339(), aid],
         )?;
         if n != 1 {
-            return Err(db::constraint(format!(
-                "no open assignment to close for {}",
-                a.task
-            )));
+            return Err(db::conflict(
+                "no_open_assignment",
+                format!("no open assignment to close for {}", a.task),
+                Some(resolved.display_id.clone()),
+            ));
         }
 
         // (5) One `blocker` event with structured payload (skill-readable).
@@ -103,6 +145,13 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
         )?;
         Ok(blocker_display)
     })?;
-    println!("{} blocked by {}", resolved.display_id, blocker_display);
-    Ok(())
+    emit(
+        a.json,
+        &Blocked {
+            display_id: resolved.display_id,
+            blocker_id: blocker_display,
+            blocker_title: a.new,
+            state: "pending".to_string(),
+        },
+    )
 }

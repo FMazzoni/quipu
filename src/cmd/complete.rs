@@ -1,6 +1,8 @@
+use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
+use serde::Serialize;
 
 #[derive(Args, Debug)]
 pub struct CompleteArgs {
@@ -11,6 +13,21 @@ pub struct CompleteArgs {
     pub decision: Vec<String>,
     #[arg(long = "artifact", value_name = "PATH")]
     pub artifact: Vec<String>,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Serialize)]
+struct Completed {
+    display_id: String,
+    state: String,
+    decisions: Vec<String>,
+    artifacts: Vec<String>,
+}
+impl Outcome for Completed {
+    fn human(&self) -> String {
+        format!("{} done", self.display_id)
+    }
 }
 
 pub fn run(db_path: &std::path::Path, a: CompleteArgs) -> Result<()> {
@@ -19,21 +36,37 @@ pub fn run(db_path: &std::path::Path, a: CompleteArgs) -> Result<()> {
     let task_id = resolved.id;
     db::with_tx(&mut conn, |tx| {
         let Some(open) = db::current_assignment(tx, task_id)? else {
-            return Err(db::constraint(format!("{} not assigned", a.task)));
+            return Err(db::conflict(
+                "no_open_assignment",
+                format!("{} not assigned", a.task),
+                Some(resolved.display_id.clone()),
+            ));
         };
         let aid = open.id;
         if open.claimed_at.is_none() {
-            return Err(db::constraint(format!("{} not claimed", a.task)));
+            return Err(db::conflict(
+                "not_claimed",
+                format!("{} not claimed", a.task),
+                Some(resolved.display_id.clone()),
+            ));
         }
         if open.agent_id != a.agent {
-            return Err(db::constraint(format!("{} not yours", a.task)));
+            return Err(db::not_owner(
+                format!("{} not yours", a.task),
+                Some(resolved.display_id.clone()),
+                Some(open.agent_id.clone()),
+            ));
         }
         let n = tx.execute(
             "UPDATE task SET state = 'done' WHERE id = ? AND state = 'running'",
             [task_id],
         )?;
         if n != 1 {
-            return Err(db::constraint(format!("{} not in running state", a.task)));
+            return Err(db::conflict(
+                "not_running",
+                format!("{} not in running state", a.task),
+                Some(resolved.display_id.clone()),
+            ));
         }
         tx.execute(
             "UPDATE assignment SET completed_at = ?, outcome = 'success' WHERE id = ?",
@@ -67,6 +100,13 @@ pub fn run(db_path: &std::path::Path, a: CompleteArgs) -> Result<()> {
         db::refresh_ready(tx)?;
         Ok(())
     })?;
-    println!("{} done", resolved.display_id);
-    Ok(())
+    emit(
+        a.json,
+        &Completed {
+            display_id: resolved.display_id,
+            state: "done".to_string(),
+            decisions: a.decision,
+            artifacts: a.artifact,
+        },
+    )
 }

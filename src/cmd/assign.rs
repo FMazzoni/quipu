@@ -1,12 +1,28 @@
+use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
+use serde::Serialize;
 
 #[derive(Args, Debug)]
 pub struct AssignArgs {
     pub task: String,
     #[arg(long = "to")]
     pub to: String,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Serialize)]
+struct Assigned {
+    display_id: String,
+    agent_id: String,
+    state: String,
+}
+impl Outcome for Assigned {
+    fn human(&self) -> String {
+        format!("{} assigned to {}", self.display_id, self.agent_id)
+    }
 }
 
 pub fn run(db_path: &std::path::Path, a: AssignArgs) -> Result<()> {
@@ -19,10 +35,11 @@ pub fn run(db_path: &std::path::Path, a: AssignArgs) -> Result<()> {
             [task_id],
         )?;
         if n != 1 {
-            return Err(db::constraint(format!(
-                "{} not ready for assignment",
-                a.task
-            )));
+            return Err(db::conflict(
+                "not_ready",
+                format!("{} not ready for assignment", a.task),
+                Some(resolved.display_id.clone()),
+            ));
         }
         let n = tx.execute(
             "INSERT INTO assignment(task_id, agent_id)
@@ -31,10 +48,11 @@ pub fn run(db_path: &std::path::Path, a: AssignArgs) -> Result<()> {
             rusqlite::params![task_id, a.to],
         )?;
         if n != 1 {
-            return Err(db::constraint(format!(
-                "{} has a stale open assignment",
-                a.task
-            )));
+            return Err(db::conflict(
+                "stale_open_assignment",
+                format!("{} has a stale open assignment", a.task),
+                Some(resolved.display_id.clone()),
+            ));
         }
         db::insert_event(
             tx,
@@ -45,6 +63,12 @@ pub fn run(db_path: &std::path::Path, a: AssignArgs) -> Result<()> {
         )?;
         Ok(())
     })?;
-    println!("{} assigned to {}", resolved.display_id, a.to);
-    Ok(())
+    emit(
+        a.json,
+        &Assigned {
+            display_id: resolved.display_id,
+            agent_id: a.to,
+            state: "assigned".to_string(),
+        },
+    )
 }

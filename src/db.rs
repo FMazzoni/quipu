@@ -74,19 +74,129 @@ pub const STATE_DONE: &str = State::Done.as_str();
 #[allow(dead_code)] // kept for family consistency
 pub const STATE_CANCELLED: &str = State::Cancelled.as_str();
 
-/// Typed errors. `main` matches on the variant to pick an exit code.
+/// Typed errors. `main` matches on the variant to pick an exit code and (in
+/// `--json` mode) a `kind` string for the `{"error": {...}}` envelope.
+///
+/// Four buckets, deliberately — not one variant per failure site. The
+/// *variant* is what a calling agent branches retry-vs-give-up on; the *code*
+/// string inside `Conflict`/`Invariant` is for logs and precise skill
+/// authoring, and can grow additively without breaking existing matchers.
 #[derive(Debug, Error)]
 pub enum QuipuError {
-    /// Constraint violation (wrong state, wrong assignee, double-assign, etc.) — exit 2.
-    #[error("{0}")]
-    Constraint(String),
-    /// Invalid CLI input — exit 1.
+    /// Wrong state / lost race — retrying may succeed once state settles. Exit 2.
+    #[error("{message}")]
+    Conflict {
+        code: &'static str,
+        message: String,
+        task: Option<String>,
+    },
+    /// A different agent holds this — do not retry, escalate or reassign. Exit 2.
+    #[error("{message}")]
+    NotOwner {
+        message: String,
+        task: Option<String>,
+        owner: Option<String>,
+    },
+    /// Referenced entity or edge does not exist. Exit 2.
+    #[error("{message}")]
+    NotFound {
+        message: String,
+        task: Option<String>,
+    },
+    /// Structural invariant violated (dependency cycle) — replan. Exit 2.
+    #[error("{message}")]
+    Invariant { code: &'static str, message: String },
+    /// Bad CLI input — exit 1.
     #[error("invalid input: {0}")]
     InvalidInput(String),
 }
 
-pub fn constraint(msg: impl Into<String>) -> anyhow::Error {
-    anyhow::Error::from(QuipuError::Constraint(msg.into()))
+impl QuipuError {
+    /// Stable lowercase discriminant for the `--json` error envelope's `kind` field.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Conflict { .. } => "conflict",
+            Self::NotOwner { .. } => "not_owner",
+            Self::NotFound { .. } => "not_found",
+            Self::Invariant { .. } => "invariant",
+            Self::InvalidInput(_) => "invalid_input",
+        }
+    }
+
+    /// Exit code contract, documented in `main.rs`: everything but `InvalidInput` is 2.
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Self::InvalidInput(_) => 1,
+            _ => 2,
+        }
+    }
+
+    /// `{"error": {...}}` body for `--json` mode. Always rendered to stderr by the caller.
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            Self::Conflict {
+                code,
+                message,
+                task,
+            } => serde_json::json!({
+                "kind": self.kind(), "code": code, "message": message, "task": task,
+            }),
+            Self::NotOwner {
+                message,
+                task,
+                owner,
+            } => serde_json::json!({
+                "kind": self.kind(), "message": message, "task": task, "owner": owner,
+            }),
+            Self::NotFound { message, task } => serde_json::json!({
+                "kind": self.kind(), "message": message, "task": task,
+            }),
+            Self::Invariant { code, message } => serde_json::json!({
+                "kind": self.kind(), "code": code, "message": message,
+            }),
+            Self::InvalidInput(message) => serde_json::json!({
+                "kind": self.kind(), "message": message,
+            }),
+        }
+    }
+}
+
+/// Wrong state / lost race. `task` should be the canonical display_id when known.
+pub fn conflict(code: &'static str, msg: impl Into<String>, task: Option<String>) -> anyhow::Error {
+    anyhow::Error::from(QuipuError::Conflict {
+        code,
+        message: msg.into(),
+        task,
+    })
+}
+
+/// A different agent holds this task than the caller claims to be.
+pub fn not_owner(
+    msg: impl Into<String>,
+    task: Option<String>,
+    owner: Option<String>,
+) -> anyhow::Error {
+    anyhow::Error::from(QuipuError::NotOwner {
+        message: msg.into(),
+        task,
+        owner,
+    })
+}
+
+/// Referenced entity or edge does not exist.
+pub fn not_found(msg: impl Into<String>, task: Option<String>) -> anyhow::Error {
+    anyhow::Error::from(QuipuError::NotFound {
+        message: msg.into(),
+        task,
+    })
+}
+
+/// Structural invariant violated (e.g. dependency cycle).
+pub fn invariant(code: &'static str, msg: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::from(QuipuError::Invariant {
+        code,
+        message: msg.into(),
+    })
 }
 
 pub fn invalid_input(msg: impl Into<String>) -> anyhow::Error {
@@ -351,9 +461,13 @@ pub fn display_prefix(conn: &rusqlite::Connection) -> Result<String> {
 pub fn validate_prefix(s: &str) -> Result<()> {
     let ok = (2..=5).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_uppercase());
     if !ok {
-        return Err(constraint(format!(
-            "invalid --prefix `{s}` (must be 2-5 uppercase ASCII letters)"
-        )));
+        // Pre-existing behavior (exit 2): kept as `Conflict` rather than `InvalidInput`
+        // so `init_with_invalid_prefix_errors` (exit code 2) doesn't regress.
+        return Err(conflict(
+            "invalid_prefix",
+            format!("invalid --prefix `{s}` (must be 2-5 uppercase ASCII letters)"),
+            None,
+        ));
     }
     Ok(())
 }
