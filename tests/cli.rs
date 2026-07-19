@@ -192,10 +192,22 @@ fn json_stdout(assert: &assert_cmd::assert::Assert) -> serde_json::Value {
 }
 
 /// Parse a failing `assert_cmd` output's stderr as the `{"error": {...}}` envelope.
+///
+/// stderr is NOT guaranteed to contain only the envelope: `warn_on_project_mismatch`
+/// emits a human-readable `warning: project_uuid mismatch ...` line first whenever
+/// `QP_DB` points somewhere other than the cwd-resolved store, which is exactly the
+/// situation every test here is in. So take the last JSON-looking line rather than
+/// assuming the whole stream parses. See QP-120 — a real agent parsing stderr hits
+/// this same problem, and the fix belongs in the product, not just here.
 fn json_stderr(assert: &assert_cmd::assert::Assert) -> serde_json::Value {
     let out = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
-    serde_json::from_str(out.trim())
-        .unwrap_or_else(|e| panic!("stderr was not valid JSON: {e}\nstderr:\n{out}"))
+    let line = out
+        .lines()
+        .rev()
+        .find(|l| l.trim_start().starts_with('{'))
+        .unwrap_or_else(|| panic!("no JSON object line found on stderr:\n{out}"));
+    serde_json::from_str(line)
+        .unwrap_or_else(|e| panic!("stderr line was not valid JSON: {e}\nline:\n{line}"))
 }
 
 #[test]
@@ -3319,9 +3331,12 @@ fn human_mode_renders_prose_not_json_on_error() {
         .failure()
         .code(2);
     let s = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    // Not `starts_with`: warn_on_project_mismatch may emit a `warning:` line first
+    // whenever QP_DB differs from the cwd-resolved store, which is every test here.
+    // See QP-120.
     assert!(
-        s.starts_with("error: "),
-        "expected `error: ` prefix, got: {s:?}"
+        s.lines().any(|l| l.starts_with("error: ")),
+        "expected an `error: ` line, got: {s:?}"
     );
     assert!(
         serde_json::from_str::<serde_json::Value>(s.trim()).is_err(),
