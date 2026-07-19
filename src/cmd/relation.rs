@@ -1,11 +1,15 @@
 //! Manage typed, non-blocking references between tasks.
 //!
 //! Unlike deps, relations never affect readiness — they are provenance
-//! (`variant-of`, `supersedes`, `fixes`), not scheduling.
+//! (`variant-of`, `supersedes`, `fixes`), not scheduling. `add` and `rm` are
+//! idempotent: the outcome reports whether a row actually changed, and the
+//! `relation_add`/`relation_removed` event is only written when one did.
 
+use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;
 use clap::{Args, Subcommand};
+use serde::Serialize;
 
 #[derive(Args, Debug)]
 pub struct RelationArgs {
@@ -19,11 +23,15 @@ pub enum RelOp {
         from: String,
         kind: String,
         to: String,
+        #[arg(long)]
+        json: bool,
     },
     Rm {
         from: String,
         kind: String,
         to: String,
+        #[arg(long)]
+        json: bool,
     },
     List {
         task: String,
@@ -32,46 +40,139 @@ pub enum RelOp {
     },
 }
 
+impl RelationArgs {
+    /// Whether `--json` was passed on whichever subcommand was chosen, so
+    /// `main`'s error path can match the stream format the success path uses.
+    pub fn json(&self) -> bool {
+        match &self.op {
+            RelOp::Add { json, .. } | RelOp::Rm { json, .. } | RelOp::List { json, .. } => *json,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct RelationAdded {
+    from_display_id: String,
+    to_display_id: String,
+    kind: String,
+    added: bool,
+}
+impl Outcome for RelationAdded {
+    fn human(&self) -> String {
+        if self.added {
+            format!(
+                "{} {} {} linked",
+                self.from_display_id, self.kind, self.to_display_id
+            )
+        } else {
+            format!(
+                "{} {} {} already linked",
+                self.from_display_id, self.kind, self.to_display_id
+            )
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct RelationRemoved {
+    from_display_id: String,
+    to_display_id: String,
+    kind: String,
+    removed: bool,
+}
+impl Outcome for RelationRemoved {
+    fn human(&self) -> String {
+        if self.removed {
+            format!(
+                "{} {} {} unlinked",
+                self.from_display_id, self.kind, self.to_display_id
+            )
+        } else {
+            format!(
+                "{} {} {} not linked",
+                self.from_display_id, self.kind, self.to_display_id
+            )
+        }
+    }
+}
+
 pub fn run(db_path: &std::path::Path, a: RelationArgs) -> Result<()> {
     let mut conn = db::open(db_path)?;
     match a.op {
-        RelOp::Add { from, kind, to } => {
-            let f = id::resolve(&conn, &from)?;
-            let t = id::resolve(&conn, &to)?;
-            db::with_tx(&mut conn, |tx| {
+        RelOp::Add {
+            from,
+            kind,
+            to,
+            json,
+        } => {
+            if kind.is_empty() {
+                return Err(db::invalid_input("relation kind required"));
+            }
+            let f = id::resolve_full(&conn, &from)?;
+            let t = id::resolve_full(&conn, &to)?;
+            let added = db::with_tx(&mut conn, |tx| -> Result<bool> {
                 tx.execute(
                     "INSERT OR IGNORE INTO relation(from_task_id, to_task_id, kind) VALUES (?,?,?)",
-                    rusqlite::params![f, t, kind],
+                    rusqlite::params![f.id, t.id, kind],
                 )?;
-                db::insert_event(
-                    tx,
-                    Some(f),
-                    "relation_add",
-                    None,
-                    Some(&serde_json::json!({"kind": kind, "to": to})),
-                )?;
-                Ok(())
-            })?;
-        }
-        RelOp::Rm { from, kind, to } => {
-            let f = id::resolve(&conn, &from)?;
-            let t = id::resolve(&conn, &to)?;
-            db::with_tx(&mut conn, |tx| {
-                let n = tx.execute(
-                    "DELETE FROM relation WHERE from_task_id = ? AND to_task_id = ? AND kind = ?",
-                    rusqlite::params![f, t, kind],
-                )?;
-                if n > 0 {
+                if tx.changes() == 1 {
                     db::insert_event(
                         tx,
-                        Some(f),
+                        Some(f.id),
+                        "relation_add",
+                        None,
+                        Some(&serde_json::json!({"kind": kind, "to": t.display_id})),
+                    )?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            })?;
+            emit(
+                json,
+                &RelationAdded {
+                    from_display_id: f.display_id,
+                    to_display_id: t.display_id,
+                    kind,
+                    added,
+                },
+            )?;
+        }
+        RelOp::Rm {
+            from,
+            kind,
+            to,
+            json,
+        } => {
+            let f = id::resolve_full(&conn, &from)?;
+            let t = id::resolve_full(&conn, &to)?;
+            let removed = db::with_tx(&mut conn, |tx| -> Result<bool> {
+                tx.execute(
+                    "DELETE FROM relation WHERE from_task_id = ? AND to_task_id = ? AND kind = ?",
+                    rusqlite::params![f.id, t.id, kind],
+                )?;
+                if tx.changes() > 0 {
+                    db::insert_event(
+                        tx,
+                        Some(f.id),
                         "relation_removed",
                         None,
-                        Some(&serde_json::json!({"kind": kind, "to": to})),
+                        Some(&serde_json::json!({"kind": kind, "to": t.display_id})),
                     )?;
+                    Ok(true)
+                } else {
+                    Ok(false)
                 }
-                Ok(())
             })?;
+            emit(
+                json,
+                &RelationRemoved {
+                    from_display_id: f.display_id,
+                    to_display_id: t.display_id,
+                    kind,
+                    removed,
+                },
+            )?;
         }
         RelOp::List { task, json } => {
             let task_id = id::resolve(&conn, &task)?;

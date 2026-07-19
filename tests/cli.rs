@@ -348,6 +348,141 @@ fn relation_add_list_rm() {
 }
 
 #[test]
+fn relation_add_rm_are_not_silent_in_human_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "root"]).assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+
+    let out = qp(&db)
+        .args(["relation", "add", "QP-2", "variant-of", "QP-1"])
+        .assert()
+        .success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        s.contains("QP-2") && s.contains("variant-of") && s.contains("QP-1"),
+        "relation add was silent/incomplete: {s:?}"
+    );
+
+    // Re-adding is a no-op but still reports.
+    let out = qp(&db)
+        .args(["relation", "add", "QP-2", "variant-of", "QP-1"])
+        .assert()
+        .success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("already"), "expected already-linked line: {s:?}");
+
+    let out = qp(&db)
+        .args(["relation", "rm", "QP-2", "variant-of", "QP-1"])
+        .assert()
+        .success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        s.contains("QP-2") && s.contains("QP-1"),
+        "relation rm was silent: {s:?}"
+    );
+}
+
+#[test]
+fn relation_add_rm_json_payloads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "root"]).assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+
+    // Lowercase / zero-padded input must come back canonicalized (QP-61).
+    let out = qp(&db)
+        .args(["relation", "add", "qp-002", "supersedes", "qp-1", "--json"])
+        .assert()
+        .success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+    assert_eq!(v["from_display_id"], "QP-2");
+    assert_eq!(v["to_display_id"], "QP-1");
+    assert_eq!(v["kind"], "supersedes");
+    assert_eq!(v["added"], true);
+
+    // Idempotent re-add reports added:false.
+    let out = qp(&db)
+        .args(["relation", "add", "QP-2", "supersedes", "QP-1", "--json"])
+        .assert()
+        .success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+    assert_eq!(v["added"], false);
+
+    let out = qp(&db)
+        .args(["relation", "rm", "QP-2", "supersedes", "QP-1", "--json"])
+        .assert()
+        .success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+    assert_eq!(v["from_display_id"], "QP-2");
+    assert_eq!(v["to_display_id"], "QP-1");
+    assert_eq!(v["removed"], true);
+}
+
+#[test]
+fn relation_rm_nonexistent_reports_removed_false() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "root"]).assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+
+    let out = qp(&db)
+        .args(["relation", "rm", "QP-2", "variant-of", "QP-1", "--json"])
+        .assert()
+        .success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+    assert_eq!(v["removed"], false);
+
+    let out = qp(&db)
+        .args(["relation", "rm", "QP-2", "variant-of", "QP-1"])
+        .assert()
+        .success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("not linked"), "expected not-linked line: {s:?}");
+
+    // A no-op rm must not write a relation_removed event.
+    let out = qp(&db)
+        .args(["timeline", "QP-2", "--json"])
+        .assert()
+        .success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let events: Vec<serde_json::Value> = serde_json::from_str(s.trim()).unwrap();
+    assert!(
+        !events.iter().any(|e| e["kind"] == "relation_removed"),
+        "no-op rm emitted an event: {events:?}"
+    );
+}
+
+#[test]
+fn relation_error_under_json_is_json_lines() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    let out = qp(&db)
+        .args([
+            "relation",
+            "add",
+            "QP-999",
+            "variant-of",
+            "QP-998",
+            "--json",
+        ])
+        .assert()
+        .failure();
+    let s = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    let line = s.lines().last().unwrap();
+    let v: serde_json::Value = serde_json::from_str(line).unwrap();
+    assert!(v["error"].is_object(), "expected error envelope: {s:?}");
+}
+
+#[test]
 fn payload_summary_survives_multibyte_char_at_truncation_boundary() {
     // The fallback arm of summarize_payload truncates the JSON-serialized
     // payload at 80 bytes. Craft a body whose serialized `{"text":"..."}`
