@@ -1,8 +1,6 @@
 //! `qp add` — create a task.
 //!
 //! Lands in `ready` when it has no unresolved deps, `pending` otherwise.
-//! Models its result as a typed struct that both serialises and displays —
-//! the pattern the other mutations are being converged onto.
 
 use crate::outcome::{emit, Outcome};
 use crate::{db, id};
