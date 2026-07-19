@@ -62,6 +62,28 @@ violation, e.g. a dependency cycle — replan), or `invalid_input` (bad CLI
 input). `code` is a stable string for precise skill authoring (e.g.
 `already_claimed`, `not_ready`, `state_changed_under_us`) and grows additively.
 
+**Under `--json`, stderr is JSON Lines**: zero or more `{"warning": {...}}`
+objects, then at most one `{"error": {...}}`. Parse it line by line — do not
+`json.loads` the whole buffer. The one warning today is
+`{"warning": {"kind": "project_uuid_mismatch", ...}}`, emitted when `--db`/`QP_DB`
+points at a different store than the working directory would have resolved to.
+In human mode both stay prose.
+
+## Store discovery
+
+`qp` resolves which SQLite store to operate on in three tiers:
+
+1. `--db <path>` or the `QP_DB` env var, if set — wins outright.
+2. Otherwise, the nearest `.quipu/db.sqlite` walking up from the current directory.
+3. Otherwise, `.quipu/db.sqlite` beside the repo root reported by
+   `git rev-parse --git-common-dir`. This is what lets a command run from a
+   `wt`-managed worktree — a *sibling* of the main checkout, not a child — find
+   the main repo's store without anyone setting `QP_DB`.
+
+Each store stamps a `project_uuid` at `qp init`. Setting `--db`/`QP_DB` explicitly
+while the working directory would have resolved to a *different* store triggers the
+mismatch warning above — the guard against filing tickets into the wrong project.
+
 ## Install skills into Claude Code
 
     qp install-skills                          # symlinks skills/* into ~/.claude/skills/qp-*
