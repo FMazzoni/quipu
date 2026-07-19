@@ -294,12 +294,80 @@ directly.
 Code 2 is the interesting one: it is the *expected* outcome of losing a race, not
 a failure.
 
+Two outcomes fall outside that contract and will surprise you:
+
+| code | when | status |
+|---|---|---|
+| 2 | clap's own argument parsing failed — unknown flag, missing required arg. *Not* a store conflict | clap's default, not ours. Tell them apart by the `error: unexpected argument` prose and the absence of a `{"error": ...}` envelope under `--json` |
+| 101 | Rust panic on **broken pipe** — stdout closed while `qp` was still writing | unfixed; tracked as QP-139 |
+
+101 is the trap. `qp show QP-1 | head -1` exits 101 with
+`failed printing to stdout: Broken pipe (os error 32)` on stderr. It means the
+reader went away, not that `qp` crashed or that the store is damaged. It only
+fires when the output outruns the pipe buffer, so short output pipes cleanly and
+the bug reads as intermittent.
+
 ## Barriers
 
 `qp wait --cohort-done --tag <t>` blocks until the tag-matched cohort has
 `total > 0` and no task left in a non-terminal state. The empty-cohort case is a
 distinct exit code (4) rather than a silent success, because "nothing matched"
 and "everything finished" must not look alike to an orchestrator.
+
+## Symptom index
+
+Everything above is organised by structure. Debugging needs the inverse index.
+Nobody starts from "what does `store.rs` do" — they start from "this task is
+stuck in `pending` and I do not know why". This section is that lookup. Every row
+is a fact about the current code, reproducible from the CLI; none of it is
+explanation.
+
+| symptom | diagnose with | cause |
+|---|---|---|
+| stuck in `pending` | `qp tree <id>` | an upstream dep is not `done`. `refresh_ready` in [`db.rs`](https://github.com/FMazzoni/quipu/blob/main/src/db.rs) owns `pending`→`ready`, but readiness is **not single-homed**: [`depends.rs`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/depends.rs) also demotes `ready`→`pending` when a new edge lands, so a task can leave `ready` without anything having acted on it directly |
+| exit 2, code `already_claimed` | `qp timeline <id>` | someone claimed it first. **This is the expected outcome of losing a race, not a failure** — the timeline names the winner. Do not treat it as an error path |
+| exit 2, kind `not_owner` | `qp show <id>` | a different agent holds the open assignment; the envelope's `owner` field names them. Do not retry — escalate, or `qp reclaim` |
+| exit 2, code `not_ready` | `qp show <id>` | `assign` requires state `ready`; the task is `pending`, `assigned`, `running`, or terminal |
+| exit 2, code `no_open_assignment` | `qp show <id>` | `claim`/`complete`/`abandon` found no un-completed assignment row — an `assign` that never happened, or a prior `abandon`/`reclaim` that already closed it |
+| exit 2, code `not_claimed` | `qp timeline <id>` | `complete` on a task that was assigned but never claimed; the `assigned`→`running` edge was skipped |
+| exit 2, code `not_assigned_or_running` | `qp show <id>` | `abandon`/`reclaim` on a task that is not in flight |
+| exit 2, code `not_blockable` | `qp show <id>` | `block` requires `assigned` or `running`; the message carries the actual state |
+| exit 2, code `already_terminal` | `qp show <id>` | `cancel` on something already `done` or `cancelled` |
+| exit 2, code `not_editable` | `qp show <id>` | `edit` on a terminal task, or the row vanished |
+| exit 2, kind `invariant`, code `dependency_cycle` | `qp tree <id>` | the edge would close a loop; `would_cycle` in [`db.rs`](https://github.com/FMazzoni/quipu/blob/main/src/db.rs) rejects it before the insert. Replan — retrying cannot help |
+| exit 2, kind `not_found` | `qp list` | no such task or edge. Raised by `resolve_full` in [`id.rs`](https://github.com/FMazzoni/quipu/blob/main/src/id.rs) |
+| barrier released immediately, work unfinished | `qp wave` | `qp wait --state running --empty` releases on any *gap* — including before the first agent has started. Use `qp wait --cohort-done --tag <t>`, which additionally requires `total > 0` |
+| barrier exits 4 | `qp list --tag <t>` | `--cohort-done` matched zero tasks: wrong tag, or nothing tagged yet |
+| barrier exits 3 | `qp wave` | `--timeout-secs` elapsed with the cohort still unfinished. A timeout, not a conflict |
+| an expected event is absent from `qp timeline` | `qp timeline <id>` | `insert_event` runs *inside* the same transaction as the mutation, so a failed mutation writes no event at all. The timeline is byte-identical before and after an exit-2 command — absence of an event is positive evidence the transition never landed |
+| exit 101 mid-pipeline | rerun without the pipe | broken pipe; see the exit-codes section above. QP-139 |
+| `{"warning": {"kind": "project_uuid_mismatch"}}` | `qp status` | `--db`/`QP_DB` points at a different store than the working directory would have resolved to. See the store-discovery tiers in `README.md` |
+
+The error-envelope shape per `kind` — which fields are actually present, and why
+`code` is not one of them on `not_owner` — is tabulated in `README.md`. Branch on
+`kind` before reading any other field.
+
+### The introspection commands, by question
+
+| question | command |
+|---|---|
+| what state is this in, and who holds it | `qp show <id>` |
+| what happened to it, in order | `qp timeline <id>` |
+| why is it not ready | `qp tree <id>` |
+| what have agents decided, project-wide | `qp decisions` |
+| what is in flight right now | `qp wave` |
+| aggregate counts by state | `qp status` |
+| filter by tag or state | `qp list` |
+| block until something changes | `qp watch` |
+
+### One code you cannot reach
+
+`stale_open_assignment` in [`assign.rs`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/assign.rs) is defensive
+only. It fires when a `ready` task already carries an open assignment, which no
+CLI sequence produces: the guarded `UPDATE` to `assigned` runs first, and a
+`ready` task should never hold one. If you ever see it, the store is in a state
+the state machine calls impossible — that is a bug report, not a usage error.
+See QP-137 / QP-142.
 
 ## A reading path
 
