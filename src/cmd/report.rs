@@ -17,36 +17,13 @@
 //! (state snapshot, in-flight, timeline, friction log, open bugs, shipped)
 //! that an agent reconstructs from this JSON.
 
-use crate::{db, id};
+use crate::{db, id, store};
 use anyhow::Result;
 use clap::Args;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::io::Write;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
-
-/// (id, display_id, title, state, tier, description, agent)
-// TODO(QP-68): becomes `store::TaskRow` when the store layer lands.
-type TaskCoreRow = (
-    i64,
-    String,
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-);
-
-/// (event id, task display_id, ts, kind, agent_id, payload)
-// TODO(QP-68): becomes `store::EventRow` when the store layer lands.
-type EventTailRow = (
-    i64,
-    Option<String>,
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-);
 
 #[derive(Args, Debug)]
 pub struct ReportArgs {
@@ -83,8 +60,8 @@ pub fn run(db_path: &std::path::Path, a: ReportArgs) -> Result<()> {
 
     // Per-ticket mode: full detail for one ticket.
     if let Some(tref) = a.ticket.as_deref() {
-        let tid = id::resolve(&conn, tref)?;
-        let detail = collect_ticket(&conn, tid)?;
+        let resolved = id::resolve_full(&conn, tref)?;
+        let detail = collect_ticket(&conn, resolved.id)?;
         let body = serde_json::to_string(&ticket_detail_json(&detail))?;
         write_output(a.output.as_deref(), &body)?;
         return Ok(());
@@ -134,15 +111,7 @@ struct TicketDetail {
     tags: Vec<String>,
     parents: Vec<(String, String, String)>, // display_id, title, state — this depends on
     children: Vec<(String, String, String)>, // display_id, title, state — depend on this
-    events: Vec<EventRow>,                  // chronological asc, uncapped
-}
-
-/// (task display_id, ts, kind, agent_id, payload)
-struct EventRow {
-    ts: String,
-    kind: String,
-    agent: Option<String>,
-    payload: Value,
+    events: Vec<store::EventRow>,           // chronological asc, uncapped
 }
 
 fn ticket_detail_json(t: &TicketDetail) -> Value {
@@ -209,17 +178,11 @@ fn collect_ticket(conn: &rusqlite::Connection, tid: i64) -> Result<TicketDetail>
             ))
         },
     )?;
-    let agent: Option<String> = conn
-        .query_row(
-            "SELECT agent_id FROM assignment WHERE task_id = ?1 ORDER BY id DESC LIMIT 1",
-            [tid],
-            |r| r.get(0),
-        )
-        .ok();
-    let mut tag_stmt = conn.prepare("SELECT name FROM tag WHERE task_id = ?1 ORDER BY name")?;
-    let tags: Vec<String> = tag_stmt
-        .query_map([tid], |r| r.get::<_, String>(0))?
-        .collect::<Result<_, _>>()?;
+    let agent = store::latest_agent(conn, tid)?;
+    let mut tags = store::tags_by_task(conn, &[tid])?
+        .remove(&tid)
+        .unwrap_or_default();
+    tags.sort();
 
     let mut p_stmt = conn.prepare(
         "SELECT t.display_id, t.title, t.state FROM dep d JOIN task t ON t.id = d.depends_on_task_id
@@ -248,28 +211,13 @@ fn collect_ticket(conn: &rusqlite::Connection, tid: i64) -> Result<TicketDetail>
         .collect::<Result<_, _>>()?;
 
     // Full timeline for this ticket, oldest-first, uncapped.
-    let mut e_stmt = conn.prepare(
-        "SELECT e.ts, e.kind, e.agent_id, e.payload
-           FROM event e WHERE e.task_id = ?1 ORDER BY e.id ASC",
+    let events = store::events(
+        conn,
+        &store::EventFilter {
+            task_id: Some(tid),
+            ..Default::default()
+        },
     )?;
-    let events: Vec<EventRow> = e_stmt
-        .query_map([tid], |r| {
-            let payload: Option<String> = r.get(3)?;
-            let payload_v: Value = payload
-                .as_deref()
-                .map(serde_json::from_str)
-                .transpose()
-                .ok()
-                .flatten()
-                .unwrap_or(Value::Null);
-            Ok(EventRow {
-                ts: r.get::<_, String>(0)?,
-                kind: r.get::<_, String>(1)?,
-                agent: r.get::<_, Option<String>>(2)?,
-                payload: payload_v,
-            })
-        })?
-        .collect::<Result<_, _>>()?;
 
     Ok(TicketDetail {
         display_id,
@@ -318,91 +266,29 @@ fn collect_json(
     subtree: Option<&HashSet<i64>>,
 ) -> Result<Value> {
     // Tasks: same shape as `qp list --json`.
-    let sql = "SELECT t.id, t.display_id, t.title, t.state, t.tier, t.description,
-                (SELECT a.agent_id FROM assignment a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1) AS agent
-           FROM task t ORDER BY t.id ASC";
-    // If subtree-scoped, we filter below (in Rust, not SQL — keeps query simple).
-    let mut stmt = conn.prepare(sql)?;
-    let core: Vec<TaskCoreRow> = stmt
-        .query_map([], |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-                r.get(6)?,
-            ))
-        })?
-        .collect::<Result<_, _>>()?;
+    let core = store::tasks(conn, &store::TaskFilter::default())?;
 
     // Filter by subtree if scoped.
-    let core: Vec<_> = match subtree {
-        Some(set) => core
-            .into_iter()
-            .filter(|(id, ..)| set.contains(id))
-            .collect(),
+    let core: Vec<store::TaskRow> = match subtree {
+        Some(set) => core.into_iter().filter(|t| set.contains(&t.id)).collect(),
         None => core,
     };
 
-    let task_ids: Vec<i64> = core.iter().map(|r| r.0).collect();
-    let mut tags_by: std::collections::HashMap<i64, Vec<String>> = std::collections::HashMap::new();
-    let mut blockers_by: std::collections::HashMap<i64, Vec<String>> =
-        std::collections::HashMap::new();
-    let mut last_event_by: std::collections::HashMap<i64, Value> = std::collections::HashMap::new();
-
-    if !task_ids.is_empty() {
-        let placeholders = std::iter::repeat_n("?", task_ids.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let pref: Vec<&dyn rusqlite::ToSql> =
-            task_ids.iter().map(|i| i as &dyn rusqlite::ToSql).collect();
-
-        let q = format!("SELECT task_id, name FROM tag WHERE task_id IN ({placeholders})");
-        let mut s = conn.prepare(&q)?;
-        for r in s.query_map(pref.as_slice(), |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-        })? {
-            let (t, n) = r?;
-            tags_by.entry(t).or_default().push(n);
-        }
-
-        let q = format!(
-            "SELECT d.task_id, t2.display_id FROM dep d JOIN task t2 ON t2.id = d.depends_on_task_id
-              WHERE d.task_id IN ({placeholders}) AND t2.state NOT IN ('done','cancelled')");
-        let mut s = conn.prepare(&q)?;
-        for r in s.query_map(pref.as_slice(), |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-        })? {
-            let (t, d) = r?;
-            blockers_by.entry(t).or_default().push(d);
-        }
-
-        let q = format!(
-            "SELECT task_id, kind, ts, payload FROM event
-              WHERE id IN (SELECT MAX(id) FROM event WHERE task_id IN ({placeholders}) GROUP BY task_id)");
-        let mut s = conn.prepare(&q)?;
-        for r in s.query_map(pref.as_slice(), |r| {
-            let payload: Option<String> = r.get(3)?;
-            let payload_v: Value = payload.as_deref()
-                .map(serde_json::from_str).transpose().ok().flatten().unwrap_or(Value::Null);
-            Ok((r.get::<_, i64>(0)?, serde_json::json!({
-                "kind": r.get::<_, String>(1)?, "ts": r.get::<_, String>(2)?, "payload": payload_v
-            })))
-        })? { let (t, v) = r?; last_event_by.insert(t, v); }
-    }
+    let task_ids: Vec<i64> = core.iter().map(|t| t.id).collect();
+    let mut tags_by = store::tags_by_task(conn, &task_ids)?;
+    let mut blockers_by = store::unresolved_blockers_by_task(conn, &task_ids)?;
+    let mut last_event_by = store::last_event_by_task(conn, &task_ids)?;
 
     let mut tasks: Vec<Value> = Vec::with_capacity(core.len());
-    for (id, did, title, state, tier, description, agent) in core {
+    for t in core {
         let mut obj = serde_json::json!({
-            "id": id, "display_id": did, "title": title, "state": state, "tier": tier,
-            "agent": agent,
-            "tags": tags_by.remove(&id).unwrap_or_default(),
-            "blocked_by": blockers_by.remove(&id).unwrap_or_default(),
-            "last_event": last_event_by.remove(&id),
+            "id": t.id, "display_id": t.display_id, "title": t.title, "state": t.state, "tier": t.tier,
+            "agent": t.agent,
+            "tags": tags_by.remove(&t.id).unwrap_or_default(),
+            "blocked_by": blockers_by.remove(&t.id).unwrap_or_default(),
+            "last_event": last_event_by.remove(&t.id),
         });
-        if let Some(d) = description {
+        if let Some(d) = t.description {
             obj.as_object_mut()
                 .unwrap()
                 .insert("description".into(), Value::String(d));
@@ -411,38 +297,10 @@ fn collect_json(
     }
 
     // Events: same shape as `qp timeline --json`, scoped + capped at 200.
-    let mut evt_sql = String::from(
-        "SELECT e.id, t.display_id, e.ts, e.kind, e.agent_id, e.payload
-           FROM event e LEFT JOIN task t ON t.id = e.task_id
-          WHERE 1=1",
-    );
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-    if let Some(s) = since_iso {
-        evt_sql.push_str(&format!(" AND e.ts >= ?{}", params.len() + 1));
-        params.push(Box::new(s.to_string()));
-    }
-    evt_sql.push_str(" ORDER BY e.id ASC");
-    let mut stmt = conn.prepare(&evt_sql)?;
-    let pref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-    let evt_rows: Vec<EventTailRow> = stmt
-        .query_map(pref.as_slice(), |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-            ))
-        })?
-        .collect::<Result<_, _>>()?;
+    let evt_rows = store::events(conn, &store::EventFilter::default())?;
 
-    // `subtree` is already a set of task rowids — reuse it directly.
-    let subtree_task_ids: Option<HashSet<i64>> = subtree.cloned();
-
-    // Subtree scoping for events requires filtering by task rowid; but EventRow only has display_id.
-    // We need a lookup from display_id to rowid for subtree filtering.
-    // Build it only if needed.
+    // `subtree` is already a set of task rowids; events carry only the task's
+    // display_id, so build a display_id -> rowid lookup once, only if scoped.
     let did_to_id: Option<std::collections::HashMap<String, i64>> = if subtree.is_some() {
         let mut m = std::collections::HashMap::new();
         let mut s = conn.prepare("SELECT id, display_id FROM task")?;
@@ -456,28 +314,27 @@ fn collect_json(
     };
 
     let mut events: Vec<Value> = Vec::new();
-    for (eid, did, ts, kind, agent, payload) in evt_rows {
+    for e in evt_rows {
+        // `--since` scope: skip events before the window.
+        if let Some(s) = since_iso {
+            if e.ts.as_str() < s {
+                continue;
+            }
+        }
         // Subtree scope: skip events whose task isn't in the subtree.
-        if let (Some(ref map), Some(ref set)) = (&did_to_id, &subtree_task_ids) {
-            match did.as_ref().and_then(|d| map.get(d)) {
+        if let (Some(ref map), Some(set)) = (&did_to_id, subtree) {
+            match e.task.as_ref().and_then(|d| map.get(d)) {
                 Some(tid) if set.contains(tid) => {}
                 _ => continue,
             }
         }
-        let payload_v: Value = payload
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .ok()
-            .flatten()
-            .unwrap_or(Value::Null);
         events.push(serde_json::json!({
-            "id": eid,
-            "task": did,
-            "ts": ts,
-            "kind": kind,
-            "agent_id": agent,
-            "payload": payload_v,
+            "id": e.id,
+            "task": e.task,
+            "ts": e.ts,
+            "kind": e.kind,
+            "agent_id": e.agent,
+            "payload": e.payload,
         }));
         if events.len() >= 200 {
             break;
@@ -548,16 +405,6 @@ fn parse_since(s: &str) -> Result<String> {
 }
 
 fn resolve_subtree(conn: &rusqlite::Connection, task: &str) -> Result<HashSet<i64>> {
-    let root = id::resolve(conn, task)?;
-    let mut s = conn.prepare(
-        "WITH RECURSIVE sub(id) AS (
-            SELECT ?1
-            UNION
-            SELECT d.depends_on_task_id FROM dep d JOIN sub ON d.task_id = sub.id
-         ) SELECT id FROM sub",
-    )?;
-    let ids: HashSet<i64> = s
-        .query_map([root], |r| r.get::<_, i64>(0))?
-        .collect::<Result<_, _>>()?;
-    Ok(ids)
+    let root = id::resolve_full(conn, task)?.id;
+    store::subtree_ids(conn, root)
 }

@@ -22,29 +22,21 @@ pub struct ShowArgs {
 
 pub fn run(db_path: &std::path::Path, a: ShowArgs) -> Result<()> {
     let conn = db::open(db_path)?;
-    let tid = id::resolve(&conn, &a.task)?;
+    let resolved = id::resolve_full(&conn, &a.task)?;
+    let tid = resolved.id;
+    let display_id = resolved.display_id;
 
     // Core task record.
-    let (display_id, title, state, tier, description, created_at): (
-        String,
+    let (title, state, tier, description, created_at): (
         String,
         String,
         Option<String>,
         Option<String>,
         Option<String>,
     ) = conn.query_row(
-        "SELECT display_id, title, state, tier, description, created_at FROM task WHERE id = ?1",
+        "SELECT title, state, tier, description, created_at FROM task WHERE id = ?1",
         [tid],
-        |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-            ))
-        },
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     )?;
 
     let agent = store::latest_agent(&conn, tid)?;
