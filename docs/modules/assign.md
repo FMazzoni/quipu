@@ -11,18 +11,28 @@ trips first for every task that satisfies it. Two racing `qp assign`
 processes therefore make the loser report `not_ready`, never
 `stale_open_assignment`.
 
-That invariant is *emergent, not enforced*. It holds only because every
-command that moves a task out of `assigned`/`running` also closes the
-assignment in the same transaction — `abandon`, `reclaim`, `block`,
-`cancel`, `complete` — and because this module is the only `INSERT INTO
-assignment` in the tree. Nothing in `schema.sql` enforces it: there is no
-partial unique index on `assignment(task_id) WHERE completed_at IS NULL`.
-A new command that demotes a task without closing its assignment, or a
-reordering inside any of those five, silently makes this branch live.
+That invariant *used to be emergent*. It held only because every command
+that moves a task out of `assigned`/`running` also closes the assignment in
+the same transaction — `abandon`, `reclaim`, `block`, `cancel`, `complete` —
+and because this module is the only `INSERT INTO assignment` in the tree.
+That was an inductive argument across eight modules with nothing standing
+behind it.
 
-So the guard stays. Deleting it would trade a cheap conditional INSERT for
-a silent second open assignment row, which breaks `db::current_assignment`'s
-"at most one" premise and makes latest-open and latest-by-id disagree — a
-corruption that surfaces far from its cause. `tests/cli.rs`'s
-`open_assignment_implies_assigned_or_running` pins the premise: if it ever
-fails, this branch is no longer defensive and the failure is the warning.
+**QP-142 made it structural.** `schema.sql` now carries
+`idx_assign_one_open`, a partial unique index on `assignment(task_id) WHERE
+completed_at IS NULL`. A second open row is rejected by SQLite itself, so a
+new command that demotes a task without closing its assignment now fails at
+the write instead of quietly corrupting the store.
+
+So the guard stays, but its role changed rather than vanished. It converts
+what would otherwise surface as a raw SQLite `UNIQUE constraint failed` into
+the typed `stale_open_assignment` error with an exit code an orchestrating
+skill can branch on — the index is the enforcement, this branch is the
+diagnosis. Deleting it would leave the corruption caught but unreadable, and
+would still break `db::current_assignment`'s "at most one" premise for any
+store created before the index landed.
+
+`tests/cli.rs` pins both halves: `open_assignment_implies_assigned_or_running`
+walks the commands that must close their rows, and
+`unique_index_rejects_second_open_assignment` pins that the storage layer
+refuses the write on its own.

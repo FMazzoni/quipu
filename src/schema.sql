@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 -- stamped on init: meta(key='project_uuid', value=<uuid v4>)
--- stamped on init: meta(key='schema_version', value='2')
+-- stamped on init: meta(key='schema_version', value='3')
 -- stamped on init: meta(key='display_prefix', value='QP' or user-supplied)
 
 CREATE TABLE IF NOT EXISTS default_tag (
@@ -77,5 +77,19 @@ CREATE INDEX IF NOT EXISTS idx_task_state   ON task(state);
 CREATE INDEX IF NOT EXISTS idx_tag_name     ON tag(name, task_id);
 CREATE INDEX IF NOT EXISTS idx_dep_back     ON dep(depends_on_task_id);
 CREATE INDEX IF NOT EXISTS idx_assign_task  ON assignment(task_id, completed_at);
+
+-- At most one OPEN assignment per task. Before QP-142 this held only inductively:
+-- every command leaving `assigned`/`running` closed its assignment in the same
+-- transaction, an eight-module argument with nothing enforcing it. The partial
+-- unique index makes it structural, so `assign`'s `stale_open_assignment` guard
+-- degrades from a live defence to a genuine assertion.
+--
+-- Closed rows are exempt by design: `completed_at IS NULL` keeps the index off
+-- the history, so a task can accumulate any number of completed assignments.
+-- A plain UNIQUE(task_id, completed_at) would NOT work — SQLite treats each NULL
+-- as distinct, so it would constrain the closed rows and permit the open ones,
+-- exactly backwards.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_assign_one_open
+    ON assignment(task_id) WHERE completed_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_rel_from     ON relation(from_task_id, kind);
 CREATE INDEX IF NOT EXISTS idx_rel_to       ON relation(to_task_id, kind);
