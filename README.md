@@ -8,8 +8,8 @@ Common workflows are wrapped in a [`justfile`](./justfile):
 
     just install        # build + install qp to ~/.cargo/bin
     just build          # release build only
-    just test           # run the test suite
-    just lint           # formatting + rustdoc warning gate
+    just test           # run the test suite, one target at a time
+    just lint           # formatting + rustdoc + clippy gates, then `just test`
     just docs           # build browsable rustdoc
     just check-lean     # verify stripped-binary size + RSS budget
 

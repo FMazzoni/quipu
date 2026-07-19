@@ -407,9 +407,14 @@ reviewer can map every hunk to a finding without re-deriving it.
 Whatever you changed, run `just lint`. It must be green with no pre-existing
 failures to excuse. It gates `cargo rustdoc -- -D warnings` (so an unclosed
 HTML tag or a stray untagged code fence is an error, not a warning you have to
-grep for) and `cargo test`, which runs `tests/docs.rs` — the mechanical check
+grep for) and the suite, which runs `tests/docs.rs` — the mechanical check
 on `//!` header shape, summary length, and pointer targets. Both are stricter
 than reading the output yourself; do not substitute a narrower command.
+
+`just lint` is safe to run as an agent: it delegates its test step to `just
+test`, which loops the targets one rustc at a time rather than issuing the bare
+`cargo test` that `qp-implement` forbids (QP-167). Run the recipe, not a
+hand-rolled subset of it.
 
 If `just lint` fails on something you did not touch, that is a finding: file
 it, do not fold the fix into a docs ticket.
