@@ -29,8 +29,8 @@ Almost everything in the codebase is one of these three things.
 
 ### 1. A state machine, one per task
 
-<svg viewBox="0 0 820 200" width="100%" style="max-width:820px" role="img"
-     aria-label="Task state machine: pending to ready via refresh_ready, ready to assigned via assign, assigned to running via claim, running to done via complete. Abandon or reclaim return assigned or running to pending. Any non-terminal state can be cancelled."
+<svg viewBox="0 -34 820 234" width="100%" style="max-width:820px" role="img"
+     aria-label="Task state machine: pending to ready via refresh_ready, and ready back to pending via depends when a new unresolved dependency is added. Ready to assigned via assign, assigned to running via claim, running to done via complete. Abandon or reclaim return assigned or running to pending. Any non-terminal state can be cancelled."
      xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor">
   <defs>
     <marker id="qp-arrow" viewBox="0 0 10 10" refX="9" refY="5"
@@ -51,6 +51,7 @@ Almost everything in the codebase is one of these three things.
       <text x="282" y="30">assign</text>
       <text x="452" y="30">claim</text>
       <text x="614" y="30">complete</text>
+      <text x="130" y="-18">depends (new unresolved dep)</text>
       <text x="300" y="136">abandon / reclaim</text>
       <text x="345" y="165">cancel</text>
     </g>
@@ -69,6 +70,7 @@ Almost everything in the codebase is one of these three things.
     <path d="M244,53 H314"/>
     <path d="M414,53 H484"/>
     <path d="M576,53 H646"/>
+    <path d="M207,36 V-4 H52 V30"/>
     <path d="M533,70 V118 H52 V76"/>
     <path d="M130,172 H562" stroke-dasharray="5 4"/>
   </g>
@@ -81,7 +83,9 @@ Almost everything in the codebase is one of these three things.
 <summary>Same diagram as text (for viewers that strip inline SVG)</summary>
 
 ```text
-                   assign            claim           complete
+        depends (new unresolved dep)
+     ┌──────────┐
+     ▼          │  assign            claim           complete
   pending ──▶ ready ──────▶ assigned ──────▶ running ──────────▶ done
      ▲                           │               │
      │  refresh_ready            └───────────────┘
