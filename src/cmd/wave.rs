@@ -1,4 +1,4 @@
-//! Group in-flight work by state: ready, assigned, running, pending.
+//! Group in-flight work by state; `pending` lists only tasks with an unresolved dep.
 
 use crate::{db, store};
 use anyhow::Result;

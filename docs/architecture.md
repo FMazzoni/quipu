@@ -106,9 +106,16 @@ it to `ready` when they do. One rule, one place.
 
 ### 2. A DAG that decides `pending` vs `ready`
 
-The `dep` table. Exactly one function computes readiness — `refresh_ready` in
-[`db.rs`](https://github.com/FMazzoni/quipu/blob/main/src/db.rs) — and any command that might resolve a dependency calls
-it. A task is `ready` when no dependency is left in a non-terminal state.
+The `dep` table. A task is `ready` when no dependency is left in a non-terminal
+state.
+
+Promotion has exactly one implementation: `refresh_ready` in
+[`db.rs`](https://github.com/FMazzoni/quipu/blob/main/src/db.rs), which any command that might resolve a dependency
+calls. The reverse edge is separate — adding an unresolved dependency to a
+`ready` task demotes it back to `pending`, and that guarded `UPDATE` lives in
+[`depends.rs`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/depends.rs). The unresolved-dependency predicate
+itself is therefore written in more than one place; `store.rs` documents the
+read-side copy. Adding a terminal state means updating each of them.
 
 Cycle prevention lives in `would_cycle`, a recursive CTE in the same file.
 
@@ -190,10 +197,17 @@ Scrutiny should follow risk, not line count.
 
 ```text
 main.rs      clap subcommand enum → dispatch. Routing only.
-  db.rs      connection, PRAGMAs, migrations, transactions, guarded-transition helpers
+  db.rs      connection, PRAGMAs, migrations, transactions, error taxonomy,
+             guarded-transition helpers
   store.rs   canonical read queries + the row types they return
+  outcome.rs the Outcome trait and emit — one success payload per mutator,
+             rendered as either JSON or a prose line
   cmd/*.rs   argument parsing and rendering
 ```
+
+`outcome.rs` is why `--json` is not a second code path: a mutator builds one
+struct and `emit` chooses the representation, so the two output modes cannot
+drift apart.
 
 [`store.rs`](https://github.com/FMazzoni/quipu/blob/main/src/store.rs) exists because the same read queries were
 hand-written across many command files in subtly divergent forms. Its own module
@@ -264,14 +278,16 @@ echo — never the raw argument the user typed.
 
 ## Exit codes
 
-Set in [`main.rs`](https://github.com/FMazzoni/quipu/blob/main/src/main.rs). Agents branch on these, so they are a
-contract:
+Agents branch on these, so they are a contract. They come from two places:
+`QuipuError::exit_code` in [`db.rs`](https://github.com/FMazzoni/quipu/blob/main/src/db.rs) maps the error taxonomy to
+0/1/2, and [`main.rs`](https://github.com/FMazzoni/quipu/blob/main/src/main.rs) applies it; `wait` exits 3 and 4
+directly.
 
 | code | meaning |
 |---|---|
 | 0 | success |
-| 1 | generic error / invalid input |
-| 2 | constraint violation — wrong state, wrong assignee, already claimed |
+| 1 | `invalid_input`, or any error outside the taxonomy |
+| 2 | `conflict`, `not_owner`, `not_found`, `invariant` — the state of the store refused the operation |
 | 3 | `wait` timed out |
 | 4 | `wait --cohort-done` matched an empty cohort |
 
