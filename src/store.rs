@@ -144,11 +144,23 @@ pub struct TaskRow {
 /// Filter for `tasks`. Every field is optional/empty-by-default so call
 /// sites only populate what they actually filter on (`tree.rs` uses only
 /// `tier`; `list.rs` uses all four).
+///
+/// The two free-text predicates — `assigned_to_glob` and `tag_globs` — both
+/// match with SQLite `GLOB`, deliberately and identically. A pattern with no
+/// wildcard degrades to exact match, so globbing is a strict superset of the
+/// old `=` behaviour for every input that is not itself glob syntax. The
+/// consequence worth knowing before "fixing" this: `[` and `]` are
+/// character-class metacharacters, so an agent_id or tag containing literal
+/// brackets cannot be matched by pasting it in verbatim (QP-41, closed as
+/// accepted). Escaping brackets was rejected — SQLite `GLOB` has no escape
+/// syntax, so honouring literals means rewriting the pattern into a
+/// `LIKE`/`instr` hybrid and giving the two predicates different matching
+/// languages. One language applied uniformly beats two dialects.
 #[derive(Default)]
 pub struct TaskFilter<'a> {
     pub state: Option<&'a str>,
     pub assigned_to_glob: Option<&'a str>,
-    pub tags: &'a [String],
+    pub tag_globs: &'a [String],
     pub tier: Option<&'a str>,
 }
 
@@ -182,8 +194,10 @@ pub fn tasks(conn: &Connection, f: &TaskFilter) -> Result<Vec<TaskRow>> {
         ));
         params.push(Box::new(who.to_string()));
     }
-    for tag in f.tags {
-        sql.push_str(" AND EXISTS (SELECT 1 FROM tag WHERE tag.task_id = t.id AND tag.name = ?)");
+    for tag in f.tag_globs {
+        sql.push_str(
+            " AND EXISTS (SELECT 1 FROM tag WHERE tag.task_id = t.id AND tag.name GLOB ?)",
+        );
         params.push(Box::new(tag.clone()));
     }
     if let Some(tier) = f.tier {

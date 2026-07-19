@@ -20,7 +20,7 @@ pub fn run(db_path: &std::path::Path, a: WaveArgs) -> Result<()> {
         let filter = store::TaskFilter {
             state: Some(label),
             assigned_to_glob: None,
-            tags: &[],
+            tag_globs: &[],
             tier: None,
         };
         let mut rows = store::tasks(&conn, &filter)?;

@@ -1,4 +1,11 @@
 //! List tasks with filters.
+//!
+//! Both free-text filters — `--assigned-to` and `--tag` — are SQLite `GLOB`
+//! patterns, and repeated `--tag` flags AND together (a task must carry a
+//! match for every one). A pattern with no wildcard is an exact match, so
+//! every invocation written against the older exact-match `--tag` keeps
+//! working. See `store::TaskFilter` for why both predicates share one
+//! matching language and why literal `[`/`]` are not escapable.
 
 use crate::{db, store};
 use anyhow::Result;
@@ -11,6 +18,7 @@ pub struct ListArgs {
     pub assigned_to: Option<String>,
     #[arg(long = "state")]
     pub state: Option<db::State>,
+    /// Glob pattern (e.g. commit:5c5b30*); repeatable, all must match
     #[arg(long)]
     pub tag: Vec<String>,
     #[arg(long)]
@@ -25,7 +33,7 @@ pub fn run(db_path: &std::path::Path, a: ListArgs) -> Result<()> {
     let filter = store::TaskFilter {
         state: a.state.map(|s| s.as_str()),
         assigned_to_glob: a.assigned_to.as_deref(),
-        tags: &a.tag,
+        tag_globs: &a.tag,
         tier: None,
     };
     let core = store::tasks(&conn, &filter)?;

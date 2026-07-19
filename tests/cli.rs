@@ -2341,6 +2341,141 @@ fn list_assigned_to_exact_match_still_works() {
     assert_eq!(ids, vec!["QP-1"]);
 }
 
+/// Reads `list --json` and returns the display_ids in order.
+fn list_ids(out: &assert_cmd::assert::Assert) -> Vec<String> {
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["display_id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// QP-49's motivating case: commit SHAs were normalised to 6 chars purely
+/// because `--tag` could not prefix-match. With GLOB the 6/7-char mix that
+/// actually exists in the dogfood db is reachable by one pattern.
+#[test]
+fn list_tag_supports_glob_pattern() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db)
+        .args(["add", "a", "--tag", "commit:5c5b30"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["add", "b", "--tag", "commit:5c5b30f"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["add", "c", "--tag", "commit:abcdef"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["list", "--tag", "commit:5c5b30*", "--json"])
+        .assert()
+        .success();
+    assert_eq!(list_ids(&out), vec!["QP-1", "QP-2"]);
+}
+
+/// The compatibility half of QP-49: a wildcard-free pattern must stay an
+/// exact match, so `--tag wave:1` cannot start dragging in `wave:11`.
+#[test]
+fn list_tag_without_wildcard_is_exact() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db)
+        .args(["add", "a", "--tag", "wave:1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["add", "b", "--tag", "wave:11"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["list", "--tag", "wave:1", "--json"])
+        .assert()
+        .success();
+    assert_eq!(list_ids(&out), vec!["QP-1"]);
+}
+
+/// Repeated `--tag` flags AND together — globbing must not turn the
+/// conjunction into a union.
+#[test]
+fn list_tag_globs_and_together() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db)
+        .args(["add", "a", "--tag", "kind:bug", "--tag", "wave:3"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["add", "b", "--tag", "kind:bug"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["list", "--tag", "kind:*", "--tag", "wave:*", "--json"])
+        .assert()
+        .success();
+    assert_eq!(list_ids(&out), vec!["QP-1"]);
+}
+
+/// QP-41, closed as accepted rather than fixed: `[` and `]` are GLOB
+/// character-class syntax, so a bracketed agent_id is not matchable by
+/// pasting it in verbatim — `claude-code[worker]` reads as "claude-cod"
+/// followed by one character from a class. This test pins the behaviour so
+/// that adding escaping later is a deliberate decision rather than a silent
+/// one, and pins the workaround (`?` in the bracket positions). `--tag`
+/// behaves identically because both predicates speak one language.
+#[test]
+fn list_glob_brackets_are_character_classes_not_literals() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "claude-code[worker]"])
+        .assert()
+        .success();
+
+    // Verbatim paste does not match: the brackets are consumed as syntax.
+    let out = qp(&db)
+        .args(["list", "--assigned-to", "claude-code[worker]", "--json"])
+        .assert()
+        .success();
+    assert!(list_ids(&out).is_empty());
+
+    // The documented workaround: `?` matches the bracket characters.
+    let out = qp(&db)
+        .args(["list", "--assigned-to", "claude-code?worker?", "--json"])
+        .assert()
+        .success();
+    assert_eq!(list_ids(&out), vec!["QP-1"]);
+
+    // A tag with brackets behaves the same way — one language, not two.
+    qp(&db)
+        .args(["add", "b", "--tag", "ref:[x]"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["list", "--tag", "ref:[x]", "--json"])
+        .assert()
+        .success();
+    assert!(list_ids(&out).is_empty());
+    let out = qp(&db)
+        .args(["list", "--tag", "ref:?x?", "--json"])
+        .assert()
+        .success();
+    assert_eq!(list_ids(&out), vec!["QP-2"]);
+}
+
 #[test]
 fn status_shows_all_states_including_zero() {
     let tmp = tempfile::tempdir().unwrap();
