@@ -1,0 +1,105 @@
+<!--
+  Injected into every rustdoc page via:
+      RUSTDOCFLAGS="--html-after-content docs/assets/verify-button.html"
+
+  --html-after-content places this immediately before </body>, so the DOM is
+  already parsed and no DOMContentLoaded wrapper is needed. (--html-in-header
+  would land inside <head> and require one.)
+
+  Purpose: a reporting shortcut. When a human reading the docs notices a
+  statement that looks wrong, one click copies a ready-to-paste command that
+  points the verify-docs skill at the exact file and section they were reading.
+
+  This is NOT drift detection. `/qp-verify-docs --sweep` is the detector.
+-->
+<style>
+  #qp-verify {
+    position: fixed; right: 1rem; bottom: 1rem; z-index: 100;
+    font: inherit; font-size: 0.82rem; line-height: 1.2;
+    padding: 0.5rem 0.75rem; border-radius: 6px; cursor: pointer;
+    color: var(--main-color, #222);
+    background: var(--main-background-color, #fff);
+    border: 1px solid var(--border-color, #bbb);
+    box-shadow: 0 1px 5px rgba(0,0,0,0.22);
+    transition: border-color 0.15s ease;
+  }
+  /* Deliberately NOT element-level opacity: that would make the background
+     translucent too and the page text behind it bleeds through unreadably.
+     Keep the background solid and stay unobtrusive via size and border. */
+  #qp-verify:hover, #qp-verify:focus-visible { border-color: var(--link-color, #3873ad); }
+  #qp-verify[data-copied="1"] { border-color: var(--link-color, #3873ad); }
+</style>
+<script>
+(function () {
+  "use strict";
+
+  // Which file did the prose on this page come from?
+  function sourcePath() {
+    // Crate root: the architecture prose is pulled in from markdown via
+    // #[doc = include_str!("../docs/architecture.md")], so the file to fix is
+    // the markdown — not main.rs, which merely references it.
+    if (/\/index\.html$/.test(location.pathname) && /\/qp\/index\.html$/.test(location.pathname)) {
+      return "docs/architecture.md";
+    }
+    // Every other page: reuse rustdoc's own "Source" link, which points at
+    // ../src/<crate>/<path>.rs.html — map it back to the repo path.
+    var a = document.querySelector(".main-heading a.src, a.src");
+    if (!a) { return null; }
+    var m = (a.getAttribute("href") || "").match(/src\/[^/]+\/(.+)\.rs\.html/);
+    return m ? "src/" + m[1] + ".rs" : null;
+  }
+
+  // The last heading scrolled past — i.e. the section the reader is looking at.
+  // Heading ids are rustdoc slugs derived from heading TEXT, so they survive
+  // edits and reordering in a way that prose positions do not.
+  function nearestAnchor() {
+    var hs = document.querySelectorAll("h2[id], h3[id]");
+    var best = null;
+    for (var i = 0; i < hs.length; i++) {
+      if (hs[i].getBoundingClientRect().top <= 80) { best = hs[i]; } else { break; }
+    }
+    return best && best.id ? best.id : null;
+  }
+
+  function copy(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+    // Fallback for contexts where the async clipboard API is unavailable.
+    // This is what rustdoc's own copy-path button uses.
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); } finally { document.body.removeChild(ta); }
+    return Promise.resolve();
+  }
+
+  var src = sourcePath();
+  if (!src) { return; }  // nothing citable on this page — no button
+
+  var btn = document.createElement("button");
+  btn.id = "qp-verify";
+  btn.type = "button";
+  var LABEL = "Doc wrong? Copy fix command";
+  btn.textContent = LABEL;
+  btn.title = "Copies a /qp-verify-docs command for the section you are reading";
+
+  btn.addEventListener("click", function () {
+    var anchor = nearestAnchor();
+    var cmd = "/qp-verify-docs " + src + (anchor ? "#" + anchor : "");
+    copy(cmd).then(function () {
+      btn.textContent = "Copied: " + cmd;
+      btn.setAttribute("data-copied", "1");
+      setTimeout(function () {
+        btn.textContent = LABEL;
+        btn.removeAttribute("data-copied");
+      }, 2600);
+    });
+  });
+
+  document.body.appendChild(btn);
+})();
+</script>
