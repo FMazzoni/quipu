@@ -290,7 +290,7 @@ directly.
 | code | meaning |
 |---|---|
 | 0 | success |
-| 1 | `invalid_input`, or any error outside the taxonomy |
+| 1 | `invalid_input` — bad CLI input, including argument-parse failures — or any error outside the taxonomy |
 | 2 | `conflict`, `not_owner`, `not_found`, `invariant` — the state of the store refused the operation |
 | 3 | `wait` timed out |
 | 4 | `wait --cohort-done` matched an empty cohort |
@@ -298,18 +298,20 @@ directly.
 Code 2 is the interesting one: it is the *expected* outcome of losing a race, not
 a failure.
 
-Two outcomes fall outside that contract and will surprise you:
+One outcome sits outside that contract, and it is not an exit code at all.
 
-| code | when | status |
-|---|---|---|
-| 2 | clap's own argument parsing failed — unknown flag, missing required arg. *Not* a store conflict | clap's default, not ours. Tell them apart by the `error: unexpected argument` prose and the absence of a `{"error": ...}` envelope under `--json` |
-| 101 | Rust panic on **broken pipe** — stdout closed while `qp` was still writing | unfixed; tracked as QP-139 |
+When the reader of a pipe closes early — `qp list | head -1` — `qp` dies by
+`SIGPIPE`, the way any well-behaved Unix filter does. A shell reports that as
+**141** (128 + signal 13). It is a *wait status*, not an exit code: the command
+did not fail, its reader left. Do not branch on it, and do not treat it as an
+error in a wrapper.
 
-101 is the trap. `qp show QP-1 | head -1` exits 101 with
-`failed printing to stdout: Broken pipe (os error 32)` on stderr. It means the
-reader went away, not that `qp` crashed or that the store is damaged. It only
-fires when the output outruns the pipe buffer, so short output pipes cleanly and
-the bug reads as intermittent.
+Two things that used to be true here and no longer are, in case you meet an old
+ticket or a cached binary: `qp` used to panic on a closed pipe and exit **101**
+(QP-139), and clap's argument-parse failures used to exit **2**, colliding with
+retryable store conflicts (QP-150). Both are fixed. A parse failure is now
+`invalid_input` — exit 1, with a proper `{"error": ...}` envelope under `--json`
+like every other error.
 
 ## Barriers
 
@@ -344,7 +346,7 @@ explanation.
 | barrier exits 4 | `qp list --tag <t>` | `--cohort-done` matched zero tasks: wrong tag, or nothing tagged yet |
 | barrier exits 3 | `qp wave` | `--timeout-secs` elapsed with the cohort still unfinished. A timeout, not a conflict |
 | an expected event is absent from `qp timeline` | `qp timeline <id>` | `insert_event` runs *inside* the same transaction as the mutation, so a failed mutation writes no event at all. The timeline is byte-identical before and after an exit-2 command — absence of an event is positive evidence the transition never landed |
-| exit 101 mid-pipeline | rerun without the pipe | broken pipe; see the exit-codes section above. QP-139 |
+| exit 141 mid-pipeline | nothing — this is normal | the reader closed first (`\| head`); `qp` died by `SIGPIPE` like any filter. Not an error |
 | `{"warning": {"kind": "project_uuid_mismatch"}}` | `qp status` | `--db`/`QP_DB` points at a different store than the working directory would have resolved to. See the store-discovery tiers in `README.md` |
 
 The error-envelope shape per `kind` — which fields are actually present, and why
