@@ -69,9 +69,11 @@ pub fn run(a: InstallSkillsArgs) -> Result<()> {
     Ok(())
 }
 
-/// Defence-in-depth: refuse to remove a path that is too shallow (e.g. a
-/// relative path resolved against an unexpected cwd) or that doesn't look
-/// like one of our own `qp-<name>` install targets.
+/// Defence-in-depth before a recursive remove.
+///
+/// Refuses a path that is too shallow (e.g. a relative path resolved against
+/// an unexpected cwd) or that doesn't look like one of our own `qp-<name>`
+/// install targets.
 fn guard_destructive_target(dst: &std::path::Path) -> Result<()> {
     let name_ok = dst
         .file_name()

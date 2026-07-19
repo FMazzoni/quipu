@@ -106,8 +106,9 @@ enum Cmd {
     Show(cmd::show::ShowArgs),
 }
 
-/// Success output for `qp init`, the one command whose `Outcome` lives here
-/// rather than in a `cmd` module.
+/// Success output for `qp init`.
+///
+/// The one command whose `Outcome` lives here rather than in a `cmd` module.
 ///
 /// `prefix` is read back out of the store after `db::init` rather than echoing
 /// `--prefix`, because re-initializing an existing store keeps the original
@@ -179,8 +180,10 @@ fn wants_json(cmd: &Cmd) -> bool {
     }
 }
 
-/// Restores the default disposition for `SIGPIPE`, making `qp` behave like a
-/// normal Unix filter when a reader closes early.
+/// Restores the default disposition for `SIGPIPE`.
+///
+/// That is what makes `qp` behave like a normal Unix filter when a reader
+/// closes early.
 ///
 /// The Rust runtime sets `SIGPIPE` to `SIG_IGN` before `main`, so a write to a
 /// closed pipe returns `EPIPE` and the `println!` family *panics* — `qp show X
@@ -259,8 +262,10 @@ fn handle_parse_error(err: clap::Error) -> ! {
     std::process::exit(1);
 }
 
-/// Parses, dispatches, and renders whatever error comes back as the process
-/// exit code and the `{"error": ...}` envelope.
+/// Parses, dispatches, and renders the result.
+///
+/// Whatever error comes back becomes the process exit code and the
+/// `{"error": ...}` envelope.
 fn main() {
     restore_sigpipe_default();
     let cli = match Cli::try_parse() {

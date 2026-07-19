@@ -345,8 +345,10 @@ fn read_project_uuid(path: &Path) -> Result<Option<String>> {
 /// took this from "2" to "3" for exactly that reason.
 pub const SCHEMA_VERSION: &str = "3";
 
-/// Open the connection and set pragmas. Shared by both the hot path
-/// (`open`) and init-time (`init`) — no migration, no prefix handling.
+/// Open the connection and set pragmas.
+///
+/// Shared by both the hot path (`open`) and init-time (`init`) — no migration,
+/// no prefix handling.
 fn open_conn(path: &Path) -> Result<Connection> {
     if let Some(p) = path.parent() {
         std::fs::create_dir_all(p)?;
@@ -364,12 +366,13 @@ fn open_conn(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Migration contract: read the stamped schema_version. If it matches
-/// SCHEMA_VERSION, DDL is up to date and we skip the schema re-apply on the
-/// hot path (saves 1–3 ms per invocation on already-initialized stores).
-/// If it is missing, this is either a fresh db or a pre-versioning store —
-/// apply the DDL and stamp meta rows via INSERT OR IGNORE (idempotent, no
-/// read-then-write).
+/// Bring the schema up to date, keyed off the stamped `schema_version`.
+///
+/// If the stamp matches `SCHEMA_VERSION`, DDL is up to date and we skip the
+/// schema re-apply on the hot path (saves 1–3 ms per invocation on
+/// already-initialized stores). If it is missing, this is either a fresh db or
+/// a pre-versioning store — apply the DDL and stamp meta rows via
+/// INSERT OR IGNORE (idempotent, no read-then-write).
 ///
 /// On a genuinely fresh db, `meta` doesn't exist yet — that's a real
 /// `no such table` error, not a "no rows" case, so `.optional()` alone

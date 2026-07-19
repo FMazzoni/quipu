@@ -252,9 +252,11 @@ pub fn latest_agent(conn: &Connection, task_id: i64) -> Result<Option<String>> {
     .map_err(Into::into)
 }
 
-/// SQLite's variable limit (32,766 in the modern amalgamation this crate
-/// bundles) — chunk bulk `IN (...)` lookups under it. Theoretical at current
-/// task-count scales, but the bulk helpers below make chunking free.
+/// Chunk size for bulk `IN (...)` lookups, held under SQLite's variable limit.
+///
+/// That limit is 32,766 in the modern amalgamation this crate bundles.
+/// Theoretical at current task-count scales, but the bulk helpers below make
+/// chunking free.
 const SQL_VAR_CHUNK: usize = 32_000;
 
 fn placeholders(n: usize) -> String {

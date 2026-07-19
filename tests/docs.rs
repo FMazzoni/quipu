@@ -38,20 +38,21 @@
 //! contiguous header block at the top of a file; rule 7 is the only one that
 //! scans the whole body.
 //!
-//! Rule 7 governs `pub` *items* — `fn`, `struct`, `enum`, `trait`, `const` and
-//! the rest of `DOC_ITEM_KEYWORDS` — and not `pub` struct fields, which parse
-//! the same way and are excluded deliberately. A field renders on its struct's
-//! page as a definition list entry carrying its doc in full; it never appears
-//! in a summary table, so there is nothing for the budget to protect. Three
+//! Rule 7 governs *items* — `fn`, `struct`, `enum`, `trait`, `const` and the
+//! rest of `DOC_ITEM_KEYWORDS` — regardless of visibility. Visibility was
+//! briefly part of the test and should not be again: quipu is a binary crate,
+//! so rustdoc documents private items by default and they get rows in the same
+//! item table. Checking `pub` only let nine private items sit over budget,
+//! `db::migrate` (374 chars) worst; QP-172 dropped the filter and split them.
+//!
+//! Struct fields and enum variants parse the same way and *are* excluded
+//! deliberately. A field renders on its struct's page as a definition list
+//! entry carrying its doc in full and never appears in a summary table, so
+//! there is nothing for the budget to protect — confirmed on the rendered
+//! `cmd/report/struct.ReportArgs.html`, where the three-line `json` field
+//! prints whole under `§json: bool` and the sidebar carries names only. Three
 //! fields exceed 100 chars today (`cmd/decisions.rs`, `cmd/report.rs`,
 //! `cmd/wait.rs`) and read correctly where they render.
-//!
-//! Known gap: rule 7 checks `pub` items only, and quipu is a binary crate, so
-//! rustdoc documents private items too — they get rows in the same table. Nine
-//! private items exceed the budget today, `db::migrate` (370 chars) worst.
-//! Dropping the `pub` requirement is the fix and is a one-line change to
-//! `is_documented_pub_item`; it was left out of QP-160 because the offenders
-//! sit in files that slice did not own.
 //!
 //! A rule requiring *every* `pub` item to carry a doc was considered and
 //! rejected. It fires on 29 items, ~20 of which are the uniform command
@@ -147,28 +148,35 @@ fn pointer_target(line: &str) -> Option<&str> {
 
 /// Item keywords rule 7 applies to.
 ///
-/// A `pub` line whose next token is not one of these is a struct field
-/// (`pub since_id: Option<i64>,`). Fields render on the struct page as a
-/// definition list with the doc in full — there is no summary table to blow
-/// out, so the budget that motivates rule 7 does not apply to them.
+/// A declaration whose leading token is not one of these is a struct field
+/// (`pub since_id: Option<i64>,`) or an enum variant. Both render on their
+/// type's page as a definition list carrying the doc in full — there is no
+/// summary table to blow out, so the budget that motivates rule 7 does not
+/// apply to them. Verified against `cmd/report/struct.ReportArgs.html`, where
+/// the three-line `json` field prints in full under `§json: bool` and the
+/// sidebar lists field names only.
 const DOC_ITEM_KEYWORDS: &[&str] = &[
     "fn", "struct", "enum", "trait", "const", "static", "type", "mod", "union", "macro", "use",
 ];
 
-/// Whether a source line declares a `pub` item rule 7 governs.
-fn is_documented_pub_item(line: &str) -> bool {
-    let t = line.trim_start();
-    let rest = if let Some(r) = t.strip_prefix("pub(") {
+/// Whether a source line declares an item rule 7 governs.
+///
+/// Visibility is deliberately not part of the test. quipu is a binary crate,
+/// so rustdoc documents private items by default and they get rows in the same
+/// item table as the public ones — `db::migrate` was 370 chars and rendering
+/// long before anyone noticed, because the rule as first written only looked
+/// at `pub` (QP-172). A `pub` or `pub(...)` prefix is stripped if present and
+/// then ignored.
+fn is_documented_item(line: &str) -> bool {
+    let mut rest = line.trim_start();
+    if let Some(r) = rest.strip_prefix("pub(") {
         match r.split_once(')') {
-            Some((_, after)) => after,
+            Some((_, after)) => rest = after.trim_start(),
             None => return false,
         }
-    } else {
-        match t.strip_prefix("pub") {
-            Some(r) => r,
-            None => return false,
-        }
-    };
+    } else if let Some(r) = rest.strip_prefix("pub ") {
+        rest = r.trim_start();
+    }
     let Some(word) = rest.split_whitespace().next() else {
         return false;
     };
@@ -189,7 +197,7 @@ fn first_doc_paragraph(block: &[&str]) -> String {
         .join(" ")
 }
 
-/// Rule 7 — the first paragraph of a `///` block on a `pub` item fits the
+/// Rule 7 — the first paragraph of a `///` block on an item fits the
 /// module-table budget.
 ///
 /// Separate from the header test because it is the only rule that scans past
@@ -230,7 +238,7 @@ fn item_docs_follow_convention() {
                 j += 1;
             }
             let Some(item) = lines.get(j) else { continue };
-            if !is_documented_pub_item(item) {
+            if !is_documented_item(item) {
                 continue;
             }
             let item = item.trim_start();
