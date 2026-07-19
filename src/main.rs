@@ -1,6 +1,21 @@
 //! `qp` — quipu CLI entry point. Parses subcommands and dispatches to `src/cmd/<name>.rs`.
-//! Exit codes: 0 success | 1 invalid input or untyped error | 2 conflict, not-owner,
-//! not-found or invariant | 3 wait timed out | 4 wait --cohort-done matched an empty cohort.
+//!
+//! Exit codes: 0 success | 1 invalid input (including argument-parse failures),
+//! or untyped error | 2 conflict, not-owner, not-found or invariant | 3 wait
+//! timed out | 4 wait --cohort-done matched an empty cohort.
+//!
+//! Two rows of that table are load-bearing for agents and easy to break again:
+//!
+//! 1 vs 2. Only 2 means "the store said no — retrying may succeed". A malformed
+//! flag must never land there, or a skill retrying on 2 loops forever on a typo.
+//! Clap's default is to exit 2 on a parse failure, so `handle_parse_error`
+//! intercepts it and re-reports it as `invalid_input`, exit 1, with the same
+//! `{"error": ...}` envelope every other failure emits under `--json`.
+//!
+//! There is no 101 and no row for a broken pipe. `restore_sigpipe_default`
+//! makes an early reader close kill the process by signal instead of panicking
+//! through `println!`; a shell reports that as 141, which is a wait status
+//! rather than an exit code and is deliberately not part of the contract.
 //!
 //! Architecture overview — state machine, guarded-transition contract, module
 //! map — lives in `docs/architecture.md`, included below rather than inlined so
@@ -171,10 +186,94 @@ fn wants_json(cmd: &Cmd) -> bool {
     }
 }
 
+/// Restores the default disposition for `SIGPIPE`, making `qp` behave like a
+/// normal Unix filter when a reader closes early.
+///
+/// The Rust runtime sets `SIGPIPE` to `SIG_IGN` before `main`, so a write to a
+/// closed pipe returns `EPIPE` and the `println!` family *panics* — `qp show X
+/// | head -1` exited 101, a code outside the documented contract (QP-139). It
+/// looked intermittent because it is a race between our flushes and the
+/// reader's close, not a buffer-size threshold: the same command with byte-
+/// identical output panicked 15 times in 20. Commands that write once (`status`)
+/// never tripped it, which is why it hid for so long — that, and `$?` after a
+/// pipeline reporting the *reader's* status, so casual checks showed 0.
+///
+/// Restoring `SIG_DFL` is one call that covers every present and future output
+/// path. Handling `EPIPE` at each call site was rejected: it is the same fix
+/// spread across every `cmd` module, and the ticket's own framing ("easy to miss
+/// a path") is the failure mode. The consequence is that `qp` is now *killed by
+/// signal 13* rather than exiting — wait-status semantics, not an exit code, but
+/// shells surface it as 141, so the exit-code tables must say so.
+///
+/// Must run before any output. Safety: `signal` with `SIG_DFL` is
+/// async-signal-safe and this is single-threaded startup, before any writes.
+#[cfg(unix)]
+fn restore_sigpipe_default() {
+    // SAFETY: setting a signal disposition to SIG_DFL is always well-defined,
+    // and no other thread exists yet to observe the change.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn restore_sigpipe_default() {}
+
+/// Renders a clap parse failure through the same contract as every other error.
+///
+/// Clap exits the process itself on a parse failure, before `real_main` runs, so
+/// a typo bypassed the error envelope entirely: `qp wait --timeout 1 --json`
+/// printed bare prose to stderr and exited 2 — the code documented as "conflict,
+/// retry may succeed". A skill retrying on 2 looped forever on a typo, and under
+/// `--json` it was parsing stderr that was not JSON Lines (QP-150).
+///
+/// The fix is not a new exit code. A parse failure *is* bad CLI input, and
+/// `QuipuError::InvalidInput` already maps to exit 1 in the published table, so
+/// routing usage errors there makes 1 and 2 mean what the docs always claimed
+/// rather than redefining either. Giving usage errors a code of their own (64 /
+/// `EX_USAGE`) was rejected for that reason: it would add a row to a contract
+/// that agents branch on, to fix a problem the existing rows already describe.
+///
+/// `--json` is sniffed from the raw argv because parsing is precisely what
+/// failed — `wants_json` needs a parsed `Cmd` that does not exist here.
+fn handle_parse_error(err: clap::Error) -> ! {
+    use clap::error::ErrorKind;
+    // `--help`/`--version` are successful requests for output, not failures:
+    // clap prints them to stdout and the process exits 0.
+    if matches!(
+        err.kind(),
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+    ) {
+        err.exit();
+    }
+    let json = std::env::args().any(|a| a == "--json");
+    if json {
+        // Clap's rendering is a multi-line block with a usage hint; the envelope
+        // carries the first line, which is the diagnosis. The rest is help text
+        // that belongs on a terminal, not in a machine-read `message` field.
+        let rendered = err.render().to_string();
+        let message = rendered
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("invalid arguments")
+            .trim_start_matches("error: ")
+            .to_string();
+        let body = serde_json::json!({"kind": "invalid_input", "message": message});
+        eprintln!("{}", serde_json::json!({"error": body}));
+    } else {
+        let _ = err.print();
+    }
+    std::process::exit(1);
+}
+
 /// Parses, dispatches, and renders whatever error comes back as the process
 /// exit code and the `{"error": ...}` envelope.
 fn main() {
-    let cli = Cli::parse();
+    restore_sigpipe_default();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => handle_parse_error(e),
+    };
     let json = wants_json(&cli.cmd);
     if let Err(e) = real_main(cli, json) {
         if json {

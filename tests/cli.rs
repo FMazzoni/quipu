@@ -3991,7 +3991,9 @@ fn list_state_rejects_invalid_spelling_at_parse_time() {
         .args(["list", "--state", "redy"])
         .assert()
         .failure()
-        .code(2)
+        // Exit 1, not 2 (QP-150): a misspelled value is bad input and can never
+        // be fixed by retrying; 2 is reserved for store conflicts.
+        .code(1)
         .stderr(contains("pending"))
         .stderr(contains("ready"));
 }
@@ -4005,7 +4007,8 @@ fn wait_state_rejects_invalid_spelling_at_parse_time() {
         .args(["wait", "--empty", "--state", "bogus"])
         .assert()
         .failure()
-        .code(2)
+        // Exit 1, not 2 — see `list_state_rejects_invalid_spelling_at_parse_time`.
+        .code(1)
         .stderr(contains("pending"))
         .stderr(contains("ready"));
 }
@@ -4383,4 +4386,185 @@ fn decisions_since_composes_with_auto_only() {
         vec!["auto1", "auto2"],
         "--since must AND with --auto-only, not replace it"
     );
+}
+
+// Exit-code contract: broken pipe (QP-139) and argument-parse failures (QP-150).
+// ---------------------------------------------------------------------------
+
+/// Runs `qp <args>` with stdout on a pipe, reads a single line, then drops the
+/// reader — the `| head -1` idiom, minus the shell.
+///
+/// Uses `std::process::Command` rather than the `qp()` helper because
+/// `assert_cmd` runs the child to completion and hands back a captured buffer;
+/// this test is *about* the reader closing early, so it needs the pipe itself.
+#[cfg(unix)]
+fn run_with_short_reader(db: &std::path::Path, args: &[&str]) -> std::process::ExitStatus {
+    use std::io::BufRead;
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("qp"))
+        .env("QP_DB", db)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    {
+        let stdout = child.stdout.take().unwrap();
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut line = String::new();
+        let _ = reader.read_line(&mut line);
+        // `reader` drops here, closing the read end while `qp` is still writing.
+    }
+    child.wait().unwrap()
+}
+
+/// A reader that closes early must never produce exit 101.
+///
+/// 101 is the Rust panic code: the runtime masks `SIGPIPE`, so `println!` used
+/// to panic on `EPIPE` and take a *successful* command's status with it. This is
+/// a race between our flushes and the reader's close, not a size threshold, so a
+/// single iteration proves nothing — the original bug reproduced 15 times in 20.
+/// Hence the loop. Either outcome is correct: exit 0 if every write landed before
+/// the close, or death by `SIGPIPE` (signal 13) if it did not.
+#[test]
+#[cfg(unix)]
+fn closed_stdout_pipe_never_exits_101() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    // Enough rows that the writer is still going when the reader leaves.
+    for i in 0..60 {
+        qp(&db)
+            .args([
+                "add",
+                &format!("task number {i} with a reasonably long title"),
+            ])
+            .assert()
+            .success();
+    }
+    qp(&db)
+        .args(["log", "QP-1", "note", "an event"])
+        .assert()
+        .success();
+
+    for args in [
+        vec!["list"],
+        vec!["show", "QP-1"],
+        vec!["timeline"],
+        vec!["tree"],
+        vec!["decisions"],
+    ] {
+        for iteration in 0..20 {
+            let status = run_with_short_reader(&db, &args);
+            assert_ne!(
+                status.code(),
+                Some(101),
+                "`qp {}` panicked on a closed pipe (iteration {iteration})",
+                args.join(" ")
+            );
+            let ok = status.success() || status.signal() == Some(libc_sigpipe());
+            assert!(
+                ok,
+                "`qp {}` exited {status:?} on a closed pipe (iteration {iteration}); \
+                 expected success or death by SIGPIPE",
+                args.join(" ")
+            );
+        }
+    }
+}
+
+/// SIGPIPE's number, kept out of the assertion so the intent reads clearly.
+#[cfg(unix)]
+fn libc_sigpipe() -> i32 {
+    13
+}
+
+/// An argument typo must be distinguishable from a store conflict.
+///
+/// Both used to exit 2, the code documented as "conflict — retry may succeed",
+/// so a skill retrying on 2 looped forever on a typo. A parse failure is bad
+/// input: exit 1, the code `invalid_input` already carries.
+#[test]
+fn parse_error_and_store_conflict_have_different_exit_codes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+
+    // Genuine conflict: retryable, exit 2.
+    let conflict = qp(&db)
+        .args(["claim", "QP-1", "--as", "y", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+    assert_eq!(json_stderr(&conflict)["error"]["kind"], "conflict");
+
+    // Typo: never retryable, exit 1.
+    qp(&db)
+        .args(["wait", "--timeout", "1"])
+        .assert()
+        .failure()
+        .code(1);
+}
+
+/// A parse failure under `--json` must emit the error envelope, not bare prose.
+///
+/// Clap exits before `real_main` runs, so this only holds because `main`
+/// intercepts the parse error instead of letting the derive default handle it.
+/// Without that, stderr carried unparseable prose while claiming to be JSON Lines.
+#[test]
+fn parse_error_emits_json_envelope() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+
+    let assert = qp(&db)
+        .args(["wait", "--timeout", "1", "--json"])
+        .assert()
+        .failure()
+        .code(1);
+    let env = json_stderr(&assert);
+    assert_eq!(env["error"]["kind"], "invalid_input");
+    assert!(
+        env["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("--timeout"),
+        "envelope should name the offending argument: {env}"
+    );
+
+    // An unknown subcommand takes the same path.
+    let assert = qp(&db)
+        .args(["frobnicate", "--json"])
+        .assert()
+        .failure()
+        .code(1);
+    assert_eq!(json_stderr(&assert)["error"]["kind"], "invalid_input");
+}
+
+/// `--help` and `--version` are requests for output, not usage errors.
+///
+/// They arrive as `clap::Error` alongside real parse failures, so the handler
+/// has to sort them out; getting this wrong would send help text to exit 1.
+#[test]
+fn help_and_version_still_exit_zero() {
+    Command::cargo_bin("qp")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success();
+    Command::cargo_bin("qp")
+        .unwrap()
+        .arg("--version")
+        .assert()
+        .success();
 }
