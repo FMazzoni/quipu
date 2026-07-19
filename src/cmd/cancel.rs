@@ -50,8 +50,15 @@ pub fn run(db_path: &std::path::Path, a: CancelArgs) -> Result<()> {
                 Some(resolved.display_id.clone()),
             ));
         }
+        // `completed_at IS NULL` in the WHERE is what makes closing the assignment
+        // single-shot; the assignment is written plain because of it. This used to be
+        // `COALESCE(completed_at, ?)`, whose first branch the same WHERE made
+        // unreachable (QP-166) — and worse, it read as protection against clobbering an
+        // already-closed assignment while `outcome = 'cancelled'` next to it had no such
+        // guard. `abandon`, `reclaim`, `complete` and `block` all assign plain; this now
+        // matches them.
         tx.execute(
-            "UPDATE assignment SET outcome = 'cancelled', completed_at = COALESCE(completed_at, ?)
+            "UPDATE assignment SET outcome = 'cancelled', completed_at = ?
               WHERE task_id = ? AND completed_at IS NULL",
             rusqlite::params![crate::time::now_rfc3339(), task_id],
         )?;
