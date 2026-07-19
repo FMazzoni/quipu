@@ -14,6 +14,7 @@ allowed-tools: Read Glob Grep Bash Edit Write
 - [ ] **Bare `./target/release/qp` works** from any worktree (git-common-dir fallback finds the main repo's `.quipu/`). Never set `QP_DB=...`.
 - [ ] **Narrow tests only.** `cargo test --test cli -- <filter>` or a specific test file. NEVER bare `cargo test` (no filter) — other agents may be running and parallel rustc invocations OOM the machine.
 - [ ] **One commit.** Conventional style (`feat(cmd): ...`, `fix(db): ...`). No Co-Authored-By trailer. No "Generated with Claude Code" footer.
+- [ ] **Every file you touch exits with a `//!` header.** One short sentence, a period, then a blank `//!` line before any detail — rustdoc uses everything before that blank line as the module-list summary, so a multi-line first paragraph renders as a wall of text in the table. For a command module, the summary is which state-machine edge it implements (`claim` is the `assigned` → `running` edge). Reference files and function names, never line numbers. Fence any example containing `<placeholders>` as ```text or rustdoc deletes them.
 - [ ] **All of CLAUDE.md applies:** guarded state transitions, `with_tx` + `IMMEDIATE`, no async runtime, no `tracing` crate, no `db::now()` (use `time::now_rfc3339`), leanness budget.
 
 ## First three commands
