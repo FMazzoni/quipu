@@ -48,6 +48,26 @@ keeps that cheap — a matching `schema_version` skips the DDL re-apply entirely
 which is worth 1–3 ms on every single invocation and therefore worth having on a
 tool with a cold-start budget.
 
+That saving is also the trap. **Adding DDL to `schema.sql` without bumping
+`SCHEMA_VERSION` ships it to fresh stores only.** Every existing store already
+stamps the matching version, so `migrate` skips `execute_batch(SCHEMA)` entirely
+and the new table or index never appears — and because the DDL is all
+`IF NOT EXISTS`, nothing errors and nothing warns. It looks like it worked. Test
+any schema change against a *copy of a real store*, not just `qp init` in a
+tempdir; a fresh-store test passes either way and proves nothing.
+
+`idx_assign_one_open` (QP-142) is the worked example: a partial unique index on
+`assignment(task_id) WHERE completed_at IS NULL`, which is what now enforces the
+one-open-assignment-per-task invariant that `cmd/assign.rs` previously held up by
+convention alone. It needed the "2" → "3" bump to reach anyone.
+
+A partial unique index added to a store that already violates it fails at
+`CREATE` time — and under this mechanism that means every subsequent `qp`
+invocation errors, so the store is bricked rather than degraded. Query the real
+store for violations before adding one. For QP-142 that check was
+`SELECT task_id, COUNT(*) c FROM assignment WHERE completed_at IS NULL GROUP BY
+task_id HAVING c > 1`, which returned no rows across 152 assignments.
+
 **Path resolution has three tiers, and the third is the surprising one.** An
 explicit `--db`/`QP_DB` wins; otherwise the nearest `.quipu/` walking up from the
 cwd; otherwise the one beside the repo root from `git rev-parse --git-common-dir`.

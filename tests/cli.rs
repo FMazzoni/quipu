@@ -146,17 +146,134 @@ fn assign_rejects_when_stale_open_assignment_exists() {
     assert_eq!(open, 1, "guard must reject, not append");
 }
 
+/// QP-142: the one-open-assignment-per-task invariant is enforced by
+/// `schema.sql`'s `idx_assign_one_open`, not merely by the agreement of the
+/// eight modules that happen to close their assignments.
+///
+/// This deliberately bypasses the CLI. `assign`'s guard rejects a second open
+/// row before SQLite ever sees it, so going through the binary would prove only
+/// that the guard works — which is what `assign_rejects_when_stale_open_assignment_exists`
+/// already covers. A raw INSERT is the only way to ask whether the *storage
+/// layer* would catch a future command that forgets.
+#[test]
+fn unique_index_rejects_second_open_assignment() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success(); // QP-1
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    // First open row: fine.
+    conn.execute(
+        "INSERT INTO assignment(task_id, agent_id) VALUES (1, 'one')",
+        [],
+    )
+    .unwrap();
+    // Second open row for the same task: rejected by the index.
+    let err = conn
+        .execute(
+            "INSERT INTO assignment(task_id, agent_id) VALUES (1, 'two')",
+            [],
+        )
+        .expect_err("a second open assignment must violate idx_assign_one_open");
+    assert!(
+        err.to_string().contains("UNIQUE constraint failed"),
+        "expected a uniqueness violation, got: {err}"
+    );
+
+    // Closing the first row must free the slot — the index covers open rows
+    // only, so history is unconstrained and a task can be reassigned forever.
+    conn.execute(
+        "UPDATE assignment SET completed_at = '2026-01-01T00:00:00.000Z', \
+         outcome = 'success' WHERE task_id = 1",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO assignment(task_id, agent_id) VALUES (1, 'two')",
+        [],
+    )
+    .expect("closing the open row must permit a new assignment");
+    // And two *closed* rows coexist: NULL-distinctness would have made a plain
+    // UNIQUE(task_id, completed_at) constrain exactly the wrong set of rows.
+    conn.execute(
+        "UPDATE assignment SET completed_at = '2026-01-02T00:00:00.000Z', \
+         outcome = 'success' WHERE agent_id = 'two'",
+        [],
+    )
+    .unwrap();
+    let closed: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM assignment WHERE task_id = 1 AND completed_at IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(closed, 2, "closed rows must be exempt from the index");
+}
+
+/// QP-142: the index must reach stores that already exist, not just fresh ones.
+///
+/// This is the failure mode the ticket was most at risk of: `migrate` skips
+/// `execute_batch(SCHEMA)` whenever the stamped `schema_version` matches, so an
+/// additive `CREATE INDEX IF NOT EXISTS` added without bumping `SCHEMA_VERSION`
+/// silently reaches `qp init` in a tempdir and nothing else. A fresh-store test
+/// passes either way and would not have caught it.
+#[test]
+fn existing_store_gains_unique_index_on_migration() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    // Build a populated store, then rewind its version stamp to simulate one
+    // created by a binary from before the index existed.
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_assign_one_open;
+             UPDATE meta SET value = '2' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+    }
+
+    // Any command goes through `open()`, which must migrate the store forward.
+    qp(&db).args(["list"]).assert().success();
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let has_index: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master \
+              WHERE type='index' AND name='idx_assign_one_open'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(has_index, 1, "existing store must gain idx_assign_one_open");
+
+    // And it is live on that store, not merely present.
+    conn.execute(
+        "INSERT INTO assignment(task_id, agent_id) VALUES (1, 'ghost')",
+        [],
+    )
+    .expect_err("the migrated index must reject a second open assignment");
+}
+
 /// Pins the premise that makes `assign`'s `stale_open_assignment` branch
 /// defensive rather than live: an open assignment row exists only while its
 /// task is `assigned` or `running`.
 ///
-/// Nothing in `schema.sql` enforces this — there is no partial unique index on
-/// `assignment(task_id) WHERE completed_at IS NULL`. It holds only because
-/// every command that moves a task out of `assigned`/`running` closes the
-/// assignment in the same transaction. This test walks each of those commands
-/// and checks the invariant after every step, so that a future command which
-/// breaks it fails here — loudly — instead of silently making a guard that
-/// everyone believes is unreachable start firing in production.
+/// Since QP-142 `schema.sql` enforces the "at most one open row" half of this
+/// structurally, via the `idx_assign_one_open` partial unique index — see
+/// `unique_index_rejects_second_open_assignment`. This test still earns its
+/// keep because the index cannot express the other half: a task sitting in
+/// `ready` or `pending` with exactly one open row satisfies the index perfectly
+/// and is still corruption. So this walks each command that moves a task out of
+/// `assigned`/`running` and checks the invariant after every step, catching the
+/// case the storage layer structurally cannot.
 #[test]
 fn open_assignment_implies_assigned_or_running() {
     let tmp = tempfile::tempdir().unwrap();
@@ -3230,7 +3347,7 @@ fn tag_add_emits_event() {
 }
 
 #[test]
-fn schema_migrates_v1_to_v2() {
+fn schema_migrates_v1_to_current() {
     let tmp = tempfile::tempdir().unwrap();
     let db_path = tmp.path().join("db.sqlite");
     {
@@ -3253,7 +3370,7 @@ fn schema_migrates_v1_to_v2() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(v, "2", "schema_version should be migrated to 2");
+    assert_eq!(v, "3", "schema_version should be migrated to 3");
     let has_default_tag: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='default_tag'",
@@ -3300,8 +3417,8 @@ fn read_command_self_heals_stale_schema_without_init() {
         )
         .unwrap();
     assert_eq!(
-        v, "2",
-        "schema_version should self-heal to 2 on a read command"
+        v, "3",
+        "schema_version should self-heal to 3 on a read command"
     );
     let has_default_tag: i64 = conn
         .query_row(
@@ -3720,9 +3837,9 @@ fn json_init_emits_bare_object() {
     let v = json_stdout(&assert);
     assert!(v["db_path"].is_string());
     assert_eq!(v["prefix"], "QP");
-    // `InitOutcome.schema_version` is a `String`, not a number — pinning "2"
+    // `InitOutcome.schema_version` is a `String`, not a number — pinning "3"
     // as a JSON string is intentional, matching the reference output.
-    assert_eq!(v["schema_version"], serde_json::Value::String("2".into()));
+    assert_eq!(v["schema_version"], serde_json::Value::String("3".into()));
 }
 
 #[test]

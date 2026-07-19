@@ -321,7 +321,14 @@ fn read_project_uuid(path: &Path) -> Result<Option<String>> {
 /// `schema.sql` changes in a way that requires a migration. The value is
 /// stamped into `meta(key='schema_version')` on first init; subsequent
 /// `open()` calls compare it to decide whether to (re)apply DDL.
-pub const SCHEMA_VERSION: &str = "2";
+///
+/// Bumping this is the ONLY thing that gets new DDL onto an existing store.
+/// `migrate` skips the entire `execute_batch(SCHEMA)` when the stamped version
+/// already matches, so an additive `CREATE ... IF NOT EXISTS` added to
+/// `schema.sql` without a bump reaches freshly-initialised stores only and
+/// silently never reaches anyone's real database. QP-142's partial unique index
+/// took this from "2" to "3" for exactly that reason.
+pub const SCHEMA_VERSION: &str = "3";
 
 /// Open the connection and set pragmas. Shared by both the hot path
 /// (`open`) and init-time (`init`) — no migration, no prefix handling.
