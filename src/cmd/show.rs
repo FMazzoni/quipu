@@ -128,27 +128,30 @@ pub fn run(db_path: &std::path::Path, a: ShowArgs) -> Result<()> {
     }
 
     // Human mode.
-    let tier_str = tier.as_deref().unwrap_or("-");
     let tag_summary = if tags.is_empty() {
         String::from("-")
     } else {
         tags.join(", ")
     };
-    // Agent sits in the header at the same position `list` puts it, and holds
-    // the same value the labelled `agent:` line below holds — one field, one
-    // rendering. Omitting it here made the unlabelled tier column read as an
-    // empty AGENT column to anyone coming from `list` (QP-154).
+    // The header carries exactly `list`'s columns in `list`'s order — id, state,
+    // agent, tags — so the two commands can never disagree positionally. Adding
+    // a column here that `list` does not have is what caused QP-154: `tier` sat
+    // where a `list` reader expects AGENT, and its `-` read as "nobody holds
+    // this". Any field `list` does not carry belongs in the labelled block
+    // below, not in this line.
     println!(
-        "{}  {}  {}  {}  {}",
+        "{}  {}  {}  {}",
         display_id,
         state,
         agent.as_deref().unwrap_or("-"),
-        tier_str,
         tag_summary
     );
     println!("{}", title);
     println!();
     println!("  agent: {}", agent.as_deref().unwrap_or("—"));
+    if let Some(t) = &tier {
+        println!("  tier: {}", t);
+    }
     if let Some(c) = &created_at {
         println!("  created: {}", c);
     }

@@ -9,16 +9,31 @@ description, then what has happened to it); its JSON mode is deliberately a
 superset of that same record, so an agent and a human are looking at the same
 facts rather than two views that can disagree.
 
-The header line carries the agent even though the labelled block six lines below
-repeats it, and both render the same value: the *latest* assignee from
-`store::latest_agent`, which is what `list` and `wave` show too. That name
-outlives the assignment — after an `abandon` nobody holds the task but the last
-assignee is still named — so it is not evidence of an open claim; ownership
-questions go to `db::current_assignment`. The redundancy is the point. The
-header used to omit the field, which left the unlabelled tier column sitting
-where `list` puts AGENT, and a reader cross-checking the two commands concluded
-`list` was wrong (QP-154). One field rendered one way in one command is worth a
-duplicated word.
+The header line is unlabelled positional columns, and the rule that keeps it
+readable is that it carries **exactly `list`'s columns in `list`'s order** — id,
+state, agent, tags — so a reader moving between the two commands can never
+misread one for the other. Everything else, `tier` included, goes in the
+labelled block below, where a field is named rather than located.
+
+That rule was learned twice. The header originally omitted the agent entirely,
+which left the unlabelled `tier` column sitting exactly where `list` puts AGENT;
+a reader cross-checking the two commands saw tier's `-` as "no agent" and
+concluded `list` was wrong (QP-154). Inserting the agent fixed the reported
+symptom but left tier adjacent to it — still unlabelled, still a column `list`
+does not have — so QP-156 moved tier down into the labelled block instead of
+shifting the ambiguity one position over. If a future field wants to be in the
+header, the question to ask is whether `list` carries it; if not, label it.
+
+The agent appears in both places, and both render the same value: the *latest*
+assignee from `store::latest_agent`, which is what `list` and `wave` show too.
+That name outlives the assignment — after an `abandon` nobody holds the task but
+the last assignee is still named — so it is not evidence of an open claim;
+ownership questions go to `db::current_assignment`. The redundancy is the point:
+one field rendered one way in one command is worth a duplicated word.
+
+`--json` is unaffected by any of this. It carries `tier` as a top-level field
+and always has; the column layout is a human-readable rendering choice, and
+scripts are expected to read the JSON.
 
 The event tail is capped in human mode only, and the cap is a readability limit
 rather than a statement about the data. `HUMAN_EVENT_TAIL` is an arbitrary
