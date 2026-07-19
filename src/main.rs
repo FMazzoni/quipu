@@ -116,7 +116,7 @@ fn real_main() -> anyhow::Result<()> {
             prefix,
             default_tag,
         } => {
-            let _ = db::open_with(&db_path, prefix.as_deref(), &default_tag)?;
+            let _ = db::init(&db_path, prefix.as_deref(), &default_tag)?;
             println!("initialized at {}", db_path.display());
             Ok(())
         }

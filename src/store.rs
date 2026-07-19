@@ -291,7 +291,8 @@ pub fn unresolved_blockers_by_task(
         let q = format!(
             "SELECT d.task_id, t2.display_id
                FROM dep d JOIN task t2 ON t2.id = d.depends_on_task_id
-              WHERE d.task_id IN ({}) AND t2.state NOT IN ('done','cancelled')",
+              WHERE d.task_id IN ({}) AND t2.state NOT IN ('done','cancelled')
+              ORDER BY t2.id",
             placeholders(chunk.len())
         );
         let mut s = conn.prepare(&q)?;

@@ -188,16 +188,9 @@ fn read_project_uuid(path: &Path) -> Result<Option<String>> {
 /// `open()` calls compare it to decide whether to (re)apply DDL.
 pub const SCHEMA_VERSION: &str = "2";
 
-pub fn open(path: &Path) -> Result<Connection> {
-    open_with(path, None, &[])
-}
-
-#[allow(dead_code)] // retained as a stable shim; tests + external callers may still use it
-pub fn open_with_prefix(path: &Path, prefix: Option<&str>) -> Result<Connection> {
-    open_with(path, prefix, &[])
-}
-
-pub fn open_with(path: &Path, prefix: Option<&str>, default_tags: &[String]) -> Result<Connection> {
+/// Open the connection and set pragmas. Shared by both the hot path
+/// (`open`) and init-time (`init`) — no migration, no prefix handling.
+fn open_conn(path: &Path) -> Result<Connection> {
     if let Some(p) = path.parent() {
         std::fs::create_dir_all(p)?;
     }
@@ -211,19 +204,31 @@ pub fn open_with(path: &Path, prefix: Option<&str>, default_tags: &[String]) -> 
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", true)?;
     conn.pragma_update(None, "busy_timeout", 5000)?;
+    Ok(conn)
+}
 
-    // Migration contract: read the stamped schema_version. If it matches
-    // SCHEMA_VERSION, DDL is up to date and we skip the schema re-apply on the
-    // hot path (saves 1–3 ms per invocation on already-initialized stores).
-    // If it is missing, this is either a fresh db or a pre-versioning store —
-    // apply the DDL and stamp meta rows via INSERT OR IGNORE (idempotent, no
-    // read-then-write).
-    //
-    // On a genuinely fresh db, `meta` doesn't exist yet — that's a real
-    // `no such table` error, not a "no rows" case, so `.optional()` alone
-    // would propagate it and fail `init`. Check for the table first so a
-    // missing table is treated the same as a missing row (fresh db), while
-    // any other error on an existing table still propagates.
+/// Migration contract: read the stamped schema_version. If it matches
+/// SCHEMA_VERSION, DDL is up to date and we skip the schema re-apply on the
+/// hot path (saves 1–3 ms per invocation on already-initialized stores).
+/// If it is missing, this is either a fresh db or a pre-versioning store —
+/// apply the DDL and stamp meta rows via INSERT OR IGNORE (idempotent, no
+/// read-then-write).
+///
+/// On a genuinely fresh db, `meta` doesn't exist yet — that's a real
+/// `no such table` error, not a "no rows" case, so `.optional()` alone
+/// would propagate it and fail `init`. Check for the table first so a
+/// missing table is treated the same as a missing row (fresh db), while
+/// any other error on an existing table still propagates.
+///
+/// Returns the schema_version as it stood *before* this call (`None` means
+/// fresh db or pre-versioning store), so callers that also care about the
+/// pre-migration prefix (i.e. `init`'s mismatch warning) can reuse it
+/// without a second round-trip.
+///
+/// Called from both `open()` (every command, so this MUST stay
+/// self-healing — a user who upgrades the binary and runs a read command
+/// before ever running `qp init` depends on this) and `init()`.
+fn migrate(conn: &Connection, prefix: Option<&str>) -> Result<Option<String>> {
     let meta_exists: bool = conn
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'",
@@ -242,25 +247,6 @@ pub fn open_with(path: &Path, prefix: Option<&str>, default_tags: &[String]) -> 
     } else {
         None
     };
-    if let (Some(cur), Some(user_p)) = (current.as_deref(), prefix) {
-        if cur == SCHEMA_VERSION {
-            let stored: Option<String> = conn
-                .query_row(
-                    "SELECT value FROM meta WHERE key='display_prefix'",
-                    [],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if let Some(s) = stored.as_deref() {
-                if s != user_p {
-                    eprintln!(
-                        "warn: prefix already set to {}; --prefix {} ignored",
-                        s, user_p
-                    );
-                }
-            }
-        }
-    }
     if current.as_deref() != Some(SCHEMA_VERSION) {
         conn.execute_batch(SCHEMA).context("applying schema")?;
         // Stamp project_uuid + schema_version + display_prefix on first init only.
@@ -281,9 +267,49 @@ pub fn open_with(path: &Path, prefix: Option<&str>, default_tags: &[String]) -> 
             rusqlite::params![SCHEMA_VERSION],
         )?;
     }
+    Ok(current)
+}
 
+/// The hot path: open + migrate. No prefix handling, no default-tag
+/// seeding — those are init-time-only concerns (see `init`). Every command
+/// but `init` calls this, and it must remain migration-capable so a stale
+/// on-disk schema self-heals on the first read command after a binary
+/// upgrade, rather than surfacing as a confusing `no such table` /
+/// `no such column` error.
+pub fn open(path: &Path) -> Result<Connection> {
+    let conn = open_conn(path)?;
+    migrate(&conn, None)?;
+    Ok(conn)
+}
+
+/// Init-time concerns only: prefix validation (via `migrate`'s first-stamp
+/// path), the prefix-mismatch warning, and `--default-tag` seeding. Shares
+/// the actual DDL/version-check logic with `open` via `migrate` — this is
+/// not a separate migration path, just the extra one-time bookkeeping that
+/// only `qp init` needs to do.
+pub fn init(path: &Path, prefix: Option<&str>, default_tags: &[String]) -> Result<Connection> {
+    let conn = open_conn(path)?;
+    let current = migrate(&conn, prefix)?;
+    if let (Some(cur), Some(user_p)) = (current.as_deref(), prefix) {
+        if cur == SCHEMA_VERSION {
+            let stored: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM meta WHERE key='display_prefix'",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(s) = stored.as_deref() {
+                if s != user_p {
+                    eprintln!(
+                        "warn: prefix already set to {}; --prefix {} ignored",
+                        s, user_p
+                    );
+                }
+            }
+        }
+    }
     insert_default_tags(&conn, default_tags)?;
-
     Ok(conn)
 }
 
@@ -490,7 +516,7 @@ mod prefix_tests {
     fn display_prefix_honors_init_value() {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("db.sqlite");
-        let conn = open_with_prefix(&db, Some("ACME")).unwrap();
+        let conn = init(&db, Some("ACME"), &[]).unwrap();
         assert_eq!(display_prefix(&conn).unwrap(), "ACME");
     }
 }

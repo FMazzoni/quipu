@@ -55,10 +55,9 @@ pub fn run(db_path: &std::path::Path, a: ShowArgs) -> Result<()> {
         .collect::<Result<_, _>>()?;
     tags.sort();
 
-    let mut blocked_by = store::unresolved_blockers_by_task(&conn, &[tid])?
+    let blocked_by = store::unresolved_blockers_by_task(&conn, &[tid])?
         .remove(&tid)
         .unwrap_or_default();
-    blocked_by.sort();
 
     // Recent events: last 10, newest first.
     let mut s = conn.prepare(

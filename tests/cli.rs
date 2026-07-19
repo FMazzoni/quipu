@@ -806,7 +806,11 @@ fn wait_returns_when_filter_set_empties() {
         .assert()
         .success();
 
-    // Start `wait` in the background.
+    // Start `wait` in the background. No fixed head-start sleep: correctness
+    // doesn't depend on whether `wait`'s first poll lands before or after the
+    // `complete` below — either way the DB is re-queried fresh each poll, and
+    // the generous --timeout-secs is the ceiling that makes this robust under
+    // a loaded machine instead of a hand-tuned sleep duration.
     let db2 = db.clone();
     let join = std::thread::spawn(move || {
         Command::cargo_bin("qp")
@@ -820,14 +824,13 @@ fn wait_returns_when_filter_set_empties() {
                 "running",
                 "--empty",
                 "--interval-ms",
-                "50",
+                "20",
                 "--timeout-secs",
-                "5",
+                "10",
             ])
             .assert()
             .success();
     });
-    std::thread::sleep(std::time::Duration::from_millis(150));
     // Complete the task — wait should return.
     qp(&db)
         .args(["complete", "QP-1", "--as", "x", "--decision", "done"])
@@ -857,9 +860,9 @@ fn wait_times_out_with_exit_code() {
             "running",
             "--empty",
             "--interval-ms",
-            "50",
+            "20",
             "--timeout-secs",
-            "1",
+            "2",
         ])
         .assert()
         .failure()
@@ -910,9 +913,9 @@ fn wait_cohort_done_does_not_release_on_staggered_claim() {
             "wave:9",
             "--cohort-done",
             "--interval-ms",
-            "50",
+            "20",
             "--timeout-secs",
-            "1",
+            "2",
         ])
         .assert()
         .failure()
@@ -959,9 +962,9 @@ fn wait_cohort_done_does_not_release_before_any_claim() {
             "wave:10",
             "--cohort-done",
             "--interval-ms",
-            "50",
+            "20",
             "--timeout-secs",
-            "1",
+            "2",
         ])
         .assert()
         .failure()
@@ -1021,40 +1024,71 @@ fn wait_cohort_done_treats_cancelled_as_drained() {
 fn watch_emits_new_events_as_jsonl() {
     use std::io::{BufRead, BufReader};
     use std::process::{Command as PCommand, Stdio};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "seed"]).assert().success();
-    // Start watch in a child. --max-ticks bounds the run.
+    // Start watch in a child. --max-ticks is a generous internal safety net
+    // (200 * 20ms = 4s), not the thing that bounds this test's wall time —
+    // that's the poll-until-condition loop below, which lets the test finish
+    // fast when the machine is idle and stay correct when it's loaded. A
+    // fixed small tick budget here previously raced the `add`/`log`
+    // subprocess spawns below: under CPU contention those can take longer
+    // than the watcher's whole polling window, so the watcher could exit
+    // before the new events even landed.
     let bin = assert_cmd::cargo::cargo_bin("qp");
-    let child = PCommand::new(&bin)
+    let mut child = PCommand::new(&bin)
         .env("QP_DB", &db)
         .args([
             "watch",
             "--since",
             "0",
             "--max-ticks",
-            "5",
+            "200",
             "--interval-ms",
-            "50",
+            "20",
             "--json",
         ])
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(75));
-    // Emit a few more events.
+    let stdout = child.stdout.take().unwrap();
+
+    // Stream lines off a background thread so the ceiling below is wall-clock
+    // based rather than tied to the watcher's own tick count.
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    // Emit a few more events. No fixed pre-sleep: watch polls continuously
+    // from --since 0 and will catch these whenever they land relative to its
+    // own ticks.
     qp(&db).args(["add", "another"]).assert().success();
     qp(&db)
         .args(["log", "QP-1", "note", "hello"])
         .assert()
         .success();
-    let out = child.wait_with_output().unwrap();
-    let lines: Vec<String> = BufReader::new(&out.stdout[..])
-        .lines()
-        .map_while(Result::ok)
-        .filter(|l| !l.is_empty())
-        .collect();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut lines: Vec<String> = Vec::new();
+    while lines.len() < 2 && Instant::now() < deadline {
+        if let Ok(line) = rx.recv_timeout(Duration::from_millis(200)) {
+            if !line.is_empty() {
+                lines.push(line);
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+
     assert!(lines.len() >= 2, "expected >=2 event lines, got: {lines:?}");
     for line in &lines {
         let _v: serde_json::Value =
@@ -2231,6 +2265,44 @@ fn show_json_includes_recent_events() {
 }
 
 #[test]
+fn show_blocked_by_sorts_numerically_not_lexically() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    // QP-1 .. QP-10: ten single-purpose blocker tasks.
+    for i in 1..=10 {
+        qp(&db)
+            .args(["add", &format!("blocker {i}")])
+            .assert()
+            .success();
+    }
+    // QP-11: depends on all ten, in an order that would sort wrong
+    // lexically ("QP-10" < "QP-2" as strings) if not ordered by t.id.
+    let mut args = vec!["add".to_string(), "dependent".to_string()];
+    for i in 1..=10 {
+        args.push("--depends-on".to_string());
+        args.push(format!("QP-{i}"));
+    }
+    qp(&db).args(&args).assert().success();
+
+    let out = qp(&db).args(["show", "QP-11", "--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    let blocked: Vec<&str> = v["blocked_by"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap())
+        .collect();
+    let expected: Vec<String> = (1..=10).map(|i| format!("QP-{i}")).collect();
+    assert_eq!(blocked, expected);
+}
+
+#[test]
 fn tree_with_description_includes_description_lines() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
@@ -2486,6 +2558,55 @@ fn schema_migrates_v1_to_v2() {
         )
         .unwrap();
     assert_eq!(v, "2", "schema_version should be migrated to 2");
+    let has_default_tag: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='default_tag'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        has_default_tag, 1,
+        "default_tag table should exist post-migration"
+    );
+}
+
+#[test]
+fn read_command_self_heals_stale_schema_without_init() {
+    // The hazard QP-72 flags: a user upgrades the binary onto an old-shape
+    // store and runs a READ command first, never `qp init`. `open()` must
+    // stay migration-capable or this degrades into `no such table` /
+    // `no such column` errors instead of just working.
+    let tmp = tempfile::tempdir().unwrap();
+    let db_path = tmp.path().join("db.sqlite");
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        // Minimal v1 shape: meta table + schema_version='1'. No default_tag table.
+        conn.execute_batch("
+            CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta(key, value) VALUES ('schema_version','1');
+            INSERT INTO meta(key, value) VALUES ('display_prefix','QP');
+            INSERT INTO meta(key, value) VALUES ('project_uuid','00000000-0000-0000-0000-000000000000');
+        ").unwrap();
+    }
+    // First invocation ever against this store is a read command, not `qp init`.
+    qp(&db_path)
+        .args(["list", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("[]"));
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let v: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        v, "2",
+        "schema_version should self-heal to 2 on a read command"
+    );
     let has_default_tag: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='default_tag'",
