@@ -138,8 +138,8 @@ fn wants_json(cmd: &Cmd) -> bool {
         Cmd::Edit(a) => a.json,
         Cmd::Show(a) => a.json,
         Cmd::Report(a) => a.json,
-        Cmd::Relation(_)
-        | Cmd::Tree(_)
+        Cmd::Relation(a) => a.json(),
+        Cmd::Tree(_)
         | Cmd::Timeline(_)
         | Cmd::Wave(_)
         | Cmd::Status(_)
