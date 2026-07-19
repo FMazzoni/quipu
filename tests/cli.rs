@@ -2265,6 +2265,34 @@ fn show_json_includes_recent_events() {
 }
 
 #[test]
+fn show_zero_padded_ref_renders_canonical_display_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "ticket title"]).assert().success(); // QP-1
+
+    let out = qp(&db).args(["show", "qp-001"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        s.contains("QP-1"),
+        "expected canonical QP-1 in output:\n{s}"
+    );
+    assert!(!s.contains("qp-001"), "raw input echoed back:\n{s}");
+
+    let out = qp(&db)
+        .args(["show", "qp-001", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    assert_eq!(v["display_id"], "QP-1");
+}
+
+#[test]
 fn show_blocked_by_sorts_numerically_not_lexically() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
