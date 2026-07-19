@@ -34,7 +34,7 @@ pub fn run(db_path: &std::path::Path, a: TreeArgs) -> Result<()> {
     let filter = store::TaskFilter {
         state: None,
         assigned_to_glob: None,
-        tags: &[],
+        tag_globs: &[],
         tier: a.tier.as_deref(),
     };
     let mut tasks: Vec<store::TaskRow> = Vec::new();
