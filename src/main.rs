@@ -64,13 +64,13 @@ enum Cmd {
     Claim(cmd::claim::ClaimArgs),
     /// Complete a running task (records decisions/artifacts)
     Complete(cmd::complete::CompleteArgs),
-    /// Mark a running task blocked with a reason
+    /// Mark an assigned/running task blocked with a reason (→ pending)
     Block(cmd::block::BlockArgs),
     /// Cancel a task (any non-terminal state)
     Cancel(cmd::cancel::CancelArgs),
-    /// Agent self-release of a claim (running → ready)
+    /// Agent self-release of a claim (assigned/running → pending)
     Abandon(cmd::abandon::AbandonArgs),
-    /// Orchestrator force-release of a claim
+    /// Orchestrator force-release of a claim (assigned/running → pending)
     Reclaim(cmd::reclaim::ReclaimArgs),
     /// Log a free-form event against a task
     Log(cmd::log::LogArgs),
