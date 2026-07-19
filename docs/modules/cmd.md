@@ -45,13 +45,9 @@ Three mutators are not state edges at all. [`edit`](edit/index.html),
 labels, or its history without moving it through the graph. They still write
 events, and `edit` still refuses to touch a terminal task.
 
-`log` carries one rule worth knowing before you use it: with no `--as`, it
-auto-attributes the entry to the task's latest open assignee, but **only while
-the task is `running`**. That is the one state where the owner is unambiguous —
-`assigned` means somebody was nominated but has not started, and a released task
-has no owner at all. Outside `running` the entry is recorded with no agent rather
-than with a guess. An explicit `--as` always wins
-(`log_auto_attributes_to_running_assignee`, `log_explicit_as_always_wins`).
+`log` carries one rule worth knowing before you use it: with no `--as`, whether
+the entry gets attributed to anybody at all depends on the task's state. See
+[`log`](log/index.html) for the rule and why it is drawn where it is.
 
 ## Mutators and projections
 
@@ -133,16 +129,10 @@ pins the distinction.
 
 - **Orchestration patterns.** Nothing in this directory knows what a wave, a
   critique loop, or a branch-and-evaluate is. The patterns live in `skills/`.
-  [`wave`](wave/index.html) is only a projection that groups in-flight tasks by
-  state, and the rule it uses is deliberately structural: a `pending` task shows
-  up as blocked **if and only if** it has at least one dependency that is not yet
-  `done` or `cancelled`. That is broader than the skill-layer `kind:blocker` tag
-  convention — any unresolved dep qualifies, tagged or not — so a skill using its
-  own taxonomy cannot desync the view, and conversely a task tagged as a blocker
-  with no dep edge is not blocked as far as the binary is concerned. A `pending`
-  task with no unresolved deps stays out of the wave view entirely
-  (`wave_lists_pending_tasks_that_have_unresolved_deps`,
-  `wave_excludes_pending_task_without_unresolved_deps`).
+  [`wave`](wave/index.html) is named after one, but it is only a projection that
+  groups in-flight tasks by state, and the rule it uses to decide what counts as
+  blocked is structural rather than tag-based — see that page for the rule and
+  what it buys.
 - **Rendering beyond a line of text.** Markdown and HTML report rendering used to
   live in `report`. It now lives in the `report-render` skill, which consumes
   `qp report --json`.

@@ -23,7 +23,6 @@ pub struct TreeArgs {
 pub fn run(db_path: &std::path::Path, a: TreeArgs) -> Result<()> {
     let conn = db::open(db_path)?;
 
-    // If a root task is given, compute its transitive dep subtree (inclusive).
     let subtree: Option<HashSet<i64>> = if let Some(t) = &a.task {
         let root = id::resolve(&conn, t)?;
         Some(store::subtree_ids(&conn, root)?)

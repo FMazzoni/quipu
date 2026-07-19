@@ -21,7 +21,6 @@ pub fn run(db_path: &std::path::Path, a: StatusArgs) -> Result<()> {
     for (state, count) in &rows {
         map.insert(state.clone(), serde_json::Value::from(*count));
     }
-    // Always include all known states (zero if absent) so consumers can rely on the keys.
     for s in [
         "pending",
         "ready",

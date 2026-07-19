@@ -1,4 +1,6 @@
 //! Record a free-form event against a task.
+//!
+#![doc = include_str!("../../docs/modules/log.md")]
 
 use crate::outcome::{emit, Outcome};
 use crate::{db, id};
@@ -40,8 +42,6 @@ pub fn run(db_path: &std::path::Path, a: LogArgs) -> Result<()> {
         if a.auto {
             payload["auto"] = serde_json::Value::Bool(true);
         }
-        // If --as wasn't provided, auto-attribute to the latest open assignee
-        // iff the task is currently running (unambiguous owner).
         let auto_agent: Option<String> = if a.agent.is_none() {
             let state: Option<String> = tx
                 .query_row("SELECT state FROM task WHERE id = ?", [task_id], |r| {

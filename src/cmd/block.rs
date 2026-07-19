@@ -86,10 +86,7 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
             rusqlite::params![task_id, blocker_id],
         )?;
 
-        // (3) Guarded UPDATE: demote orig to pending. Folds ownership into WHERE via EXISTS —
-        // this remains the single source of truth for the mutation, per the guarded-transition
-        // contract. If it fails, the diagnostic reads below are for error reporting only (not
-        // control flow) so the caller can tell wrong-agent (NotOwner) from wrong-state (Conflict).
+        // (3) Guarded UPDATE: demote orig to pending.
         let n = tx.execute(
             "UPDATE task SET state = ?1
               WHERE id = ?2 AND state IN ('assigned','running')
