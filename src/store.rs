@@ -17,8 +17,9 @@
 //!   - Guarded-transition UPDATEs do NOT. They are not duplicated with each
 //!     other — each has a distinct WHERE/SET — so moving them would relocate
 //!     the highest-stakes code in the project for taxonomic tidiness alone.
-//!   - Rendering helpers do NOT. `wrap_text`, `md_esc`, `html_esc`, `slugify`
-//!     do no database work.
+//!   - Rendering helpers do NOT. `wrap_text` (in `show.rs`) does no database
+//!     work; markdown/HTML rendering itself has moved out of the binary
+//!     entirely, into the `report-render` skill.
 
 #![allow(dead_code)] // populated incrementally; some helpers land before their callers
 

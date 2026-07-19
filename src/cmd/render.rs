@@ -1,12 +1,12 @@
 //! Shared human-readable rendering of event payloads.
 //!
-//! Used by `timeline`, `show` and `report` so that one event kind reads the
-//! same wherever it appears.
+//! Used by `timeline` and `show` so that one event kind reads the same
+//! wherever it appears.
 
 use serde_json::Value;
 
 /// Render a short, human-readable summary of an event's payload for a given
-/// event `kind`. Shared by `timeline`, `show`, and `report`.
+/// event `kind`. Shared by `timeline` and `show`.
 pub fn summarize_payload(kind: &str, p: &Value) -> String {
     match kind {
         "state_change" => format!("→ {}", p.get("to").and_then(|v| v.as_str()).unwrap_or("")),
