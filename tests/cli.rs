@@ -427,6 +427,47 @@ fn tag_add_and_rm() {
         .success();
 }
 
+/// A bare `prefix:` is the shape a shell substitution leaves behind when it
+/// expands to nothing (`add "commit:$(git rev-parse ...)"` in the wrong cwd).
+/// `add` must refuse it; `rm` must still accept it, or rows written before the
+/// guard existed could never be cleaned up.
+#[test]
+fn tag_add_rejects_bare_prefix_but_rm_still_accepts_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "t"]).assert().success();
+
+    qp(&db)
+        .args(["tag", "QP-1", "add", "commit:"])
+        .assert()
+        .failure()
+        .stderr(contains("empty value after ':'"));
+
+    // Nothing was stored.
+    let out = qp(&db)
+        .args(["show", "QP-1", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["tags"].as_array().unwrap().len(), 0);
+
+    // A namespaced tag with an actual value is unaffected.
+    qp(&db)
+        .args(["tag", "QP-1", "add", "commit:4bc299"])
+        .assert()
+        .success();
+
+    // `rm` accepts the malformed form so pre-guard rows remain removable.
+    qp(&db)
+        .args(["tag", "QP-1", "rm", "commit:"])
+        .assert()
+        .success();
+}
+
 #[test]
 fn relation_add_list_rm() {
     let tmp = tempfile::tempdir().unwrap();
