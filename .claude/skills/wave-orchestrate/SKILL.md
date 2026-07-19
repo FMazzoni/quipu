@@ -165,7 +165,16 @@ wt merge -C <worktree-path> -y && \
   ./target/release/qp tag QP-<N> add commit:$(git rev-parse --short=6 HEAD)
 ```
 
-Chain the commit-tag in the same Bash call so it can't be forgotten. The tag uses the namespace `commit:<sha>` so reverse lookup is just `qp list --tag commit:<sha>` — no new commands needed.
+**Tagging the merged SHA is a required step, not an aside.** Chain it in the same Bash call as the merge so it cannot be skipped — an untagged ticket is an incomplete merge, and Phase 7 checks for exactly this.
+
+**Only the coordinator can tag, and only after the merge.** `wt merge` squashes *and rebases* before fast-forwarding, so every SHA on the worktree branch is rewritten on the way to the target branch. `--no-squash` does not change this — it skips the squash but still rebases, so the SHAs are still new. A SHA captured on the branch side, by anyone, names a commit that never lands on the target branch and dies at the next GC. The post-merge SHA is the only one that is real. This is why `qp-implement` forbids subagents from tagging.
+
+Two things that make this safe, both verified:
+
+- `qp tag` works on a `done` ticket. The subagent completing its ticket in its own final steps does not block you — no reopen, no state juggling. Tag it as-is.
+- The chained `git rev-parse` runs in **your** cwd, not the worktree's (which `wt merge` has already removed). That resolves correctly only if your checkout is the main repo sitting on the target branch. If you merged from somewhere else, resolve the SHA explicitly with `git -C <main-repo> rev-parse --short=6 <target-branch>`.
+
+The tag uses the namespace `commit:<sha>` so reverse lookup is just `qp list --tag commit:<sha>` — no new commands needed.
 
 For coordinator-direct commits (justfile edits, reactive fixes, doc-only work) that bypass the wave-orchestrate flow: still ticket them. Open a `qp add` retroactively if needed, then `qp tag` with the SHA. The system-of-record stays complete.
 
@@ -212,7 +221,14 @@ Dispatch ≤4 critic agents in parallel, one lens each. Reference `.claude/skill
    cargo test 2>&1 | grep "^test result"
    ```
 2. Leanness gates: stripped-binary size, `qp --version` cold start, RSS. Confirm under budget (CLAUDE.md).
-3. Mark completed qp tickets `done` (`qp complete QP-N`).
+3. **Verify every wave ticket carries its `commit:` tag.** Subagents complete their own tickets (see `qp-implement`), so they are already `done` — you are not marking them done, you are auditing that Phase 4 tagged them:
+   ```bash
+   for t in QP-<a> QP-<b>; do
+     printf '%s %s\n' "$t" "$(./target/release/qp show $t | sed -n 1p | grep -o 'commit:[0-9a-f]*')"
+   done
+   ```
+   A blank second column means that ticket is untagged. Two gotchas baked into that line: `sed -n 1p` rather than `head -1`, because `head` closes the pipe early and `qp` panics with `failed printing to stdout: Broken pipe`; and it reads only line 1 (the tag line) because a ticket whose *description* discusses `commit:<sha>` would otherwise match itself.
+   Any ticket without a `commit:` tag means a Phase 4 merge dropped the chained tag. Backfill it now with the SHA that slice actually landed as (`git log --oneline` on the target branch), and treat the miss as friction worth a vault note — hand-backfilling is the failure mode this step exists to catch.
 4. Vault notes for any new decision: `$QUIPU_VAULT/decisions/<slug>.md`.
 5. Append a session entry at `$QUIPU_VAULT/sessions/YYYY-MM-DD-HHMMSS-<slug>.md` (built / decisions / critic count / next). Use the real wall-clock time the session ends (e.g. `date +%H%M%S`) — do **not** use a daily counter like `000001`.
 6. File deferred bugs as qp tickets (`qp add ... --tag kind:bug`).
