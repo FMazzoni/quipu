@@ -5,12 +5,19 @@ The only success edge. Everything else that leaves `running` — `abandon`,
 the one place where finishing work is distinguished from stopping work, and the
 assignment row is closed with `outcome = 'success'` to say so.
 
-Three preconditions, and the middle one is the interesting one: the caller must
-hold an open assignment, that assignment must already be **claimed**, and the
-caller must be its agent. Requiring `claimed_at` means `assign` → `complete` with
-no `claim` in between is rejected rather than quietly succeeding — closing a real
-hole in agent workflows, where a subagent that never actually started could
-otherwise mark its own ticket done.
+Three preconditions: the caller must hold an open assignment, that assignment
+must already be **claimed**, and the caller must be its agent.
+
+The `claimed_at` precondition is an error-quality guard, not a data-integrity
+one, and that is worth stating because it otherwise reads as dead code. `claim`
+is the only writer that puts a task into `running`, and it stamps `claimed_at` in
+the same transaction — so `running` implies claimed, and the state guard on the
+transition would reject an unclaimed task on its own. What the check buys is
+which error comes back: it runs first, so `assign` → `complete` with no `claim`
+in between fails as `not_claimed` ("QP-1 not claimed") rather than the vaguer
+`not_running`. Assigned but never claimed is the common mistake, and naming it is
+the entire value here. Removing the check breaks no invariant; it silently
+degrades the diagnostic.
 
 `--decision` and `--artifact` are written as separate events *before* the
 `state_change`, so a timeline reads in the order the work happened: reasoning

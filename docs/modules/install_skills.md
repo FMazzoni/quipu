@@ -5,10 +5,15 @@ machine. It exists because the orchestration patterns deliberately live outside
 the binary — see the crate docs — and something still has to get them onto disk
 where an agent harness will look.
 
-Symlinking is the default, and that is a decision rather than an implementation
-detail: a symlinked skill tracks the checkout, so editing a skill in the repo
-takes effect immediately and a `git pull` updates every installed copy. `--copy`
-exists for the case where the checkout is not going to stay put.
+Symlinking is the default so that the quipu repo stays the single source of
+truth. Skills evolve with the binary, and co-shipping them keeps the two in sync
+without any version negotiation between a skill and the `qp` that expects it; a
+link is what preserves that after install. Per-project copies and packaging the
+skills as a Claude Code plugin were both weighed and rejected — the plugin route
+is the better long-term answer but deferred to v2, since it costs marketplace
+publishing or a git-clone-and-install dance. The long form is the decision note
+`quipu-skills-shipped-from-repo.md`. `--copy` exists for the case where the
+checkout is not going to stay put.
 
 The `qp-` prefix is not cosmetic. Installation removes the destination before
 writing it, so the prefix is what keeps a skill named `wave` from clobbering an
