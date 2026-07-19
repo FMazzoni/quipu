@@ -296,12 +296,16 @@ directly.
 | 4 | `wait --cohort-done` matched an empty cohort |
 
 Code 2 is the interesting one: it is the *expected* outcome of losing a race, not
-a failure.
+a failure. That is what makes the 1-vs-2 boundary load-bearing: only 2 means "the
+store said no — retrying may succeed". A malformed flag must never land there, or
+a skill that retries on 2 loops forever on a typo.
 
 One outcome sits outside that contract, and it is not an exit code at all.
 
 When the reader of a pipe closes early — `qp list | head -1` — `qp` dies by
-`SIGPIPE`, the way any well-behaved Unix filter does. A shell reports that as
+`SIGPIPE`, the way any well-behaved Unix filter does. `restore_sigpipe_default`
+in `main.rs` is what buys that: without it an early reader close panics through
+`println!` instead. A shell reports the signal death as
 **141** (128 + signal 13). It is a *wait status*, not an exit code: the command
 did not fail, its reader left. Do not branch on it, and do not treat it as an
 error in a wrapper.
@@ -311,7 +315,8 @@ ticket or a cached binary: `qp` used to panic on a closed pipe and exit **101**
 (QP-139), and clap's argument-parse failures used to exit **2**, colliding with
 retryable store conflicts (QP-150). Both are fixed. A parse failure is now
 `invalid_input` — exit 1, with a proper `{"error": ...}` envelope under `--json`
-like every other error.
+like every other error; `handle_parse_error` in `main.rs` is the interceptor that
+converts clap's exit-2 default into that envelope.
 
 ## Barriers
 

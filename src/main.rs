@@ -1,26 +1,5 @@
 //! `qp` — quipu CLI entry point. Parses subcommands and dispatches to `src/cmd/<name>.rs`.
 //!
-//! Exit codes: 0 success | 1 invalid input (including argument-parse failures),
-//! or untyped error | 2 conflict, not-owner, not-found or invariant | 3 wait
-//! timed out | 4 wait --cohort-done matched an empty cohort.
-//!
-//! Two rows of that table are load-bearing for agents and easy to break again:
-//!
-//! 1 vs 2. Only 2 means "the store said no — retrying may succeed". A malformed
-//! flag must never land there, or a skill retrying on 2 loops forever on a typo.
-//! Clap's default is to exit 2 on a parse failure, so `handle_parse_error`
-//! intercepts it and re-reports it as `invalid_input`, exit 1, with the same
-//! `{"error": ...}` envelope every other failure emits under `--json`.
-//!
-//! There is no 101 and no row for a broken pipe. `restore_sigpipe_default`
-//! makes an early reader close kill the process by signal instead of panicking
-//! through `println!`; a shell reports that as 141, which is a wait status
-//! rather than an exit code and is deliberately not part of the contract.
-//!
-//! Architecture overview — state machine, guarded-transition contract, module
-//! map — lives in `docs/architecture.md`, included below rather than inlined so
-//! that reading this file costs one line instead of the whole document.
-//!
 #![doc = include_str!("../docs/architecture.md")]
 
 mod cmd;
