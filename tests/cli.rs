@@ -110,8 +110,12 @@ fn assign_rejects_when_stale_open_assignment_exists() {
     qp(&db).arg("init").assert().success();
     qp(&db).args(["add", "a"]).assert().success(); // QP-1
 
-    // Directly inject a stale open assignment row — not reachable through the CLI
-    // under normal operation, but must be guarded against regardless.
+    // Inject the row directly: no CLI sequence is known to produce a `ready` task
+    // carrying an open assignment (see the `assign` module header, and the
+    // `open_assignment_implies_assigned_or_running` test that pins that premise).
+    // Reaching the guard therefore requires simulating the corruption it defends
+    // against — an out-of-band writer, or a future command that demotes a task
+    // without closing its assignment.
     let conn = rusqlite::Connection::open(&db).unwrap();
     conn.execute(
         "INSERT INTO assignment(task_id, agent_id) VALUES (1, 'ghost')",
@@ -120,11 +124,128 @@ fn assign_rejects_when_stale_open_assignment_exists() {
     .unwrap();
     drop(conn);
 
-    qp(&db)
-        .args(["assign", "QP-1", "--to", "x"])
+    let assert = qp(&db)
+        .args(["assign", "QP-1", "--to", "x", "--json"])
         .assert()
         .failure()
         .code(2);
+    // Assert the code, not just the exit status: `not_ready` also exits 2, and
+    // without this the test would pass while reaching an entirely different guard.
+    let v = json_stderr(&assert);
+    assert_eq!(v["error"]["code"], "stale_open_assignment");
+
+    // The rejected assign must not have left a second open row behind.
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let open: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM assignment WHERE task_id = 1 AND completed_at IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(open, 1, "guard must reject, not append");
+}
+
+/// Pins the premise that makes `assign`'s `stale_open_assignment` branch
+/// defensive rather than live: an open assignment row exists only while its
+/// task is `assigned` or `running`.
+///
+/// Nothing in `schema.sql` enforces this — there is no partial unique index on
+/// `assignment(task_id) WHERE completed_at IS NULL`. It holds only because
+/// every command that moves a task out of `assigned`/`running` closes the
+/// assignment in the same transaction. This test walks each of those commands
+/// and checks the invariant after every step, so that a future command which
+/// breaks it fails here — loudly — instead of silently making a guard that
+/// everyone believes is unreachable start firing in production.
+#[test]
+fn open_assignment_implies_assigned_or_running() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    for _ in 0..6 {
+        qp(&db).args(["add", "t"]).assert().success();
+    }
+
+    // Every command that can close an assignment or move a task out of
+    // assigned/running, each exercised on its own task.
+    let sequences: Vec<Vec<Vec<&str>>> = vec![
+        // complete: running -> done
+        vec![
+            vec!["assign", "QP-1", "--to", "a"],
+            vec!["claim", "QP-1", "--as", "a"],
+            vec!["complete", "QP-1", "--as", "a"],
+        ],
+        // abandon: running -> pending -> (refresh_ready) ready
+        vec![
+            vec!["assign", "QP-2", "--to", "a"],
+            vec!["claim", "QP-2", "--as", "a"],
+            vec!["abandon", "QP-2", "--as", "a", "--reason", "r"],
+        ],
+        // reclaim: assigned -> pending -> ready, without an intervening claim
+        vec![
+            vec!["assign", "QP-3", "--to", "a"],
+            vec!["reclaim", "QP-3", "--reason", "r"],
+        ],
+        // block: running -> pending behind a fresh blocker task
+        vec![
+            vec!["assign", "QP-4", "--to", "a"],
+            vec!["claim", "QP-4", "--as", "a"],
+            vec!["block", "QP-4", "--as", "a", "--new", "blocker title"],
+        ],
+        // cancel: running -> cancelled
+        vec![
+            vec!["assign", "QP-5", "--to", "a"],
+            vec!["claim", "QP-5", "--as", "a"],
+            vec!["cancel", "QP-5", "--reason", "r"],
+        ],
+        // reassign after release: the released task must be assignable again,
+        // which is exactly the path that would hit `stale_open_assignment` if
+        // the release had failed to close its row.
+        vec![
+            vec!["assign", "QP-2", "--to", "b"],
+            vec!["claim", "QP-2", "--as", "b"],
+            vec!["abandon", "QP-2", "--as", "b", "--reason", "r"],
+            vec!["assign", "QP-2", "--to", "c"],
+        ],
+        // dep churn around a released task: refresh_ready promotions must not
+        // resurrect a task into `ready` while an assignment is still open.
+        vec![
+            vec!["assign", "QP-6", "--to", "a"],
+            vec!["claim", "QP-6", "--as", "a"],
+            vec!["depends", "QP-6", "--on", "QP-3", "--as", "a"],
+            vec!["reclaim", "QP-6", "--reason", "r"],
+            vec!["depends", "QP-6", "--on", "QP-3", "--rm"],
+        ],
+    ];
+
+    let check = |label: &str| {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let bad: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM assignment a JOIN task t ON t.id = a.task_id
+                  WHERE a.completed_at IS NULL AND t.state NOT IN ('assigned','running')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bad, 0, "open assignment on a released task after {label}");
+        let multi: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM (SELECT task_id FROM assignment
+                   WHERE completed_at IS NULL GROUP BY task_id HAVING count(*) > 1)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(multi, 0, "more than one open assignment after {label}");
+    };
+
+    for seq in &sequences {
+        for step in seq {
+            qp(&db).args(step).assert().success();
+            check(&step.join(" "));
+        }
+    }
 }
 
 #[test]
