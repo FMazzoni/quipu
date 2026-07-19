@@ -93,11 +93,10 @@ against the source. Leave it alone if it merely sounds outdated.
 
 **When `$QUIPU_VAULT` is unset or the path does not exist** — the vault is
 external and per-machine, so this is the common case, not an error. Check
-rationale against `qp decisions` alone, then mark every rationale claim you
-could not reach `unverifiable` and name the vault as the reason. Do not edit
-or delete a rationale claim you could not check: an unreachable source is not
-evidence the claim is wrong. Behavioural and structural claims are unaffected
-— keep verifying them.
+rationale against `qp decisions` alone, mark every claim you could not reach
+`unverifiable`, and name the vault as the reason. Never edit or delete a
+rationale claim you could not check — an unreachable source is not evidence the
+claim is wrong. Keep verifying behavioural and structural claims as normal.
 
 ## Rules for anything you write
 
@@ -162,16 +161,29 @@ compromise between them; it is worse than either. Before you write a hedge
 (`generally`, `a few`, `mostly`, `usually`, `in some cases`), treat it as a
 signal you stopped reading the code too early and go back.
 
-Deleting is a finding. Report what you removed and why, the same as a fix.
+Deleting is a finding. Report what you removed and why, the same as a fix. Cut
+plus ticket is the one case where you do both: the deletion is mechanical (the
+claim is false either way), the replacement wording is the judgement call.
 
 ## What to do with a finding
 
-**Fix in place** when the correct statement is unambiguous from the code — a
-renamed function, a moved module, a changed exit code.
+This boundary is the same in a targeted run and in a sweep. Draw it per claim,
+not per file.
 
-**File a ticket** when the fix requires a judgement call, when the doc and the
-code disagree about intent, or when the doc is right and the *code* looks
-wrong:
+**Fix in place** when the correct statement is recoverable from the code or
+tests with no judgement — a renamed function, a moved module, a changed exit
+code, a stale row in a table, a missing entry in a list the code enumerates.
+Test: could you have derived the replacement wording by reading, without
+choosing? If yes, fix it.
+
+**File a ticket** when any of these hold:
+
+- the fix requires choosing between defensible alternatives (two wordings, two
+  places the sentence could live),
+- the doc and the code disagree about *intent*, not detail,
+- the doc is right and the *code* looks wrong,
+- the fix is structural — redrawing a diagram, resequencing a section, merging
+  two headers — even when every individual fact in it is obvious.
 
 ```
 qp add "<what drifted>" --tag kind:docs --tag docs-audit --description "..."
@@ -179,6 +191,9 @@ qp add "<what drifted>" --tag kind:docs --tag docs-audit --description "..."
 
 Include the file, the section, the claim as written, and what the code
 actually does. No line numbers.
+
+If you catch yourself weighing which of two rewordings reads better, you are
+past the boundary: stop and file the ticket.
 
 **Say nothing** when the claim is correct. Do not manufacture findings to look
 thorough — a clean result is a real result.
@@ -193,15 +208,28 @@ rg -l '^//!' src/ ; find docs/ -name '*.md'
 ```
 
 Never accept a file count from the prompt, a previous sweep, or a ticket — the
-set grows every wave, and a briefed "23 files" against an actual 25 turns a
-92% sweep into a reported-complete one. If your enumeration disagrees with the
-number you were given, say so and use yours.
+set grows every wave, and a briefed "23" against an actual 25 turns a 92% sweep
+into a reported-complete one. If your enumeration disagrees with the number you
+were given, say so and use yours.
 
 Check each file independently; a stale header in one says nothing about
-another. Report a per-file verdict — `ok`, `drifted`, or `unverifiable` — and
-file one ticket per drifted file. Then state checked-of-total against the
-denominator you enumerated, so a partial sweep is never mistaken for a
-complete one.
+another.
+
+A sweep does not change the fix-or-ticket boundary — apply it claim by claim as
+you go. Fix the mechanical drift inline; file **one ticket per file that still
+has unfixed drift** once you have. A file whose drift you fixed entirely inline
+gets no ticket.
+
+Report a per-file verdict — `ok`, `fixed`, `drifted`, or `unverifiable`, where
+`fixed` means all drift repaired inline and `drifted` means a ticket is open. A
+file where you did both is `drifted` — an open ticket outranks a partial fix.
+Then state checked-of-total against the denominator you enumerated, so a
+partial sweep is never mistaken for a complete one.
+
+**Commit the whole sweep as one commit**, not one per file. The repo convention
+is one conventional commit per slice, and a sweep is one slice. List the files
+you changed in the body, one line each with the claim you corrected, so a
+reviewer can map every hunk to a finding without re-deriving it.
 
 ## Verifying afterwards
 
