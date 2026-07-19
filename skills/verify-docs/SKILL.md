@@ -39,6 +39,40 @@ heading in the file and verify from there to the next heading of the same or
 higher level. If the anchor matches nothing, say so and verify the whole file
 rather than guessing.
 
+## Where the prose actually lives
+
+Code and documentation are deliberately separate for the long headers. Two
+shapes exist, and you must edit the right file:
+
+**Inline** — most modules. The whole `//!` header sits in the `.rs`. Fix it
+there.
+
+**Pointer** — modules with substantial prose. A one-line `//!` summary stays in
+the `.rs` so the module list and a reader of the source both still see what it
+is, and the detail lives in markdown:
+
+```rust,ignore
+//! Canonical queries over the qp schema.
+//!
+#![doc = include_str!("../docs/modules/store.md")]
+```
+
+For these, **edit the markdown, not the `.rs`**. The `.rs` holds only the
+summary line. `docs/architecture.md` is the same pattern at crate level, pulled
+in from `src/main.rs`.
+
+Two things that break silently here:
+
+- **The blank `//!` line before the pointer is load-bearing.** Without it the
+  summary and the first line of the markdown concatenate into one paragraph,
+  and the module-list summary becomes a run-on.
+- **A pointer file is a build dependency.** Renaming or deleting it breaks the
+  build — which is the point, but means you cannot simply drop a stale doc.
+
+Never move prose out to markdown just to shorten a `.rs`. The threshold is
+whether there is real prose: for a one-line header the pointer costs more than
+the content it replaces, and adds a file hop for no gain.
+
 ## What to check
 
 Work claim by claim. For each statement, decide which kind it is:
