@@ -8,7 +8,7 @@ pub struct ListArgs {
     #[arg(long = "assigned-to")]
     pub assigned_to: Option<String>,
     #[arg(long = "state")]
-    pub state: Option<String>,
+    pub state: Option<db::State>,
     #[arg(long)]
     pub tag: Vec<String>,
     #[arg(long)]
@@ -21,7 +21,7 @@ pub struct ListArgs {
 pub fn run(db_path: &std::path::Path, a: ListArgs) -> Result<()> {
     let conn = db::open(db_path)?;
     let filter = store::TaskFilter {
-        state: a.state.as_deref(),
+        state: a.state.map(|s| s.as_str()),
         assigned_to_glob: a.assigned_to.as_deref(),
         tags: &a.tag,
         tier: None,

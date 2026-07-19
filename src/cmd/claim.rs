@@ -58,8 +58,8 @@ pub fn run(db_path: &std::path::Path, a: ClaimArgs) -> Result<()> {
         }
         // Guarded transition: task must currently be `assigned`.
         let n = tx.execute(
-            "UPDATE task SET state = 'running' WHERE id = ? AND state = 'assigned'",
-            [task_id],
+            "UPDATE task SET state = ?1 WHERE id = ?2 AND state = ?3",
+            rusqlite::params![db::State::Running, task_id, db::State::Assigned],
         )?;
         if n != 1 {
             return Err(db::conflict(

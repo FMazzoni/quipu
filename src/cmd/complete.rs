@@ -58,8 +58,8 @@ pub fn run(db_path: &std::path::Path, a: CompleteArgs) -> Result<()> {
             ));
         }
         let n = tx.execute(
-            "UPDATE task SET state = 'done' WHERE id = ? AND state = 'running'",
-            [task_id],
+            "UPDATE task SET state = ?1 WHERE id = ?2 AND state = ?3",
+            rusqlite::params![db::State::Done, task_id, db::State::Running],
         )?;
         if n != 1 {
             return Err(db::conflict(

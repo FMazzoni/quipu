@@ -8,7 +8,7 @@ pub struct WaitArgs {
     #[arg(long)]
     pub tag: Vec<String>,
     #[arg(long)]
-    pub state: Option<String>,
+    pub state: Option<db::State>,
     #[arg(long)]
     pub empty: bool,
     /// Block until the tag-matched cohort has drained: total > 0 and no task
@@ -32,9 +32,9 @@ pub fn run(db_path: &std::path::Path, a: WaitArgs) -> Result<()> {
     let conn = db::open(db_path)?;
     let mut sql = String::from("SELECT COUNT(*) FROM task t WHERE 1=1");
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-    if let Some(s) = &a.state {
+    if let Some(s) = a.state {
         sql.push_str(" AND t.state = ?");
-        params.push(Box::new(s.clone()));
+        params.push(Box::new(s));
     }
     for tag in &a.tag {
         sql.push_str(" AND EXISTS (SELECT 1 FROM tag WHERE tag.task_id = t.id AND tag.name = ?)");

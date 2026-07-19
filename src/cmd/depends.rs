@@ -141,11 +141,11 @@ pub fn run(db_path: &std::path::Path, a: DependsArgs) -> Result<()> {
             // If the upstream was `ready` and the new dep is unresolved, demote to pending.
             // Idempotent guarded UPDATE — matches only ready tasks with an unresolved dep.
             let demoted = tx.execute(
-                "UPDATE task SET state = 'pending'
-                  WHERE id = ?1 AND state = 'ready'
+                "UPDATE task SET state = ?1
+                  WHERE id = ?2 AND state = ?3
                     AND EXISTS (SELECT 1 FROM dep d JOIN task t2 ON t2.id = d.depends_on_task_id
-                                 WHERE d.task_id = ?1 AND t2.state NOT IN ('done','cancelled'))",
-                [task_id],
+                                 WHERE d.task_id = ?2 AND t2.state NOT IN ('done','cancelled'))",
+                rusqlite::params![db::State::Pending, task_id, db::State::Ready],
             )?;
             if demoted == 1 {
                 db::insert_event(
