@@ -24,12 +24,10 @@ lint: fmt-check
     cargo test
 
 # browsable code docs, with the "copy fix command" button injected
-# --html-after-content lands before </body> with the DOM parsed, so the script
-# needs no DOMContentLoaded wrapper. The path is resolved against the package
-# root, so an absolute path is used to survive --manifest-path invocations.
+# The --html-after-content flag lives in .cargo/config.toml so that a bare
+# `cargo doc` injects it too — otherwise that silently reverts the styling.
 docs:
-    RUSTDOCFLAGS="--html-after-content $(pwd)/docs/assets/verify-button.html" \
-        cargo doc --no-deps
+    cargo doc --no-deps
     @echo "open: file://$(pwd)/target/doc/qp/index.html"
 
 # stripped-binary size + cold start (verifies leanness budget)

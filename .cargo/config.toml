@@ -1,2 +1,14 @@
 [alias]
 test-int = "test --test cli"
+
+# Inject the docs helper (copy-fix-command button + item-table styling) into
+# EVERY rustdoc invocation, not just `just docs`.
+#
+# Without this, a bare `cargo doc` — run by hand, by an IDE, or by a warning
+# check — silently regenerates the pages without the injection and reverts the
+# styling with no error. Setting it here means there is one way for the docs to
+# be built and it is always the right one.
+#
+# The path is resolved relative to the package root.
+[build]
+rustdocflags = ["--html-after-content", "docs/assets/verify-button.html"]
