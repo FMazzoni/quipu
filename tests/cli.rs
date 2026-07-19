@@ -414,6 +414,36 @@ fn help_lists_core_commands() {
     }
 }
 
+/// Help text for the release commands names the states the code actually
+/// guards on.
+///
+/// `abandon --help` claimed `running → ready` for months while the code wrote
+/// `State::Pending` from `assigned`/`running` (QP-165). Help is the only
+/// description of the state machine most agents ever read, so a wrong edge
+/// here is worse than no edge; assert the target state by name.
+#[test]
+fn release_command_help_names_the_real_transition() {
+    for cmd in ["abandon", "reclaim", "block"] {
+        let assert = Command::cargo_bin("qp")
+            .unwrap()
+            .args([cmd, "--help"])
+            .assert()
+            .success();
+        let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+        let summary = out.lines().next().unwrap_or_default().to_string();
+        assert!(
+            summary.contains("pending"),
+            "`qp {cmd} --help` does not name `pending` as the target state, but \
+             {cmd}.rs writes `db::State::Pending`. Summary was: {summary:?}"
+        );
+        assert!(
+            !summary.contains("ready"),
+            "`qp {cmd} --help` claims a transition to `ready`; the code writes \
+             `db::State::Pending`. Summary was: {summary:?}"
+        );
+    }
+}
+
 fn qp(db: &std::path::Path) -> Command {
     let mut c = Command::cargo_bin("qp").unwrap();
     c.env("QP_DB", db);
