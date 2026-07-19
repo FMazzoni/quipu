@@ -10,7 +10,7 @@ that survive refactors. Per-file detail lives in `//!` headers next to the code.
 > wrong, that is a bug — file it.
 >
 > Claims about *behaviour* should be traceable to something you can check
-> yourself: the test suite in [`tests/`](../tests), or a command you can run by
+> yourself: the test suite in [`tests/`](https://github.com/FMazzoni/quipu/tree/main/tests), or a command you can run by
 > hand. Claims about *internal structure* are the ones most likely to rot.
 
 ## What quipu is
@@ -18,7 +18,7 @@ that survive refactors. Per-file detail lives in `//!` headers next to the code.
 A task substrate for coordinating parallel agents. It is deliberately **not** an
 orchestrator: it holds state and enforces safe transitions, while orchestration
 patterns (wave, critique-loop, branch-and-evaluate) live in
-[`skills/`](../skills). The binary stays pattern-agnostic.
+[`skills/`](https://github.com/FMazzoni/quipu/tree/main/skills). The binary stays pattern-agnostic.
 
 Everything is one SQLite file per project, and one process per command. No
 daemon, no server, no async runtime.
@@ -96,8 +96,8 @@ Almost everything in the codebase is one of these three things.
 Terminal states are `done` and `cancelled`. Everything else is in flight.
 
 **Every mutating command is exactly one edge in this graph.** That is why those
-files are small — an edge is a small thing. [`assign.rs`](../src/cmd/assign.rs)
-is `ready → assigned`; [`claim.rs`](../src/cmd/claim.rs) is
+files are small — an edge is a small thing. [`assign.rs`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/assign.rs)
+is `ready → assigned`; [`claim.rs`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/claim.rs) is
 `assigned → running`.
 
 Release paths (`abandon`, `reclaim`) both return the task to `pending` rather
@@ -107,7 +107,7 @@ it to `ready` when they do. One rule, one place.
 ### 2. A DAG that decides `pending` vs `ready`
 
 The `dep` table. Exactly one function computes readiness — `refresh_ready` in
-[`db.rs`](../src/db.rs) — and any command that might resolve a dependency calls
+[`db.rs`](https://github.com/FMazzoni/quipu/blob/main/src/db.rs) — and any command that might resolve a dependency calls
 it. A task is `ready` when no dependency is left in a non-terminal state.
 
 Cycle prevention lives in `would_cycle`, a recursive CTE in the same file.
@@ -115,8 +115,8 @@ Cycle prevention lives in `would_cycle`, a recursive CTE in the same file.
 ### 3. An append-only event log
 
 Every mutation writes a row to `event` via `insert_event`. This is the audit and
-forensics spine: [`timeline`](../src/cmd/timeline.rs),
-[`decisions`](../src/cmd/decisions.rs), and [`watch`](../src/cmd/watch.rs) are
+forensics spine: [`timeline`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/timeline.rs),
+[`decisions`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/decisions.rs), and [`watch`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/watch.rs) are
 all just queries over it.
 
 Events are only ever inserted inside the same transaction as the mutation they
@@ -140,7 +140,7 @@ db::with_tx(&mut conn, |tx| {              // 1. BEGIN IMMEDIATE — take the wr
 
 Four parts, and each one is load-bearing:
 
-1. **`BEGIN IMMEDIATE`** (`with_tx` in [`db.rs`](../src/db.rs)) takes SQLite's
+1. **`BEGIN IMMEDIATE`** (`with_tx` in [`db.rs`](https://github.com/FMazzoni/quipu/blob/main/src/db.rs)) takes SQLite's
    write lock at transaction start rather than at first write. Writers therefore
    serialize, and no other process can interleave between a read and a write
    inside the block.
@@ -167,9 +167,9 @@ The most useful split in the codebase, and it is not visible from the file tree.
 | **Mutators** | `add`, `assign`, `claim`, `complete`, `abandon`, `reclaim`, `cancel`, `block`, `depends`, `edit`, `tag`, `log`, `relation` | **all of it** |
 | **Projections** | `list`, `tree`, `show`, `status`, `wave`, `timeline`, `decisions`, `watch`, `report`, `wait` | none — read-only |
 
-Projections cannot corrupt anything. [`report.rs`](../src/cmd/report.rs) is by
+Projections cannot corrupt anything. [`report.rs`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/report.rs) is by
 far the largest file in the crate and is also the least dangerous — worst case it
-renders something wrong. Meanwhile [`claim.rs`](../src/cmd/claim.rs) is one of
+renders something wrong. Meanwhile [`claim.rs`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/claim.rs) is one of
 the smallest, and if it is wrong you double-dispatch work to two agents.
 
 Scrutiny should follow risk, not line count.
@@ -183,7 +183,7 @@ main.rs      clap subcommand enum → dispatch. Routing only.
   cmd/*.rs   argument parsing and rendering
 ```
 
-[`store.rs`](../src/store.rs) exists because the same read queries were
+[`store.rs`](https://github.com/FMazzoni/quipu/blob/main/src/store.rs) exists because the same read queries were
 hand-written across many command files in subtly divergent forms. Its own module
 header explains the scope rules — notably that **guarded-transition `UPDATE`s
 deliberately do not move there**, since each has a distinct `WHERE`/`SET` and
@@ -198,7 +198,7 @@ One SQLite file, default `.quipu/db.sqlite`, discovered by walking up from the
 cwd — with a git-aware fallback so that commands run inside a worktree find the
 main repo's store.
 
-PRAGMAs set on every open, in [`db.rs`](../src/db.rs):
+PRAGMAs set on every open, in [`db.rs`](https://github.com/FMazzoni/quipu/blob/main/src/db.rs):
 
 | pragma | value | why |
 |---|---|---|
@@ -208,7 +208,7 @@ PRAGMAs set on every open, in [`db.rs`](../src/db.rs):
 | `busy_timeout` | `5000` | wait for a contended write lock instead of failing |
 
 Tables: `meta`, `default_tag`, `task`, `dep`, `assignment`, `event`, `tag`,
-`relation`. See [`schema.sql`](../src/schema.sql), which is the authority.
+`relation`. See [`schema.sql`](https://github.com/FMazzoni/quipu/blob/main/src/schema.sql), which is the authority.
 
 Two notes on the schema as it stands:
 
@@ -216,20 +216,20 @@ Two notes on the schema as it stands:
   enforced by the guarded `WHERE` clauses, but **there is no `CHECK`
   constraint** — the domain is not enforced by the database itself.
 - `created_at` and friends default to SQLite's `strftime`, while Rust-side
-  timestamps come from `now_rfc3339` in [`time.rs`](../src/time.rs). These
+  timestamps come from `now_rfc3339` in [`time.rs`](https://github.com/FMazzoni/quipu/blob/main/src/time.rs). These
   produce different sub-second precision, so cross-table lexicographic time
   comparison is not reliable.
 
 ## Identifiers
 
 Tasks carry a rowid and a display id (`QP-1`), formatted by
-[`id.rs`](../src/id.rs). The prefix is per-store, fixed at `qp init`, default
+[`id.rs`](https://github.com/FMazzoni/quipu/blob/main/src/id.rs). The prefix is per-store, fixed at `qp init`, default
 `QP`. `resolve` matches on the display-id string, so the prefix in user input is
 informational.
 
 ## Exit codes
 
-Set in [`main.rs`](../src/main.rs). Agents branch on these, so they are a
+Set in [`main.rs`](https://github.com/FMazzoni/quipu/blob/main/src/main.rs). Agents branch on these, so they are a
 contract:
 
 | code | meaning |
@@ -255,19 +255,19 @@ and "everything finished" must not look alike to an orchestrator.
 To understand the system, read along the state machine rather than the file
 tree — the alphabetical `cmd/` listing carries no signal.
 
-1. `with_tx` and `insert_event` in [`db.rs`](../src/db.rs) — the two primitives
+1. `with_tx` and `insert_event` in [`db.rs`](https://github.com/FMazzoni/quipu/blob/main/src/db.rs) — the two primitives
    everything else uses.
-2. [`add.rs`](../src/cmd/add.rs) → [`assign.rs`](../src/cmd/assign.rs) →
-   [`claim.rs`](../src/cmd/claim.rs) → [`complete.rs`](../src/cmd/complete.rs),
+2. [`add.rs`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/add.rs) → [`assign.rs`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/assign.rs) →
+   [`claim.rs`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/claim.rs) → [`complete.rs`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/complete.rs),
    in that order. That is one task's whole life.
-3. [`abandon.rs`](../src/cmd/abandon.rs) and
-   [`reclaim.rs`](../src/cmd/reclaim.rs) — the recovery edges.
-4. `refresh_ready` and `would_cycle` in [`db.rs`](../src/db.rs) — the two DAG
+3. [`abandon.rs`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/abandon.rs) and
+   [`reclaim.rs`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/reclaim.rs) — the recovery edges.
+4. `refresh_ready` and `would_cycle` in [`db.rs`](https://github.com/FMazzoni/quipu/blob/main/src/db.rs) — the two DAG
    operations.
 
 Skip everything else until you need it.
 
-[`tests/cli.rs`](../tests/cli.rs) is also worth reading early: the tests drive
+[`tests/cli.rs`](https://github.com/FMazzoni/quipu/blob/main/tests/cli.rs) is also worth reading early: the tests drive
 the real binary and assert on its observable behaviour, so they read closer to
 shell scripts than to Rust, and they are the executable specification for
 everything above.
