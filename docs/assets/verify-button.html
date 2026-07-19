@@ -28,6 +28,15 @@
      Keep the background solid and stay unobtrusive via size and border. */
   #qp-verify:hover, #qp-verify:focus-visible { border-color: var(--link-color, #3873ad); }
   #qp-verify[data-copied="1"] { border-color: var(--link-color, #3873ad); }
+
+  /* Defence, not the fix: module tables look right because every module now
+     carries a one-line summary (QP-91). Clamp anyway so that one over-long
+     doc comment cannot wreck the table again — rustdoc does not truncate,
+     it dumps the whole first paragraph into the cell. */
+  dl.item-table > dd {
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
 </style>
 <script>
 (function () {
