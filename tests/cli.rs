@@ -913,6 +913,117 @@ fn block_creates_blocker_task_and_demotes_original() {
         .success();
 }
 
+/// `--tag` replaces the `kind:blocker` default rather than adding to it, so a
+/// caller with its own taxonomy doesn't get a foreign convention merged in.
+#[test]
+fn block_tag_overrides_default_convention() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "main"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "alice"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args([
+            "block",
+            "QP-1",
+            "--as",
+            "alice",
+            "--new",
+            "needs review",
+            "--tag",
+            "kind:review",
+            "--tag",
+            "urgent",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("block --json");
+    assert_eq!(v["blocker_id"], "QP-2");
+    assert_eq!(
+        v["blocker_tags"],
+        serde_json::json!(["kind:review", "urgent"])
+    );
+
+    // The default convention must NOT have been applied alongside the overrides.
+    let out = qp(&db)
+        .args(["list", "--tag", "kind:blocker", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 0, "default tag leaked in");
+
+    // Both overrides are real, filterable tags.
+    for t in ["kind:review", "urgent"] {
+        let out = qp(&db)
+            .args(["list", "--tag", t, "--json"])
+            .assert()
+            .success();
+        let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+        assert_eq!(v.as_array().unwrap().len(), 1, "missing tag {t}");
+        assert_eq!(v[0]["display_id"], "QP-2");
+    }
+}
+
+/// Omitting `--tag` keeps the wave-skill convention working unchanged.
+#[test]
+fn block_defaults_to_kind_blocker_tag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "main"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "alice"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["block", "QP-1", "--as", "alice", "--new", "x", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(v["blocker_tags"], serde_json::json!(["kind:blocker"]));
+}
+
+/// An empty `--tag` is rejected before the transaction, so no orphan task lands.
+#[test]
+fn block_rejects_empty_tag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "main"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args([
+            "block", "QP-1", "--as", "alice", "--new", "x", "--tag", "  ",
+        ])
+        .assert()
+        .failure();
+    // QP-1 stays running; no blocker task was created.
+    let out = qp(&db).args(["list", "--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    assert_eq!(v[0]["state"], "running");
+}
+
 #[test]
 fn wave_groups_by_state_and_includes_last_event() {
     let tmp = tempfile::tempdir().unwrap();
