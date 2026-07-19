@@ -26,6 +26,13 @@ jobs:
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      # Mirrors `just doc-check`. `cargo rustdoc -- -D warnings` APPENDS to the
+      # `[build] rustdocflags` in .cargo/config.toml; `RUSTDOCFLAGS="-D warnings"
+      # cargo doc` would REPLACE it and silently drop the --html-after-content
+      # injection while still passing green. Keep this in sync with the justfile.
+      - name: rustdoc
+        run: cargo rustdoc -- -D warnings
+
       - name: tests
         run: cargo test
 

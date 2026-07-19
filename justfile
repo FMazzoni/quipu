@@ -18,8 +18,25 @@ fmt:
 fmt-check:
     cargo fmt --all -- --check
 
-# the gate: formatting + clippy (denied) + tests
-lint: fmt-check
+# rustdoc warning gate (hard fail)
+#
+# Use `cargo rustdoc -- -D warnings`, NOT `RUSTDOCFLAGS="-D warnings" cargo doc`.
+# RUSTDOCFLAGS *replaces* the `[build] rustdocflags` in .cargo/config.toml, so the
+# naive env-var form silently drops the --html-after-content injection: the docs
+# still build, the gate still passes, and the copy-fix button + item-table styling
+# vanish with no error (the bug fixed in a79558c). Args after `--` are *appended*
+# to the config value instead, so both survive. Verified against
+# target/doc/qp/index.html: this form keeps `qp-verify` and `fit-content(28%)`,
+# the env-var form loses them.
+#
+# `cargo rustdoc` documents the single target (bin `qp`) and takes no --no-deps.
+# If a lib target is ever added it errors on ambiguity rather than silently gating
+# only half the crate — fix it then by gating each target explicitly.
+doc-check:
+    cargo rustdoc -- -D warnings
+
+# the gate: formatting + clippy (denied) + rustdoc (denied) + tests
+lint: fmt-check doc-check
     cargo clippy --all-targets -- -D warnings
     cargo test
 
