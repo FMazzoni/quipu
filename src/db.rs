@@ -73,10 +73,15 @@ pub const STATE_READY: &str = State::Ready.as_str();
 /// Typed errors. `main` matches on the variant to pick an exit code and (in
 /// `--json` mode) a `kind` string for the `{"error": {...}}` envelope.
 ///
-/// Four buckets, deliberately — not one variant per failure site. The
+/// Five buckets, deliberately — not one variant per failure site. The
 /// *variant* is what a calling agent branches retry-vs-give-up on; the *code*
 /// string inside `Conflict`/`Invariant` is for logs and precise skill
 /// authoring, and can grow additively without breaking existing matchers.
+///
+/// The `--json` envelope carries a sixth `kind`, `internal`, which is not a
+/// variant here: `main.rs` emits it for any error that does not downcast to
+/// this type. Adding a variant means updating `kind()`, `exit_code()`, and
+/// `README.md`'s envelope table together.
 #[derive(Debug, Error)]
 pub enum QuipuError {
     /// Wrong state / lost race — retrying may succeed once state settles. Exit 2.
