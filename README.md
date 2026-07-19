@@ -94,5 +94,5 @@ mismatch warning above — the guard against filing tickets into the wrong proje
 
 - No liveness detection (no PID/heartbeat). Orchestrator runs `qp reclaim` on detected failures.
 - Single SQLite, single machine. Remote/sync is v2.
-- Display ID prefix (`T`) is hardcoded.
+- Display ID prefix is fixed at `qp init` and cannot be changed afterwards (`qp init --prefix ACME`; default `QP`). Re-running `init` with a different prefix warns and keeps the original.
 - Exit codes: `0` success, `1` invalid input, `2` conflict/not-owner/not-found/invariant, `3` wait timeout, `4` `wait --cohort-done` matched an empty cohort.
