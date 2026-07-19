@@ -15,6 +15,7 @@ You are the **coordinator**. Subagents do all code changes inside `wt`-managed w
 - [ ] Never edit code. Exception: resolve merge conflicts during `wt merge` rebase.
 - [ ] Never use `isolation: "worktree"` on Agent calls. Always `wt switch -c`.
 - [ ] Never run `cargo test` (workspace-wide) while subagents are active — multiple rustc graphs OOM the machine. Run the single full test pass at wrap-up.
+- [ ] **Never ask a subagent for a full-suite test count.** You own the suite total; they own their filters. See "Do not ask subagents for suite totals" under Phase 3.
 - [ ] No Co-Authored-By trailer, no "Generated with Claude Code" footer on commits.
 - [ ] All other hard rules: see `CLAUDE.md` (leanness, no async, no tracing, guarded state transitions).
 
@@ -214,6 +215,7 @@ cd there first. All commands and paths are relative to it.
   fallback finds the main repo's .quipu/). Do NOT set QP_DB.
 - Narrow tests only: `cargo test --test cli -- <filter>` or a specific
   test file. NEVER `cargo test` (no filter) while other agents are running.
+  Report which filters you ran and that they passed — not a suite total.
 - Single commit, conventional style, no Co-Authored-By trailer.
 - All hard rules in CLAUDE.md apply (leanness, no async, no tracing,
   guarded state transitions, no db::now()).
@@ -232,6 +234,29 @@ cd there first. All commands and paths are relative to it.
 - Files changed
 - Sibling-slice APIs you referenced (so coordinator knows merge order)
 ```
+
+### Do not ask subagents for suite totals
+
+`qp-implement` forbids a bare `cargo test`, because concurrent rustc graphs OOM
+the machine. A dispatch prompt that asks a subagent to "run the FULL suite
+before committing" or to report a total test count therefore instructs it to
+break that rule — a suite total is not obtainable from narrow filters without
+summing per-target runs by hand.
+
+This is not a hypothetical conflict. Wave-10 dispatch prompts asked for exactly
+that, and the QP-37 and QP-41/49 agents both ran a bare `cargo test` and both
+self-reported it as a process slip. The prompts were wrong, not the rule.
+
+So: **ask subagents which filters they ran and whether those passed. Never ask
+for a total.** You run the full suite once at Phase 7, after all merges, with no
+agents live — that is already the documented practice, and it is the only place
+a suite total is both safe to produce and meaningful (a pre-merge total from one
+worktree does not describe the tree you are shipping anyway).
+
+The OOM rule itself stays as written. Nobody has measured whether the risk is
+still real on current hardware, and "three agents broke it and nothing burned"
+is not a measurement. If you want it relaxed, measure it and file a
+`kind:decision` ticket — do not relax a safety rule to excuse a prompt error.
 
 **Model selection:**
 
@@ -252,18 +277,21 @@ cd there first. All commands and paths are relative to it.
 ## Phase 4 — Merge
 
 ```bash
-wt merge -C <worktree-path> -y && \
-  ./target/release/qp tag QP-<N> add commit:$(git rev-parse --short=6 HEAD)
+wt merge -C <worktree-path> -y || exit 1
+SHA=$(git -C <main-repo-path> rev-parse --short=6 <target-branch>)
+[ -n "$SHA" ] || { echo "SHA resolution produced nothing — QP-<N> NOT tagged" >&2; exit 1; }
+./target/release/qp tag QP-<N> add "commit:$SHA"
 ```
 
-**Tagging the merged SHA is a required step, not an aside.** Chain it in the same Bash call as the merge so it cannot be skipped — an untagged ticket is an incomplete merge, and Phase 7 checks for exactly this.
+**Tagging the merged SHA is a required step, not an aside.** Keep it in the same Bash call as the merge so it cannot be skipped — an untagged ticket is an incomplete merge, and Phase 7 checks for exactly this.
+
+**Resolve the SHA explicitly, and check it before tagging.** Do not write `add commit:$(git rev-parse --short=6 HEAD)` as a single chained expression. That form resolves `HEAD` in **your** cwd — not the worktree's, which `wt merge` has already removed — so it is correct only when your checkout happens to be the main repo sitting on the target branch. When it is not, the substitution can produce an empty string and the chain cheerfully tags the ticket `commit:` with no SHA. That is not hypothetical: it happened, the tag sat live on QP-56, and the Phase 7 audit below matched it (`commit:[0-9a-f]*` is happy with zero hex digits) and reported the ticket as correctly tagged. The `-C <main-repo-path> ... <target-branch>` form plus the `-n "$SHA"` guard removes both the cwd ambiguity and the silent-empty outcome.
+
+`qp tag add` now also rejects a name ending in `:` outright, so a bare `commit:` fails loudly even if this guard is bypassed. Treat that as the backstop, not the plan — the guard here is what produces a useful error at the point the SHA was supposed to be resolved.
 
 **Only the coordinator can tag, and only after the merge.** `wt merge` squashes *and rebases* before fast-forwarding, so every SHA on the worktree branch is rewritten on the way to the target branch. `--no-squash` does not change this — it skips the squash but still rebases, so the SHAs are still new. A SHA captured on the branch side, by anyone, names a commit that never lands on the target branch and dies at the next GC. The post-merge SHA is the only one that is real. This is why `qp-implement` forbids subagents from tagging.
 
-Two things that make this safe, both verified:
-
-- `qp tag` works on a `done` ticket. The subagent completing its ticket in its own final steps does not block you — no reopen, no state juggling. Tag it as-is.
-- The chained `git rev-parse` runs in **your** cwd, not the worktree's (which `wt merge` has already removed). That resolves correctly only if your checkout is the main repo sitting on the target branch. If you merged from somewhere else, resolve the SHA explicitly with `git -C <main-repo> rev-parse --short=6 <target-branch>`.
+`qp tag` works on a `done` ticket. The subagent completing its ticket in its own final steps does not block you — no reopen, no state juggling. Tag it as-is.
 
 The tag uses the namespace `commit:<sha>` so reverse lookup is just `qp list --tag commit:<sha>` — no new commands needed.
 
@@ -324,14 +352,21 @@ Dispatch ≤4 critic agents in parallel, one lens each. Reference `.claude/skill
    the wave (Phase 1); this is where the human sees what they decided. Use the
    boundary id you captured in Phase 3:
    ```bash
-   ./target/release/qp timeline --kind decision --since <boundary-id>
-   ./target/release/qp list --tag "decision:critical"      # the loud ones
+   ./target/release/qp decisions --since <boundary-id>
+   ./target/release/qp decisions --since <boundary-id> --auto-only   # agent-made only
+   ./target/release/qp list --tag "decision:critical"                # the loud ones
    ```
-   **Use `timeline --kind decision`, not `qp decisions`.** The `decisions`
-   alias is more ergonomic but takes only `--db`, `--json` and `--auto-only` —
-   no `--since` — so it returns the entire history (133 events and climbing)
-   and the wave's dozen drown in it. If a future `qp decisions` grows
-   `--since`, prefer it here; until then the alias cannot express this query.
+   **Use `qp decisions --since`, not `timeline --kind decision`.** The alias
+   grew `--since` (QP-144) and is now strictly the more ergonomic way to write
+   the same query — same clause, same semantics. `--auto-only` composes with
+   `--since`, so the second line above narrows to decisions this wave's agents
+   made themselves.
+
+   `--since` is **exclusive**: `--since 730` starts at event 731. The Phase 3
+   boundary is the max id *before* anything was dispatched, so passing it
+   exactly as captured is already correct — the first wave event is the first
+   one returned. Do not adjust it: +1 silently drops the wave's first decision,
+   −1 pulls in a pre-wave event that is not yours to report.
 
    Report to the human as a short scannable list — **critical ones first and
    marked**, then the rest, one line each: ticket id, the choice, the one-line

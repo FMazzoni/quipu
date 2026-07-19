@@ -12,7 +12,7 @@ allowed-tools: Read Glob Grep Bash Edit Write
 
 - [ ] **The prompt is the contract.** Don't go searching for ambient plan files. The slice body is embedded in your prompt; if a plan file is needed, the prompt cites it with an absolute path.
 - [ ] **Bare `./target/release/qp` works** from any worktree (git-common-dir fallback finds the main repo's `.quipu/`). Never set `QP_DB=...`.
-- [ ] **Narrow tests only.** `cargo test --test cli -- <filter>` or a specific test file. NEVER bare `cargo test` (no filter) — other agents may be running and parallel rustc invocations OOM the machine.
+- [ ] **Narrow tests only.** `cargo test --test cli -- <filter>` or a specific test file. NEVER bare `cargo test` (no filter) — other agents may be running and parallel rustc invocations OOM the machine. See "Reporting test results" for what to report instead of a suite total, and how to get a count if you genuinely need one.
 - [ ] **One commit.** Conventional style (`feat(cmd): ...`, `fix(db): ...`). No Co-Authored-By trailer. No "Generated with Claude Code" footer.
 - [ ] **Every file you touch exits with a `//!` header.** One short sentence, a period, then a blank `//!` line before any detail — rustdoc uses everything before that blank line as the module-list summary, so a multi-line first paragraph renders as a wall of text in the table. For a command module, the summary is which state-machine edge it implements (`claim` is the `assigned` → `running` edge). Reference files and function names, never line numbers. Fence any example containing `<placeholders>` as ```text or rustdoc deletes them. If a header grows past ~15 lines of prose, keep the one-line summary in the `.rs` and move the detail to `docs/modules/<name>.md` behind `#![doc = include_str!(...)]` — with a blank `//!` line before the pointer, or the summary runs on into the detail.
 - [ ] **All of CLAUDE.md applies:** guarded state transitions, `with_tx` + `IMMEDIATE`, no async runtime, no `tracing` crate, no `db::now()` (use `time::now_rfc3339`), leanness budget.
@@ -70,6 +70,49 @@ For each step in the embedded slice body:
 If you hit ambiguity:
 - A judgement call within the spec's scope: make the call, log the choice as a friction note.
 - A genuine contradiction in the prompt, or missing context that blocks all forward progress: report **NEEDS_CONTEXT** or **BLOCKED**.
+
+## Reporting test results
+
+**Report the filters you ran and that they passed. Do not report a full-suite
+total, and do not run one to get it.** The coordinator runs the full suite once
+at wrap-up, after all merges, with no agents live — that is the only run that
+describes the tree actually being shipped, and it is theirs, not yours. A total
+measured from inside your worktree describes a tree that will not exist after
+the rebase anyway.
+
+If a dispatch prompt asks you for a suite total, the prompt is wrong — the
+coordinator's playbook forbids asking. Say so in your report, give your filter
+results, and carry on. Do not resolve the contradiction by running a bare
+`cargo test`: three agents in a row did exactly that, all self-reported it, and
+the fix was to the prompts, not to the rule.
+
+**If you genuinely need a count**, sum per-target runs instead of taking a bare
+run. Each integration target under `tests/` is its own binary with its own
+`test result:` line, and the unit tests are a target too:
+
+```bash
+for t in cli docs race wave_e2e; do
+  cargo test --release --test $t 2>&1 | grep "^test result"
+done
+cargo test --release --bins 2>&1 | grep "^test result"
+```
+
+Add the `passed` figures. As of this writing that is 150 + 2 + 2 + 2 + 17 = 173.
+
+Two things to get right. It is `--bins`, not `--lib`: quipu has no `src/lib.rs`,
+so the unit tests compile into the `qp` binary and `--lib` silently matches no
+target and prints nothing — you lose 17 tests and the total looks plausible
+anyway. And derive the target list from `ls tests/` rather than trusting the
+loop above, which goes stale the moment someone adds a file.
+
+Sequential, one rustc at a time, is the property the OOM rule actually cares
+about — and it is exactly what a bare `cargo test` gives up. Do not "simplify"
+this to `--tests`, which fans the targets out in parallel again and puts you
+back where you started.
+
+The prohibition itself stands unchanged: nobody has measured whether the OOM
+risk is still real, and an unmeasured safety rule is not relaxed on the grounds
+that breaking it happened not to hurt.
 
 ## If your slice overturns an earlier decision
 

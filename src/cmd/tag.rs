@@ -1,4 +1,6 @@
 //! Add or remove flat labels on a task.
+//!
+#![doc = include_str!("../../docs/modules/tag.md")]
 
 use crate::outcome::{emit, Outcome};
 use crate::{db, id};
@@ -49,6 +51,13 @@ pub fn run(db_path: &std::path::Path, a: TagArgs) -> Result<()> {
             TagOp::Add { name } => {
                 if name.is_empty() {
                     return Err(db::invalid_input("tag name required"));
+                }
+                if name.ends_with(':') {
+                    return Err(db::invalid_input(format!(
+                        "tag '{name}' has an empty value after ':' \
+                         (a shell substitution that produced nothing?); \
+                         use a bare name without the colon for an unnamespaced tag"
+                    )));
                 }
                 tx.execute(
                     "INSERT OR IGNORE INTO tag(task_id, name) VALUES (?,?)",
