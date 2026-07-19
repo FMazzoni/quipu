@@ -1,9 +1,14 @@
 //! Canonical queries over the qp schema.
 //!
-//! Layering (see `$QUIPU_VAULT/plans/2026-07-18-185716-audit-remediation.md`):
+//! Target layering (see `$QUIPU_VAULT/plans/2026-07-18-185716-audit-remediation.md`):
 //!   `db.rs`    — connection, transactions, migrations, guarded-transition helpers
 //!   `store.rs` — canonical read queries + the row types they return
 //!   `cmd/*.rs` — argument parsing and rendering only, no SQL
+//!
+//! **The last line is the goal, not the current state.** `show.rs`, `status.rs`
+//! and `tree.rs` still hand-roll `SELECT`s that have not migrated here. Extraction
+//! is incremental by design; treat an un-migrated query as unfinished work rather
+//! than as a counter-example to the rule.
 //!
 //! Why this module exists: the same queries were hand-written across many
 //! command files in subtly divergent forms — the "latest agent" lookup existed
