@@ -1,3 +1,9 @@
+//! The agent-side release edge: `assigned`/`running` → `pending`.
+//!
+//! Ownership-checked: an agent may only release its own claim. Returns the
+//! task to `pending` rather than guessing whether its deps still hold;
+//! `refresh_ready` promotes it when they do. Compare `reclaim`.
+
 use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;

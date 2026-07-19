@@ -1,3 +1,5 @@
+//! Snapshot of task counts per state.
+
 use crate::db;
 use anyhow::Result;
 use clap::Args;

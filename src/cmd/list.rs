@@ -1,3 +1,5 @@
+//! List tasks with filters.
+
 use crate::{db, store};
 use anyhow::Result;
 use clap::Args;

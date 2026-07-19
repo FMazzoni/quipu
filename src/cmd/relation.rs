@@ -1,3 +1,8 @@
+//! Manage typed, non-blocking references between tasks.
+//!
+//! Unlike deps, relations never affect readiness — they are provenance
+//! (`variant-of`, `supersedes`, `fixes`), not scheduling.
+
 use crate::{db, id};
 use anyhow::Result;
 use clap::{Args, Subcommand};

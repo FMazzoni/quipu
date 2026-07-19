@@ -1,3 +1,7 @@
+//! Show decision events.
+//!
+//! A filter over the same event-tail query `timeline` uses.
+
 use crate::db;
 use crate::store::{self, EventFilter};
 use anyhow::Result;

@@ -1,3 +1,5 @@
+//! Record a free-form event against a task.
+
 use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;

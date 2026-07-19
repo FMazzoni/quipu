@@ -1,8 +1,11 @@
-//! `qp block` — convenience wrapper that creates a new blocker task and links it
-//! as an unresolved dep on the original. Equivalent to:
+//! `qp block` — create a blocker task and link it as an unresolved dep.
 //!
-//!     qp add "<new>" --tag kind:blocker
-//!     qp depends <task> --on <new-id> --as <agent>
+//! Convenience wrapper. Equivalent to:
+//!
+//! ```text
+//! qp add "<new>" --tag kind:blocker
+//! qp depends <task> --on <new-id> --as <agent>
+//! ```
 //!     qp abandon <task> --as <agent>
 //!
 //! collapsed into one transaction so partial failures can't leave a dangling task.
