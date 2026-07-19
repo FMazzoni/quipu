@@ -5,8 +5,8 @@
 //! ```text
 //! qp add "<new>" --tag kind:blocker
 //! qp depends <task> --on <new-id> --as <agent>
+//! qp abandon <task> --as <agent>
 //! ```
-//!     qp abandon <task> --as <agent>
 //!
 //! collapsed into one transaction so partial failures can't leave a dangling task.
 

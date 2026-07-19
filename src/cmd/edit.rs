@@ -1,6 +1,6 @@
 //! `qp edit` — mutate task fields (title, tier, description).
 //!
-//! Emits one `edit` event.
+//! Emits one `edit` event when a field actually changes; a no-op edit emits nothing.
 
 use crate::outcome::{emit, Outcome};
 use crate::{db, id};
