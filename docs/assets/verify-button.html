@@ -29,10 +29,33 @@
   #qp-verify:hover, #qp-verify:focus-visible { border-color: var(--link-color, #3873ad); }
   #qp-verify[data-copied="1"] { border-color: var(--link-color, #3873ad); }
 
-  /* Defence, not the fix: module tables look right because every module now
-     carries a one-line summary (QP-91). Clamp anyway so that one over-long
-     doc comment cannot wreck the table again — rustdoc does not truncate,
-     it dumps the whole first paragraph into the cell. */
+  /* --- item tables (Modules / Structs / Functions lists) ---------------
+     rustdoc lays these out as `display:grid` with `grid-template-columns:
+     33% 67%`. Module names are short, so a fixed 33% column leaves a wide
+     dead gap between a name and its summary and the pairing gets hard to
+     read. Size column one to its content instead (capped, so a long name
+     cannot run away), and let a real column-gap do the separating. */
+  dl.item-table:not(.reexports) {
+    grid-template-columns: fit-content(28%) minmax(0, 1fr);
+    column-gap: 1.75rem;
+    row-gap: 0.3rem;
+  }
+  /* Row separator, but only on rows that actually have a summary. Without
+     the :has() guard an undocumented item gets a stub underline beneath just
+     its name, which reads as a broken link underline. */
+  dl.item-table > dt:has(+ dd),
+  dl.item-table > dd {
+    padding-bottom: 0.3rem;
+    border-bottom: 1px solid var(--border-color, #e0e0e0);
+  }
+  dl.item-table > dt { padding-bottom: 0.3rem; }
+  dl.item-table > dt { padding-right: 0; }
+  dl.item-table > dd { padding-left: 0; }
+
+  /* Defence, not the fix: the tables read correctly because every module now
+     carries a one-line summary (QP-91). Clamp anyway so one over-long doc
+     comment cannot wreck the table again — rustdoc does not truncate, it
+     dumps the whole first paragraph into the cell. */
   dl.item-table > dd {
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
     overflow: hidden;
