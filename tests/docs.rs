@@ -107,6 +107,37 @@ fn is_pointer(line: &str) -> bool {
     line.trim_start().starts_with("#![doc")
 }
 
+/// Bare `--flag` occurrences in one doc line's text, outside any code span.
+///
+/// Splitting on backticks makes every even-indexed segment the prose between
+/// code spans; an unterminated span leaves a trailing even segment, which is
+/// prose too. Only `--` followed by a letter counts, so an em-dash written as
+/// `--` and the `2--5` style of range are both left alone — the defect is
+/// specifically a flag a reader would copy.
+fn unbackticked_flags(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for (i, seg) in text.split('`').enumerate() {
+        if i % 2 == 1 {
+            continue;
+        }
+        let b = seg.as_bytes();
+        let mut k = 0;
+        while k + 2 < b.len() {
+            if b[k] == b'-' && b[k + 1] == b'-' && b[k + 2].is_ascii_alphabetic() {
+                let start = k;
+                k += 2;
+                while k < b.len() && (b[k].is_ascii_alphanumeric() || b[k] == b'-') {
+                    k += 1;
+                }
+                found.push(seg[start..k].to_string());
+            } else {
+                k += 1;
+            }
+        }
+    }
+    found
+}
+
 /// Extracts the path argument of an `include_str!("...")` on a pointer line.
 fn pointer_target(line: &str) -> Option<&str> {
     let (_, rest) = line.split_once("include_str!(\"")?;
@@ -225,6 +256,66 @@ fn item_docs_follow_convention() {
     assert!(
         failures.is_empty(),
         "item doc convention violations ({}):\n\n{}\n",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}
+
+/// Rule 8 — every `--flag` named in a doc comment sits inside a code span.
+///
+/// rustdoc runs prose through typographic substitution, so an unbackticked
+/// `--cohort-done` renders as an en-dash and a reader who copies it gets a
+/// command that fails. Backticks suppress the substitution. Ranges (`2--5`,
+/// `1--3 ms`) are correct typography and deliberately not matched.
+#[test]
+fn doc_flags_are_backticked() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    rust_sources(&root.join("src"), &mut files);
+    assert!(!files.is_empty(), "found no .rs files under src/");
+
+    let mut failures: Vec<String> = Vec::new();
+
+    for path in &files {
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let src = fs::read_to_string(path).expect("read source file");
+
+        // A ``` fence inside a doc comment opens a code block; rustdoc does not
+        // apply typographic substitution in there, so neither do we.
+        let mut fenced = false;
+        for (n, line) in src.lines().enumerate() {
+            let t = line.trim_start();
+            let Some(text) = t.strip_prefix("///").or_else(|| t.strip_prefix("//!")) else {
+                continue;
+            };
+            if text.trim_start().starts_with("```") {
+                fenced = !fenced;
+                continue;
+            }
+            if fenced {
+                continue;
+            }
+            for flag in unbackticked_flags(text) {
+                failures.push(format!(
+                    "{rel}:{}: `{flag}` appears in a doc comment without backticks. \
+                     rustdoc applies typographic substitution to prose, so this renders \
+                     as an en-dash ({}) and a reader who copies it gets a command that \
+                     fails. Wrap it in backticks. Line was: {:?}",
+                    n + 1,
+                    flag.replacen("--", "\u{2013}", 1),
+                    text.trim()
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "unbackticked flags in doc comments ({}):\n\n{}\n",
         failures.len(),
         failures.join("\n\n")
     );

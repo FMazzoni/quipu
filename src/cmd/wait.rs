@@ -17,7 +17,7 @@ pub struct WaitArgs {
     pub empty: bool,
     /// Block until the tag-matched cohort has drained: total > 0 and no task
     /// is left in a non-terminal state (state NOT IN ('done','cancelled')).
-    /// An empty cohort (no tasks match --tag) is a distinct error, exit code 4.
+    /// An empty cohort (no tasks match `--tag`) is a distinct error, exit code 4.
     #[arg(long)]
     pub cohort_done: bool,
     #[arg(long, default_value_t = 500)]

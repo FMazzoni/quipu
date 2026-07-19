@@ -29,7 +29,7 @@ pub struct ReportArgs {
     /// Single-ticket mode: emit the full detail (incl. parents/children/uncapped events) for one ticket.
     #[arg(long, conflicts_with = "all_tickets")]
     pub ticket: Option<String>,
-    /// Bulk mode: emit a JSON array of per-ticket detail objects, scoped by --since/--wave.
+    /// Bulk mode: emit a JSON array of per-ticket detail objects, scoped by `--since`/`--wave`.
     #[arg(long = "all-tickets", conflicts_with = "ticket")]
     pub all_tickets: bool,
 }
