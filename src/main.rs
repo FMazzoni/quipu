@@ -19,6 +19,11 @@ use clap::{Parser, Subcommand};
 use outcome::Outcome;
 use serde::Serialize;
 
+/// Top-level parse target: the global `--db` override plus the chosen subcommand.
+///
+/// `--db` is the only `global = true` flag, so it is accepted before or after
+/// the subcommand and falls back to `QP_DB`. `--json` is deliberately *not*
+/// global — see `wants_json` for why it is redeclared per command instead.
 #[derive(Parser)]
 #[command(
     name = "quipu",
@@ -35,6 +40,14 @@ struct Cli {
     cmd: Cmd,
 }
 
+/// The subcommand vocabulary. One variant per `qp` verb, each delegating to
+/// `cmd::<name>::run`.
+///
+/// The `///` line on each variant is clap's help text, not internal
+/// documentation: editing one changes what `qp --help` prints. `Init` is the
+/// only variant that carries its arguments inline rather than in a
+/// `cmd::<name>::*Args` struct, because it is the only command that runs
+/// before a store exists and so has no `cmd` module to own them.
 #[derive(Subcommand)]
 enum Cmd {
     /// Initialize a store in the current directory
@@ -99,6 +112,13 @@ enum Cmd {
     Show(cmd::show::ShowArgs),
 }
 
+/// Success output for `qp init`, the one command whose `Outcome` lives here
+/// rather than in a `cmd` module.
+///
+/// `prefix` is read back out of the store after `db::init` rather than echoing
+/// `--prefix`, because re-initializing an existing store keeps the original
+/// prefix and ignores the flag — echoing the argument would report a rename
+/// that did not happen.
 #[derive(Serialize)]
 struct InitOutcome {
     db_path: String,
@@ -151,6 +171,8 @@ fn wants_json(cmd: &Cmd) -> bool {
     }
 }
 
+/// Parses, dispatches, and renders whatever error comes back as the process
+/// exit code and the `{"error": ...}` envelope.
 fn main() {
     let cli = Cli::parse();
     let json = wants_json(&cli.cmd);
@@ -174,6 +196,12 @@ fn main() {
     }
 }
 
+/// Dispatch, split out from `main` so every arm can use `?`.
+///
+/// Errors are returned rather than printed: `main` is the single place that
+/// maps a `QuipuError` to an exit code and an output format, so no command
+/// module needs to know either. Path resolution and the project-mismatch
+/// warning happen once here, ahead of the match, rather than in each arm.
 fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
     let db_path = db::resolve_path(cli.db.clone())?;
     // `json` is threaded in so the warning matches the stream's format: under

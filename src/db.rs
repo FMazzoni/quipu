@@ -199,6 +199,21 @@ pub fn invalid_input(msg: impl Into<String>) -> anyhow::Error {
     anyhow::Error::from(QuipuError::InvalidInput(msg.into()))
 }
 
+/// Locates the store: explicit `--db`/`QP_DB` wins, else the nearest
+/// `.quipu/db.sqlite` walking up from the cwd, else the git-aware fallback.
+///
+/// The fallback is what makes a bare `qp` work from inside a git worktree. A
+/// worktree's checkout is a *sibling* of the main repo, not a descendant, so
+/// the ancestor walk never reaches the main repo's `.quipu/`. Asking git for
+/// `--git-common-dir` resolves to the main repo's `.git` from either a
+/// worktree or the primary checkout, and the store is looked for next to it.
+/// Without this, every agent working in a worktree would have to set `QP_DB`
+/// by hand — and one that got it wrong would silently file into the wrong
+/// project.
+///
+/// Never fails on a missing store: when nothing is found it returns the path
+/// where one *would* live, so `qp init` has somewhere to create it and every
+/// other command fails later with a real SQLite error.
 pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(p) = explicit {
         return Ok(p);
@@ -210,11 +225,6 @@ pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
             return Ok(c);
         }
     }
-    // Git-aware fallback: when invoked from a worktree, the main repo's
-    // `.quipu/` is a sibling of the worktree, not an ancestor. Ask git for
-    // the common .git dir (resolves to the main repo's .git regardless of
-    // whether we're in a worktree or the main checkout) and look for
-    // `.quipu/db.sqlite` next to it.
     if let Ok(out) = std::process::Command::new("git")
         .args(["rev-parse", "--git-common-dir"])
         .output()
@@ -241,8 +251,6 @@ pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
     Ok(cwd.join(".quipu").join("db.sqlite"))
 }
 
-/// Detect when `--db`/`QP_DB` points at a different repo than the cwd's discovered store.
-/// Prints a warning to stderr; never errors.
 /// Warn when an explicit `--db`/`QP_DB` points at a different store than the one
 /// the cwd would have resolved to. Guards against filing into the wrong project.
 ///
@@ -489,6 +497,29 @@ pub fn validate_prefix(s: &str) -> Result<()> {
     Ok(())
 }
 
+/// Runs `f` inside a `BEGIN IMMEDIATE` transaction — the primitive every
+/// guarded state transition is built on.
+///
+/// `IMMEDIATE` is the whole point, and it is why two agents racing the same
+/// ticket produce exactly one winner and one clean conflict. It takes the
+/// write lock at `BEGIN`, before any statement runs. The default `DEFERRED`
+/// would instead start read-only and try to upgrade at the first write, and a
+/// writer that loses that upgrade gets `SQLITE_BUSY` *mid-transaction*, where
+/// the busy handler cannot help it — retrying would mean replaying reads it
+/// already made against a snapshot that has since moved. Locking up front
+/// turns that unrecoverable mid-flight failure into a wait at the door: the
+/// second agent blocks under the `busy_timeout` set in `open_conn`, then runs
+/// its guarded `UPDATE ... WHERE state IN (...)` against committed state, sees
+/// `changes() == 0`, and reports a typed `Conflict`. `tests/race.rs` asserts
+/// exactly that shape — one exit-0 winner, N-1 exit-2 losers carrying a stable
+/// error code, and a single `state_change` event on the task.
+///
+/// The rollback on the error path is what lets a command write freely before
+/// checking its guard: events and side-effect rows inserted ahead of a
+/// transition that turns out to be rejected leave no trace. A conflict is
+/// therefore never half-recorded. Its `Result` is deliberately discarded —
+/// SQLite has already unwound the transaction by the time a rollback can fail,
+/// and surfacing that would mask the real error being returned.
 pub fn with_tx<T>(conn: &mut Connection, f: impl FnOnce(&Transaction) -> Result<T>) -> Result<T> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     match f(&tx) {
@@ -503,6 +534,18 @@ pub fn with_tx<T>(conn: &mut Connection, f: impl FnOnce(&Transaction) -> Result<
     }
 }
 
+/// Appends one row to the immutable event log.
+///
+/// Taking `&Transaction` rather than `&Connection` is the guarantee: an event
+/// commits with the transition it describes, or neither lands. That is what
+/// makes the log trustworthy as an audit trail — there is no transition
+/// without its event, and no event for a transition that was rolled back. It
+/// is also what `tests/race.rs` counts to prove a single claim landed, since
+/// "one `state_change` event" and "one non-null `claimed_at`" are the same
+/// fact written twice.
+///
+/// The schema allows a null `task_id` for store-scoped events; every current
+/// caller passes a task.
 pub fn insert_event(
     tx: &Transaction,
     task_id: Option<i64>,
@@ -518,7 +561,23 @@ pub fn insert_event(
     Ok(tx.last_insert_rowid())
 }
 
-/// Re-derive readiness: any pending task whose deps are all done/cancelled becomes ready.
+/// Re-derives readiness store-wide: every `pending` task whose dependencies
+/// are all resolved becomes `ready`.
+///
+/// The only edge into `ready`. No command promotes a task directly; they
+/// change whatever they change and call this, which is why `abandon` and
+/// `reclaim` release a claim by routing the task to `pending` and letting this
+/// decide whether it deserves to come back — a task whose deps regressed while
+/// it was held must not silently return to the ready pool.
+///
+/// "Resolved" means `done` *or* `cancelled`. Cancelling a blocker therefore
+/// unblocks its dependents rather than stranding them, which is the behaviour
+/// `cancel_terminates_task_unblocks_dependents` in `tests/cli.rs` pins down.
+///
+/// Set-based and idempotent by construction: it sweeps the whole table, so
+/// callers never work out *which* tasks a change might have unblocked, and
+/// calling it twice is free. It only ever promotes — nothing here demotes a
+/// task, so running it at the wrong moment costs a query, not correctness.
 pub fn refresh_ready(tx: &Transaction) -> Result<()> {
     tx.execute(
         "UPDATE task
@@ -566,7 +625,21 @@ pub fn current_assignment(tx: &Transaction, task_id: i64) -> Result<Option<OpenA
     .map_err(Into::into)
 }
 
-/// Recursive check: would adding `from -depends_on-> to` create a cycle?
+/// Would adding `from -depends_on-> to` close a cycle in the dep graph?
+///
+/// Acyclicity is the invariant that makes `refresh_ready` terminate and the
+/// tree renderable; a cycle would leave every task in the loop permanently
+/// `pending` with no error to explain it. So this is a check-before-write on
+/// `&Transaction`, not `&Connection`: the reachability query and the `INSERT`
+/// that follows it commit atomically, and a concurrent writer cannot slip an
+/// edge in between them to make the answer stale. Callers reject on `true`
+/// with an `Invariant` error rather than repairing the graph — the caller
+/// asked for something structurally impossible and should replan.
+///
+/// Self-edges short-circuit because the recursive query walks *outward* from
+/// `to` and would not otherwise see `from == to` as a loop.
+/// `depends_rejects_self_cycle` and `depends_rejects_transitive_cycle` in
+/// `tests/cli.rs` cover both arms.
 pub fn would_cycle(tx: &Transaction, from: i64, to: i64) -> Result<bool> {
     if from == to {
         return Ok(true);
