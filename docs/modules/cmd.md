@@ -1,13 +1,12 @@
-Every module here is one `qp` subcommand, and almost every one is one of two
-things: an **edge** in the task state machine, or a **projection** — a read-only
-view over the rows those edges wrote. Which of the two a module is predicts most
-of what matters about it: how it is reviewed, and how much damage it can do. The
-alphabetical table below carries none of that signal, so read this page first.
+Each module here is one `qp` subcommand. Every one but
+[`install_skills`](install_skills/index.html) is either an **edge** in the task
+state machine or a **projection** — a read-only view over the rows those edges
+wrote. `install_skills` touches no database; it copies or symlinks the bundled
+`skills/` into Claude Code's skill directory.
 
-## The lifecycle, and which module is which edge
+## Task lifecycle
 
-A task moves through six states. Terminal states are `done` and `cancelled`;
-everything else is in flight.
+`db::State` has six variants. Terminal states are `done` and `cancelled`.
 
 ```text
                    assign            claim           complete
@@ -32,22 +31,26 @@ everything else is in flight.
 | [`block`](block/index.html) | `assigned`/`running` → `pending`, plus a new blocker task and a dep edge |
 | [`depends`](depends/index.html) | `ready` → `pending` when an edge is added; `pending` → `ready` when one is removed |
 
-There is no `pending` → `ready` command, and that absence is deliberate.
-Promotion has exactly one implementation — `refresh_ready` in `db.rs` — which
-every command that might resolve a dependency calls before returning. It is why
-`abandon` and `reclaim` both route through `pending` instead of deciding for
-themselves whether a released task is ready again: one rule in one place, so a
-release path cannot come to disagree with the promotion path about what "ready"
-means.
+## Promotion to ready
 
-Three mutators are not state edges at all. [`edit`](edit/index.html),
-[`tag`](tag/index.html) and [`log`](log/index.html) change a task's fields, its
-labels, or its history without moving it through the graph. They still write
-events, and `edit` still refuses to touch a terminal task.
+There is no `pending` → `ready` command. Promotion has exactly one
+implementation, `refresh_ready` in `db.rs`, which every command that might
+resolve a dependency calls before returning. That is why `abandon` and `reclaim`
+both write `pending` rather than deciding for themselves whether a released task
+is ready again: a release path cannot come to disagree with the promotion path
+about what "ready" means.
 
-`log` carries one rule worth knowing before you use it: with no `--as`, whether
-the entry gets attributed to anybody at all depends on the task's state. See
-[`log`](log/index.html) for the rule and why it is drawn where it is.
+## Non-edge mutators
+
+[`edit`](edit/index.html), [`tag`](tag/index.html), [`log`](log/index.html) and
+[`relation`](relation/index.html) change a task's fields, labels, history or
+links without moving it through the graph. They still write events, and `edit`'s
+`UPDATE` carries `state NOT IN ('done','cancelled')`, so a terminal task is not
+editable.
+
+With no `--as`, `log` attributes the entry to the open assignee only when the
+task is `running`; otherwise the event carries no agent. See
+[`log`](log/index.html) for why the rule is drawn there.
 
 ## Mutators and projections
 
@@ -56,90 +59,57 @@ the entry gets attributed to anybody at all depends on the task's state. See
 | **Mutators** | `add`, `assign`, `claim`, `complete`, `abandon`, `reclaim`, `cancel`, `block`, `depends`, `edit`, `tag`, `log`, `relation` | all of it |
 | **Projections** | `list`, `tree`, `show`, `status`, `wave`, `timeline`, `decisions`, `watch`, `report`, `wait` | none — read-only |
 
-The asymmetry is the point, and it runs opposite to file size.
-[`report`](report/index.html) is the largest module in this directory and the
-least dangerous one: it opens the database, reads, and prints. Its worst failure
-is a wrong number on a status page — visible to whoever reads it, and fixed by
-re-running. [`claim`](claim/index.html) is among the smallest, and its worst
-failure hands one task to two agents who then edit the same files.
+Risk runs opposite to file size. [`report`](report/index.html) is the largest
+module in this directory and cannot corrupt anything: it opens the database,
+reads, and prints, and its worst failure is a wrong number on a status page.
+[`claim`](claim/index.html) is a quarter of its size, and its worst failure hands
+one task to two agents who then edit the same files. Scrutiny follows risk, not
+line count.
 
-So scrutiny follows risk, not line count. A projection's review question is "is
-this query right". A mutator's is the four-item checklist below, and it is worth
-applying to all thirteen.
+## Projection shape guarantees
 
-Two projections make promises about their *shape* that are easy to break by
-accident. [`status`](status/index.html) always emits every known state, including
-the ones with a count of zero, so a consumer can index into the result without
-existence checks and a state that empties out does not vanish from the output
-mid-run (`status_shows_all_states_including_zero`). [`tree`](tree/index.html)
-scoped to a root task returns that task's transitive dependency subtree
-*inclusive of the root* — the root is part of its own subtree, which is the
-convention `report --wave` shares, so the two agree on what a wave contains.
+Two projections promise a *shape* that is easy to break by accident.
+[`status`](status/index.html) emits every known state including those with a
+count of zero, so a consumer can index into the result without existence checks
+and a state that empties out does not vanish mid-run
+(`status_shows_all_states_including_zero`). [`tree`](tree/index.html) scoped to a
+root returns that root's transitive dependency subtree *inclusive of the root* —
+both it and `report --wave` call `store::subtree_ids`, so the two agree on what a
+wave contains.
 
-## The four-part invariant every mutator follows
+## Guarded transitions
 
-```rust,ignore
-db::with_tx(&mut conn, |tx| {                     // 1. BEGIN IMMEDIATE
-    let n = tx.execute(
-        "UPDATE task SET state = ?1 WHERE id = ?2 AND state = ?3",   // 2. guarded
-        rusqlite::params![db::State::Running, task_id, db::State::Assigned])?;
-    if n != 1 {                                   // 3. exactly-one check
-        return Err(db::conflict("state_changed_under_us", "...", Some(display_id)));
-    }
-    db::insert_event(tx, ..., "state_change", ...)?;                 // 4. event
-    Ok(())
-})?;
-```
+Every mutator follows the four-part invariant set out under "The invariant that
+repeats everywhere" in the crate-root [architecture doc](../index.html):
+`with_tx` opens `BEGIN IMMEDIATE`, the `UPDATE` carries a state guard in its
+`WHERE`, the affected-row count is checked against 1, and an event is written in
+the same transaction. `tests/race.rs` pins the count check with
+`concurrent_claims_produce_exactly_one_winner` and
+`concurrent_assigns_produce_exactly_one_winner`.
 
-1. **`with_tx` opens `BEGIN IMMEDIATE`**, taking SQLite's write lock at the top
-   of the transaction rather than at the first write. Writers serialize, and
-   nothing can interleave between a read and a write inside the closure. A
-   deferred transaction would let two processes both read, both decide to
-   proceed, and then fail one of them at commit — after it had already acted on
-   its own decision.
-2. **The `WHERE` guards the state.** The transition applies only if the task is
-   still where the caller believed it was. Multi-state guards stay spelled as
-   SQL literals (`state IN ('assigned','running')`) because they do not
-   parametrise idiomatically; the value being *written* is always a bound
-   `db::State`, so the vocabulary has one definition.
-3. **`n != 1` is checked, always.** This is the line that makes a race safe: two
-   agents claiming the same task produce exactly one winner and one `conflict`,
-   pinned by `concurrent_claims_produce_exactly_one_winner` and
-   `concurrent_assigns_produce_exactly_one_winner` in `tests/race.rs`. Drop the
-   check and the loser reports success having matched zero rows.
-4. **An event is written in the same transaction.** The change is never
-   invisible, and because events are only ever inserted under the write lock,
-   `event.id` is gap-free as readers see it — which is what makes `watch`'s
-   `WHERE id > last_seen` correct.
+Where a read cannot be avoided it happens *inside* the `IMMEDIATE` transaction:
+`abandon` and `reclaim` read the resulting state back for their event payload,
+which is auxiliary data and never control flow.
 
-Read-then-write is banned as policy, not as style. Where a read genuinely cannot
-be avoided it happens *inside* the `IMMEDIATE` transaction, where the write lock
-already makes it safe: `abandon` and `reclaim` read the resulting state back for
-their event payload, which is auxiliary data and never control flow.
+Losing a race is a normal outcome. `conflict` exits **2**, and its code string —
+`not_ready`, `already_claimed`, `state_changed_under_us` — tells a calling skill
+whether to retry or escalate. Exit 1 means the input was wrong; exit 2 means the
+store refused. Ownership failures are a separate variant (`not_owner`, also exit
+2) rather than a conflict code, because "you are not the assignee" is never worth
+retrying; `block_wrong_agent_yields_not_owner_not_conflict` pins the distinction.
 
-Losing a race is a normal outcome, not a crash. `conflict` exits **2**, and its
-code string — `not_ready`, `already_claimed`, `state_changed_under_us` — tells a
-calling skill whether to retry or escalate. Exit 1 means the input was wrong;
-exit 2 means the store refused. Ownership failures are a separate variant
-(`not_owner`, also exit 2) rather than a conflict code, because "you are not the
-assignee" is never worth retrying, and `block_wrong_agent_yields_not_owner_not_conflict`
-pins the distinction.
+## Out of scope
 
-## What deliberately is not here
-
-- **Orchestration patterns.** Nothing in this directory knows what a wave, a
-  critique loop, or a branch-and-evaluate is. The patterns live in `skills/`.
-  [`wave`](wave/index.html) is named after one, but it is only a projection that
-  groups in-flight tasks by state, and the rule it uses to decide what counts as
-  blocked is structural rather than tag-based — see that page for the rule and
-  what it buys.
-- **Rendering beyond a line of text.** Markdown and HTML report rendering used to
-  live in `report`. It now lives in the `report-render` skill, which consumes
-  `qp report --json`.
-- **The choice between prose and JSON output.** A mutator builds one `Outcome`
-  struct and hands it to `emit`, which picks the representation. That is why
-  `--json` is not a second code path and cannot drift from the human one.
-- **Canonical read queries.** Those belong in `store.rs`. Guarded `UPDATE`s
-  deliberately stay here: each has a distinct `WHERE`/`SET`, so they are not
-  duplicated with one another, and relocating the highest-stakes code in the
-  project for taxonomic tidiness would be a bad trade.
+- **Orchestration patterns.** No module here knows what a wave, a critique loop,
+  or a branch-and-evaluate is; the patterns live in `skills/`.
+  [`wave`](wave/index.html) is named after one but is only a projection that
+  groups in-flight tasks by state, using a structural rather than tag-based rule
+  for what counts as blocked.
+- **Rendering beyond a line of text.** Markdown and HTML report rendering lives
+  in the `report-render` skill, which consumes `qp report --json`.
+- **Choosing between prose and JSON.** A mutator builds one `Outcome` struct and
+  hands it to `emit`, which picks the representation, so `--json` is not a second
+  code path.
+- **Canonical read queries.** Those belong in `store.rs`. Guarded `UPDATE`s stay
+  here: each has a distinct `WHERE`/`SET`, so they are not duplicated with one
+  another.
