@@ -24,12 +24,17 @@
 //! on `qp/index.html` and drifted apart in content (QP-169). Reintroducing an
 //! exemption needs a rationale that survives looking at the rendered page.
 //!
-//! Asymmetry worth knowing: rule 3 is only checkable in one direction. Three
-//! modules (`status`, `tag`, `tree`) are correctly one-line with no `.md` and
-//! no pointer. Nothing in the source distinguishes
-//! "correctly single-line" from "detail was lost on the way here", so this
-//! test catches prose that should have moved out and never catches prose that
-//! should have existed.
+//! Asymmetry worth knowing: rule 3 is only checkable in one direction. Two
+//! modules — `status` and `tree`, the set `POINTERLESS_MODULES` pins — are
+//! correctly one-line with no `.md` and no pointer. Nothing in the source
+//! distinguishes "correctly single-line" from "detail was lost on the way
+//! here", so this test catches prose that should have moved out and never
+//! catches prose that should have existed.
+//!
+//! That set is asserted rather than described because describing it did not
+//! work: the note named `tag` long after `tag.rs` grew a pointer to
+//! `docs/modules/tag.md`, and nothing failed (QP-168). A header claim about
+//! the tree is a claim like any other and gets a rule.
 //!
 //! Rule 7 extends the same budget to `///` item docs, for the same reason: the
 //! item table on a module page prints the entire first paragraph untruncated,
@@ -266,6 +271,57 @@ fn item_docs_follow_convention() {
         "item doc convention violations ({}):\n\n{}\n",
         failures.len(),
         failures.join("\n\n")
+    );
+}
+
+/// Modules whose header is a bare one-line summary with no `include_str!`
+/// pointer.
+///
+/// Every other `.rs` under `src/` carries one. Kept as a list so the
+/// module-header note above cannot drift from the tree again.
+const POINTERLESS_MODULES: &[&str] = &["src/cmd/status.rs", "src/cmd/tree.rs"];
+
+/// Rule 9 — the set of pointerless modules is the one this file documents.
+///
+/// The note above named `status`, `tag` and `tree` for months after `tag.rs`
+/// acquired a pointer to `docs/modules/tag.md` (QP-168). Prose describing the
+/// shape of the tree rots exactly like prose describing an API; the only fix
+/// that holds is to assert it.
+///
+/// Adding a module with no pointer is fine — add it here, and say why it needs
+/// no detail page. Removing one because it grew a pointer is fine too. What is
+/// not fine is the list and the tree disagreeing silently.
+#[test]
+fn pointerless_modules_are_the_documented_set() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    rust_sources(&root.join("src"), &mut files);
+    assert!(!files.is_empty(), "found no .rs files under src/");
+
+    let mut actual: Vec<String> = Vec::new();
+    for path in &files {
+        let src = fs::read_to_string(path).expect("read source file");
+        if header_lines(&src).iter().any(|l| is_pointer(l)) {
+            continue;
+        }
+        actual.push(
+            path.strip_prefix(&root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/"),
+        );
+    }
+    actual.sort();
+
+    let mut expected: Vec<String> = POINTERLESS_MODULES.iter().map(|s| s.to_string()).collect();
+    expected.sort();
+
+    assert_eq!(
+        actual, expected,
+        "the set of modules with no `#![doc = include_str!(...)]` pointer has \
+         changed. Update `POINTERLESS_MODULES` *and* the note in this file's \
+         module header, which names the set in prose — that note went stale \
+         once already (QP-168) because nothing checked it."
     );
 }
 

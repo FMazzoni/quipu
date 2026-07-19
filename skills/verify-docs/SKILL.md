@@ -336,6 +336,17 @@ documentation; and `find target/doc/qp -name '*.html'` stays out of that mirror
 but still returns every per-item page (`struct.*.html`, `fn.*.html`), five times
 the real count. Neither is the denominator. Restrict to `index.html`.
 
+**If you reach for `ripgrep`, three things.** `rg` is installed and is the
+better tool over `src/`, but: `rg -c` and `grep -c` count *lines*, while
+`rg -o <pat> | wc -l` counts *occurrences* — mixing them produced a wrong count
+in a real audit. `rg -U` matches across line breaks, which is what you want on
+wrapped doc prose (`tr '\n' ' '` does not help; it leaves the `///` prefixes
+inline). And the trap: **`rg` obeys `.gitignore`, which ignores `/target`**, so a
+bare `rg <pat>` from the repo root sweeps the sources and silently skips every
+rendered page — a clean exit that looks like "no hits". Naming the path (`rg
+<pat> target/doc/qp`) or `--no-ignore` restores them. The `just docs-dump` +
+`grep` path above is unaffected and correct as written; do not "modernise" it.
+
 Never accept a page count from the prompt, a previous sweep, or a ticket — the
 set grows every wave, and a briefed "23" against an actual 25 turns a 92% sweep
 into a reported-complete one. If your enumeration disagrees with the number you
