@@ -92,7 +92,7 @@ enum Cmd {
     Depends(cmd::depends::DependsArgs),
     /// Mutate task fields (title, tier, description)
     Edit(cmd::edit::EditArgs),
-    /// Emit a structured snapshot of the store (markdown or HTML)
+    /// Emit a structured JSON snapshot of the store
     Report(cmd::report::ReportArgs),
     /// Show a single-ticket detail view (human or JSON)
     Show(cmd::show::ShowArgs),
