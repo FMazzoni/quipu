@@ -1,6 +1,8 @@
+use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
+use serde::Serialize;
 
 #[derive(Args, Debug)]
 pub struct AbandonArgs {
@@ -9,19 +11,41 @@ pub struct AbandonArgs {
     pub agent: String,
     #[arg(long)]
     pub reason: Option<String>,
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Serialize)]
+struct Abandoned {
+    display_id: String,
+    state: String,
+    reason: Option<String>,
+}
+impl Outcome for Abandoned {
+    fn human(&self) -> String {
+        format!("{} abandoned", self.display_id)
+    }
 }
 
 pub fn run(db_path: &std::path::Path, a: AbandonArgs) -> Result<()> {
     let mut conn = db::open(db_path)?;
     let resolved = id::resolve_full(&conn, &a.task)?;
     let task_id = resolved.id;
-    db::with_tx(&mut conn, |tx| {
+    let resulting = db::with_tx(&mut conn, |tx| {
         let Some(open) = db::current_assignment(tx, task_id)? else {
-            return Err(db::constraint(format!("{} has no assignment", a.task)));
+            return Err(db::conflict(
+                "no_open_assignment",
+                format!("{} has no assignment", a.task),
+                Some(resolved.display_id.clone()),
+            ));
         };
         let aid = open.id;
         if open.agent_id != a.agent {
-            return Err(db::constraint(format!("{} not yours", a.task)));
+            return Err(db::not_owner(
+                format!("{} not yours", a.task),
+                Some(resolved.display_id.clone()),
+                Some(open.agent_id.clone()),
+            ));
         }
 
         // Route through `pending`, then let `refresh_ready` promote it back to `ready`
@@ -31,7 +55,11 @@ pub fn run(db_path: &std::path::Path, a: AbandonArgs) -> Result<()> {
             [task_id],
         )?;
         if n != 1 {
-            return Err(db::constraint(format!("{} not assigned/running", a.task)));
+            return Err(db::conflict(
+                "not_assigned_or_running",
+                format!("{} not assigned/running", a.task),
+                Some(resolved.display_id.clone()),
+            ));
         }
         db::refresh_ready(tx)?;
 
@@ -48,10 +76,11 @@ pub fn run(db_path: &std::path::Path, a: AbandonArgs) -> Result<()> {
             rusqlite::params![crate::time::now_rfc3339(), aid],
         )?;
         if n2 != 1 {
-            return Err(db::constraint(format!(
-                "{} assignment already closed",
-                a.task
-            )));
+            return Err(db::conflict(
+                "already_closed",
+                format!("{} assignment already closed", a.task),
+                Some(resolved.display_id.clone()),
+            ));
         }
         db::insert_event(
             tx,
@@ -62,8 +91,14 @@ pub fn run(db_path: &std::path::Path, a: AbandonArgs) -> Result<()> {
                 "to": resulting, "via": "abandon", "reason": a.reason
             })),
         )?;
-        Ok(())
+        Ok(resulting)
     })?;
-    println!("{} abandoned", resolved.display_id);
-    Ok(())
+    emit(
+        a.json,
+        &Abandoned {
+            display_id: resolved.display_id,
+            state: resulting,
+            reason: a.reason,
+        },
+    )
 }

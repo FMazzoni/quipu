@@ -1,3 +1,4 @@
+use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
@@ -29,9 +30,9 @@ struct Created {
     description: Option<String>,
     tags: Vec<String>,
 }
-impl std::fmt::Display for Created {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}\t{}\t{}", self.display_id, self.state, self.title)
+impl Outcome for Created {
+    fn human(&self) -> String {
+        format!("{}\t{}\t{}", self.display_id, self.state, self.title)
     }
 }
 
@@ -64,10 +65,13 @@ pub fn run(db_path: &std::path::Path, a: AddArgs) -> Result<()> {
             // Cycle check: dep edges only go from `row` outward, so cycle only possible if
             // some existing edge from *did to row exists. Use would_cycle for safety.
             if db::would_cycle(tx, row, *did)? {
-                return Err(db::constraint(format!(
-                    "cycle: {} depends on dep#{} which (transitively) depends on {}",
-                    display, did, display
-                )));
+                return Err(db::invariant(
+                    "dependency_cycle",
+                    format!(
+                        "cycle: {} depends on dep#{} which (transitively) depends on {}",
+                        display, did, display
+                    ),
+                ));
             }
             tx.execute(
                 "INSERT INTO dep(task_id, depends_on_task_id) VALUES (?,?)",
@@ -114,10 +118,5 @@ pub fn run(db_path: &std::path::Path, a: AddArgs) -> Result<()> {
         })
     })?;
 
-    if a.json {
-        println!("{}", serde_json::to_string(&created)?);
-    } else {
-        println!("{created}");
-    }
-    Ok(())
+    emit(a.json, &created)
 }

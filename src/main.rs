@@ -10,10 +10,13 @@
 mod cmd;
 mod db;
 mod id;
+mod outcome;
 mod store;
 mod time;
 
 use clap::{Parser, Subcommand};
+use outcome::Outcome;
+use serde::Serialize;
 
 #[derive(Parser)]
 #[command(
@@ -41,6 +44,9 @@ enum Cmd {
         /// Tag auto-applied to every `qp add` in this store. Repeatable; additive across re-inits.
         #[arg(long = "default-tag", value_name = "NAME")]
         default_tag: Vec<String>,
+        /// Emit JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
     },
     /// Add a new task
     Add(cmd::add::AddArgs),
@@ -92,14 +98,74 @@ enum Cmd {
     Show(cmd::show::ShowArgs),
 }
 
+#[derive(Serialize)]
+struct InitOutcome {
+    db_path: String,
+    prefix: String,
+    schema_version: String,
+}
+impl Outcome for InitOutcome {
+    fn human(&self) -> String {
+        format!("initialized at {}", self.db_path)
+    }
+}
+
+/// Whether `--json` was passed for this invocation.
+///
+/// `real_main()` returns `anyhow::Result<()>`, so by the time an error
+/// reaches `main()` the parsed args (and their `--json` flag) are gone. Each
+/// mutating command owns its own `--json` field on its `*Args` struct (no
+/// global clap flag — `show`/`report` already define their own local
+/// `--json`, and a parent-level global of the same name would collide with
+/// those). So: extract the flag from the *parsed* `Cmd` up front, before
+/// dispatch, and thread it separately into both the success path (per
+/// command, via `outcome::emit`) and the error path (here, in `main`).
+fn wants_json(cmd: &Cmd) -> bool {
+    match cmd {
+        Cmd::Init { json, .. } => *json,
+        Cmd::Add(a) => a.json,
+        Cmd::Assign(a) => a.json,
+        Cmd::Claim(a) => a.json,
+        Cmd::Complete(a) => a.json,
+        Cmd::Block(a) => a.json,
+        Cmd::Cancel(a) => a.json,
+        Cmd::Abandon(a) => a.json,
+        Cmd::Reclaim(a) => a.json,
+        Cmd::Log(a) => a.json,
+        Cmd::Tag(a) => a.json,
+        Cmd::Depends(a) => a.json,
+        Cmd::Edit(a) => a.json,
+        Cmd::Show(a) => a.json,
+        Cmd::Report(a) => a.json,
+        Cmd::Relation(_)
+        | Cmd::Tree(_)
+        | Cmd::Timeline(_)
+        | Cmd::Wave(_)
+        | Cmd::Status(_)
+        | Cmd::List(_)
+        | Cmd::Decisions(_)
+        | Cmd::Wait(_)
+        | Cmd::Watch(_)
+        | Cmd::InstallSkills(_) => false,
+    }
+}
+
 fn main() {
-    if let Err(e) = real_main() {
-        eprintln!("error: {e:#}");
+    let cli = Cli::parse();
+    let json = wants_json(&cli.cmd);
+    if let Err(e) = real_main(cli) {
+        if json {
+            let body = if let Some(err) = e.downcast_ref::<db::QuipuError>() {
+                err.to_json()
+            } else {
+                serde_json::json!({"kind": "internal", "message": format!("{e:#}")})
+            };
+            eprintln!("{}", serde_json::json!({"error": body}));
+        } else {
+            eprintln!("error: {e:#}");
+        }
         let code = if let Some(err) = e.downcast_ref::<db::QuipuError>() {
-            match err {
-                db::QuipuError::Constraint(_) => 2,
-                db::QuipuError::InvalidInput(_) => 1,
-            }
+            err.exit_code()
         } else {
             1
         };
@@ -107,18 +173,23 @@ fn main() {
     }
 }
 
-fn real_main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+fn real_main(cli: Cli) -> anyhow::Result<()> {
     let db_path = db::resolve_path(cli.db.clone())?;
     db::warn_on_project_mismatch(&cli.db)?;
     match cli.cmd {
         Cmd::Init {
             prefix,
             default_tag,
+            json,
         } => {
-            let _ = db::init(&db_path, prefix.as_deref(), &default_tag)?;
-            println!("initialized at {}", db_path.display());
-            Ok(())
+            let conn = db::init(&db_path, prefix.as_deref(), &default_tag)?;
+            let prefix = db::display_prefix(&conn)?;
+            let outcome = InitOutcome {
+                db_path: db_path.display().to_string(),
+                prefix,
+                schema_version: db::SCHEMA_VERSION.to_string(),
+            };
+            outcome::emit(json, &outcome)
         }
         Cmd::Add(a) => cmd::add::run(&db_path, a),
         Cmd::Assign(a) => cmd::assign::run(&db_path, a),
