@@ -246,7 +246,15 @@ pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
 
 /// Detect when `--db`/`QP_DB` points at a different repo than the cwd's discovered store.
 /// Prints a warning to stderr; never errors.
-pub fn warn_on_project_mismatch(explicit: &Option<PathBuf>) -> Result<()> {
+/// Warn when an explicit `--db`/`QP_DB` points at a different store than the one
+/// the cwd would have resolved to. Guards against filing into the wrong project.
+///
+/// Only fires when the path was given explicitly — that is, in automation. Which
+/// is exactly why `json` matters: under `--json`, stderr is JSON Lines (zero or
+/// more `{"warning":...}` objects, then at most one `{"error":...}`), so a prose
+/// warning here would leave the consumer unable to parse the error that follows.
+/// See QP-120.
+pub fn warn_on_project_mismatch(explicit: &Option<PathBuf>, json: bool) -> Result<()> {
     let Some(explicit_path) = explicit else {
         return Ok(());
     };
@@ -269,8 +277,21 @@ pub fn warn_on_project_mismatch(explicit: &Option<PathBuf>) -> Result<()> {
     let uuid_local = read_project_uuid(&local).ok().flatten();
     if let (Some(a), Some(b)) = (uuid_explicit, uuid_local) {
         if a != b {
-            eprintln!("warning: project_uuid mismatch — QP_DB={} (uuid {}) but cwd resolves to {} (uuid {})",
-                explicit_path.display(), a, local.display(), b);
+            if json {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"warning": {
+                        "kind": "project_uuid_mismatch",
+                        "explicit_db": explicit_path.display().to_string(),
+                        "explicit_uuid": a,
+                        "cwd_db": local.display().to_string(),
+                        "cwd_uuid": b,
+                    }})
+                );
+            } else {
+                eprintln!("warning: project_uuid mismatch — QP_DB={} (uuid {}) but cwd resolves to {} (uuid {})",
+                    explicit_path.display(), a, local.display(), b);
+            }
         }
     }
     Ok(())

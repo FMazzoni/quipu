@@ -193,12 +193,11 @@ fn json_stdout(assert: &assert_cmd::assert::Assert) -> serde_json::Value {
 
 /// Parse a failing `assert_cmd` output's stderr as the `{"error": {...}}` envelope.
 ///
-/// stderr is NOT guaranteed to contain only the envelope: `warn_on_project_mismatch`
-/// emits a human-readable `warning: project_uuid mismatch ...` line first whenever
-/// `QP_DB` points somewhere other than the cwd-resolved store, which is exactly the
-/// situation every test here is in. So take the last JSON-looking line rather than
-/// assuming the whole stream parses. See QP-120 — a real agent parsing stderr hits
-/// this same problem, and the fix belongs in the product, not just here.
+/// Under `--json`, stderr is **JSON Lines**: zero or more `{"warning": {...}}`
+/// objects (e.g. `project_uuid_mismatch`, which fires whenever `QP_DB` points
+/// somewhere other than the cwd-resolved store — the situation every test here is
+/// in), then at most one `{"error": {...}}`. So read the last JSON line rather than
+/// parsing the whole buffer. That is the contract, not a workaround. See QP-120.
 fn json_stderr(assert: &assert_cmd::assert::Assert) -> serde_json::Value {
     let out = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     let line = out
@@ -3546,4 +3545,100 @@ fn assign_claim_complete_transitions_unchanged_by_state_enum_sweep() {
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     let v: serde_json::Value = serde_json::from_str(&s).unwrap();
     assert_eq!(v.as_array().unwrap().len(), 1);
+}
+
+// --- QP-120: stderr is JSON Lines under --json ----------------------------
+//
+// `warn_on_project_mismatch` fires only when --db/QP_DB is set explicitly — i.e.
+// in automation, which is exactly the consumer that needs stderr parseable. Before
+// this, it emitted prose ahead of the JSON error envelope, so `json.loads(stderr)`
+// failed and an agent could not read the error it had just been handed.
+
+/// Build two stores with distinct project_uuids, return (cwd_store_dir, other_db).
+fn two_stores() -> (tempfile::TempDir, tempfile::TempDir) {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    for d in [&a, &b] {
+        Command::cargo_bin("qp")
+            .unwrap()
+            .current_dir(d.path())
+            .arg("init")
+            .assert()
+            .success();
+    }
+    (a, b)
+}
+
+#[test]
+fn json_mode_stderr_is_json_lines_when_project_uuid_mismatches() {
+    let (a, b) = two_stores();
+    let a_db = a.path().join(".quipu").join("db.sqlite");
+    // Seed a failure condition in store A.
+    for args in [
+        vec!["add", "t"],
+        vec!["assign", "QP-1", "--to", "alice"],
+        vec!["claim", "QP-1", "--as", "alice"],
+    ] {
+        Command::cargo_bin("qp")
+            .unwrap()
+            .env("QP_DB", &a_db)
+            .current_dir(a.path())
+            .args(&args)
+            .assert()
+            .success();
+    }
+    // Now run from store B's directory while pointing QP_DB at store A: the
+    // mismatch warning fires, and the double-claim fails.
+    let assert = Command::cargo_bin("qp")
+        .unwrap()
+        .env("QP_DB", &a_db)
+        .current_dir(b.path())
+        .args(["claim", "QP-1", "--as", "alice", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+
+    let err = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    let lines: Vec<&str> = err.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert!(
+        lines.len() >= 2,
+        "expected a warning line and an error line, got: {err:?}"
+    );
+    // EVERY line must be valid JSON — that is the whole point.
+    let parsed: Vec<serde_json::Value> = lines
+        .iter()
+        .map(|l| {
+            serde_json::from_str(l)
+                .unwrap_or_else(|e| panic!("stderr line is not JSON: {e}\nline: {l}"))
+        })
+        .collect();
+    assert_eq!(parsed[0]["warning"]["kind"], "project_uuid_mismatch");
+    assert!(parsed[0]["warning"]["explicit_uuid"].is_string());
+    assert!(parsed[0]["warning"]["cwd_uuid"].is_string());
+    // And an agent can still reach the error it actually needs.
+    let e = parsed.last().unwrap();
+    assert_eq!(e["error"]["kind"], "conflict");
+    assert_eq!(e["error"]["code"], "already_claimed");
+}
+
+#[test]
+fn human_mode_keeps_prose_warning_on_mismatch() {
+    let (a, b) = two_stores();
+    let a_db = a.path().join(".quipu").join("db.sqlite");
+    let assert = Command::cargo_bin("qp")
+        .unwrap()
+        .env("QP_DB", &a_db)
+        .current_dir(b.path())
+        .args(["list"])
+        .assert()
+        .success();
+    let err = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        err.contains("warning: project_uuid mismatch"),
+        "human mode should keep the readable warning, got: {err:?}"
+    );
+    assert!(
+        serde_json::from_str::<serde_json::Value>(err.trim()).is_err(),
+        "human mode must not emit JSON, got: {err:?}"
+    );
 }

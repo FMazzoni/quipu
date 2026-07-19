@@ -153,7 +153,7 @@ fn wants_json(cmd: &Cmd) -> bool {
 fn main() {
     let cli = Cli::parse();
     let json = wants_json(&cli.cmd);
-    if let Err(e) = real_main(cli) {
+    if let Err(e) = real_main(cli, json) {
         if json {
             let body = if let Some(err) = e.downcast_ref::<db::QuipuError>() {
                 err.to_json()
@@ -173,9 +173,12 @@ fn main() {
     }
 }
 
-fn real_main(cli: Cli) -> anyhow::Result<()> {
+fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
     let db_path = db::resolve_path(cli.db.clone())?;
-    db::warn_on_project_mismatch(&cli.db)?;
+    // `json` is threaded in so the warning matches the stream's format: under
+    // --json stderr is JSON Lines, so a prose warning here would make the
+    // error envelope on the following line unparseable. See QP-120.
+    db::warn_on_project_mismatch(&cli.db, json)?;
     match cli.cmd {
         Cmd::Init {
             prefix,
