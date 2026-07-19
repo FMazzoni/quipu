@@ -71,6 +71,27 @@ If you hit ambiguity:
 - A judgement call within the spec's scope: make the call, log the choice as a friction note.
 - A genuine contradiction in the prompt, or missing context that blocks all forward progress: report **NEEDS_CONTEXT** or **BLOCKED**.
 
+## If your slice overturns an earlier decision
+
+Sometimes the thing you are implementing reverses a call made months ago —
+a different default, the opposite trade-off, a convention dropped. When that
+happens, leave a backward reference so the reversal is findable from the
+thing it reversed:
+
+```bash
+./target/release/qp relation add QP-<yours> supersedes QP-<old>
+./target/release/qp log QP-<yours> decision "supersedes QP-<old>: <why the old call no longer holds>" --auto
+```
+
+Two commands, and the audit trail works from both ends afterwards:
+`qp relation list QP-<old>` shows what replaced it, and `qp decisions` gives
+the filtered decision timeline with your reasoning in it.
+
+This is a convenience, not a gate — nothing checks for it and nothing blocks
+without it. But an unlinked reversal means the next agent reads the old
+ticket, finds it `done`, and follows advice that was retired. Relation kinds
+are free-form; `supersedes` is the one to use here.
+
 ## Required final steps (in order)
 
 ```bash
