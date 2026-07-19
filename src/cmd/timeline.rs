@@ -1,4 +1,6 @@
 //! Show the event log, for one task or across the store.
+//!
+#![doc = include_str!("../../docs/modules/timeline.md")]
 
 use crate::store::{self, EventFilter};
 use crate::{db, id};

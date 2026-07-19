@@ -33,7 +33,6 @@ pub fn run(db_path: &std::path::Path, a: ListArgs) -> Result<()> {
     };
     let core = store::tasks(&conn, &filter)?;
 
-    // Bulk-fetch tags, blocked_by, last_event for the selected ids.
     let ids: Vec<i64> = core.iter().map(|r| r.id).collect();
     let mut tags_by = store::tags_by_task(&conn, &ids)?;
     let mut blockers_by = store::unresolved_blockers_by_task(&conn, &ids)?;

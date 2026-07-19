@@ -14,9 +14,9 @@
 //! names (`install_<wbr>skills`), so a naive name regex over the HTML produces
 //! a false PASS on exactly the module most likely to drift.
 //!
-//! Asymmetry worth knowing: rule 3 is only checkable in one direction. Six
-//! modules (`log`, `status`, `tag`, `timeline`, `tree`, `wave`) are correctly
-//! one-line with no `.md` and no pointer. Nothing in the source distinguishes
+//! Asymmetry worth knowing: rule 3 is only checkable in one direction. Three
+//! modules (`status`, `tag`, `tree`) are correctly one-line with no `.md` and
+//! no pointer. Nothing in the source distinguishes
 //! "correctly single-line" from "detail was lost on the way here", so this
 //! test catches prose that should have moved out and never catches prose that
 //! should have existed.

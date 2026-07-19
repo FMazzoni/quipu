@@ -281,11 +281,9 @@ fn collect_json(
         tasks.push(obj);
     }
 
-    // Events: same shape as `qp timeline --json`, scoped + capped at 200.
+    // Events: same shape as `qp timeline --json`.
     let evt_rows = store::events(conn, &store::EventFilter::default())?;
 
-    // `subtree` is already a set of task rowids; events carry only the task's
-    // display_id, so build a display_id -> rowid lookup once, only if scoped.
     let did_to_id: Option<std::collections::HashMap<String, i64>> = if subtree.is_some() {
         let mut m = std::collections::HashMap::new();
         let mut s = conn.prepare("SELECT id, display_id FROM task")?;
