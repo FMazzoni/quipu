@@ -356,8 +356,10 @@ fn collect_json(
 
 // ---------- duration parsing ----------
 
-/// Parse `--since`. Accepts `Nh`, `Nd`, or an RFC3339-ish date. Returns an
-/// RFC3339 UTC string suitable for lexicographic comparison against event.ts.
+/// Parse `--since` into an RFC3339 UTC string.
+///
+/// Accepts `Nh`, `Nd`, or an RFC3339-ish date. The result is suitable for
+/// lexicographic comparison against `event.ts`.
 fn parse_since(s: &str) -> Result<String> {
     let s = s.trim();
     if let Some(rest) = s.strip_suffix('h') {

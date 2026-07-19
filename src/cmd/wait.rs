@@ -60,11 +60,12 @@ pub fn run(db_path: &std::path::Path, a: WaitArgs) -> Result<()> {
     }
 }
 
-/// `--cohort-done`: block until the tag-matched cohort has `total > 0` and
-/// `non_terminal == 0` (non-terminal = state NOT IN ('done','cancelled')).
-/// An empty cohort (`total == 0`) exits immediately with code 4 — it is
-/// neither success nor an infinite block, since it usually signals a typo'd
-/// tag or a race with `qp add`.
+/// The `--cohort-done` mode: block until the tag-matched cohort has drained.
+///
+/// Drained means `total > 0` and `non_terminal == 0`, where non-terminal is
+/// state NOT IN ('done','cancelled'). An empty cohort (`total == 0`) exits
+/// immediately with code 4 — it is neither success nor an infinite block,
+/// since it usually signals a typo'd tag or a race with `qp add`.
 fn run_cohort_done(db_path: &std::path::Path, a: &WaitArgs) -> Result<()> {
     let conn = db::open(db_path)?;
     let mut sql = String::from(
