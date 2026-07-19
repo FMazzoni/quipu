@@ -45,6 +45,14 @@ impl Outcome for DependsOutcome {
     }
 }
 
+/// Adds or removes one dep edge, gated on ownership of the downstream task.
+///
+/// If the downstream task — the one *gaining* the dep — is `assigned` or
+/// `running`, `--as` must name its current assignee. The gate is on the
+/// downstream side because that is the row being mutated; the upstream task is
+/// unchanged, so its owner has no say. The practical consequence: you may add
+/// a dep pointing *at* another agent's in-flight work, but you may not reach
+/// into that work and hang a new blocker on it.
 pub fn run(db_path: &std::path::Path, a: DependsArgs) -> Result<()> {
     let mut conn = db::open(db_path)?;
     let task_resolved = id::resolve_full(&conn, &a.task)?;
@@ -52,9 +60,6 @@ pub fn run(db_path: &std::path::Path, a: DependsArgs) -> Result<()> {
     let task_id = task_resolved.id;
     let on_id = on_resolved.id;
     let promoted = db::with_tx(&mut conn, |tx| -> Result<bool> {
-        // Ownership gate: if the downstream task (the one gaining the dep) is
-        // assigned/running, --as must match the assignee. We guard the downstream
-        // because that is the row being mutated; the upstream is unchanged.
         let downstream_state: String =
             tx.query_row("SELECT state FROM task WHERE id = ?", [task_id], |r| {
                 r.get(0)

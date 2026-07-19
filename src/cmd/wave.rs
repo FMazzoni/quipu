@@ -13,6 +13,19 @@ pub struct WaveArgs {
 /// The four state groups shown by `qp wave`, in display order.
 const STATES: &[&str] = &["ready", "assigned", "running", "pending"];
 
+/// Renders the four state groups, with `pending` filtered to genuinely
+/// blocked work.
+///
+/// A `pending` task is listed here only if it has at least one unresolved dep
+/// — a `depends_on` task that is not yet `done` or `cancelled`. Pending tasks
+/// with nothing actually blocking them stay hidden, so the wave view shows
+/// work that is stuck rather than work that merely has not been promoted yet.
+///
+/// This definition of "blocked" is deliberately broader than the skill-layer
+/// `kind:blocker` tag convention: any unresolved dep qualifies, tagged or not.
+/// That is why a task can appear under `pending` with no blocker tag on it —
+/// the binary answers a graph question and stays out of the tagging
+/// conventions that patterns layer on top.
 pub fn run(db_path: &std::path::Path, a: WaveArgs) -> Result<()> {
     let conn = db::open(db_path)?;
     let mut out = serde_json::Map::new();
@@ -25,10 +38,6 @@ pub fn run(db_path: &std::path::Path, a: WaveArgs) -> Result<()> {
         };
         let mut rows = store::tasks(&conn, &filter)?;
 
-        // Pending tasks appear here iff they have at least one unresolved dep
-        // (depends_on task is not done/cancelled). This is broader than the
-        // skill-layer `kind:blocker` convention — any unresolved dep qualifies.
-        // Pending-without-unresolved-deps tasks stay hidden from the wave view.
         if label == "pending" {
             let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
             let blockers = store::unresolved_blockers_by_task(&conn, &ids)?;

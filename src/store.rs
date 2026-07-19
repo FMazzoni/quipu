@@ -6,26 +6,14 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, ToSql};
 use std::collections::{HashMap, HashSet};
-// --- QP-68: event-tail query family -----------------------------------
-//
-// `timeline.rs`, `watch.rs`, and `decisions.rs` each hand-rolled the same
-// `event LEFT JOIN task` SELECT with gratuitously different `?N` numbering
-// and repeated the same payload-parse-or-Null idiom. `EventFilter` is the
-// smallest shape that covers all three call sites:
-//   - `since_id`: timeline/watch always pass `Some(since)` (default 0);
-//     decisions passes `None` (no lower bound — it wants the full history).
-//   - `task_id`: timeline/watch resolve `--task` to an id; decisions has no
-//     task filter.
-//   - `kinds`: an IN-list. timeline/watch pass whatever `--kind` flags the
-//     caller gave (possibly empty = no filter); decisions passes the
-//     single-element slice `["decision"]`, which is just IN-list-of-one.
-//   - `auto_only`: only decisions sets this; it adds the
-//     `json_extract(payload, '$.auto') = 1` predicate.
-// All three order `ORDER BY e.id ASC` unconditionally, so there is no
-// direction field — a speculative `ascending` flag would be unused by every
-// current caller.
-
 /// One row of the `event LEFT JOIN task` tail, payload already parsed.
+///
+/// `task` is `Option` because the join is a `LEFT` join — a store-scoped event
+/// carries no task. `payload` is never an error: absent and malformed JSON
+/// both degrade to `Null`, so a single bad row cannot fail a whole timeline
+/// read. The cost of that choice is that the two cases are indistinguishable
+/// downstream; a consumer that must tell them apart has to read the raw column
+/// itself.
 pub struct EventRow {
     pub id: i64,
     pub task: Option<String>, // display_id
@@ -37,6 +25,17 @@ pub struct EventRow {
 
 /// Filter for [`events`]. All fields are conjunctive (`AND`); `None`/empty
 /// means "no constraint on this dimension".
+///
+/// This is the smallest shape covering all three event-tail callers —
+/// `timeline.rs`, `watch.rs`, and `decisions.rs` — which previously hand-rolled
+/// the same `event LEFT JOIN task` SELECT with different `?N` numbering.
+/// Every dimension here exists because some caller needs it: `decisions` alone
+/// sets `auto_only` and passes a single-element `kinds` slice, and it alone
+/// passes `since_id: None` because it wants full history rather than a tail.
+///
+/// There is no sort-direction field, deliberately: all three callers order
+/// `e.id ASC`, so an `ascending` flag would be dead weight on every existing
+/// call site. Add one when a caller needs it, not before.
 #[derive(Default)]
 pub struct EventFilter<'a> {
     /// `e.id > since_id`. `None` omits the clause entirely (decisions wants
@@ -127,9 +126,17 @@ pub fn events(conn: &rusqlite::Connection, f: &EventFilter) -> anyhow::Result<Ve
     Ok(out)
 }
 
-/// A task row as read by the list/tree/wave/show query families. `state`
-/// stays a plain `String` for now — typing it as `db::State` is QP-66, a
-/// separate ticket; conflating query extraction with column retyping would
+/// A task row as read by the list/tree/wave/show query families.
+///
+/// `agent` is the *latest* agent assigned, open or not (see
+/// `LATEST_AGENT_SUBQUERY`) — not necessarily the agent that holds the task
+/// now. A `done` task keeps naming whoever finished it, which is what the list
+/// and wave views want to show, but it means a non-null `agent` here is not
+/// evidence of an open claim. Use `db::current_assignment` for ownership
+/// questions.
+///
+/// `state` stays a plain `String` for now — typing it as `db::State` is QP-66,
+/// a separate ticket; conflating query extraction with column retyping would
 /// double the review surface for no immediate benefit.
 pub struct TaskRow {
     pub id: i64,
