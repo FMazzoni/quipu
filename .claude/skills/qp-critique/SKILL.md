@@ -42,7 +42,14 @@ allowed-tools: Read Glob Grep Bash Edit Write
 | Minor        | Style, ergonomics, micro-perf, cosmetic                                    |
 | Observation  | FYI; not actionable; context for next maintainer                           |
 
-Auto-mode triage (run by coordinator): **only Critical findings are acted on automatically**. Important/Minor/Observation get filed as qp tickets (`qp add ... --tag kind:bug --tag harness:claude-code`). Calibrate your severities accordingly — don't inflate to force action.
+Auto-mode triage (run by coordinator): **only Critical findings are acted on automatically**. Important/Minor/Observation get filed as qp tickets (`qp add ... --tag harness:claude-code`). Calibrate your severities accordingly — don't inflate to force action.
+
+**Pick the `kind:` tag honestly — this is the highest-leverage thing you do when filing.**
+
+- `--tag kind:bug` — something is demonstrably wrong and the fix is determinable from the code.
+- `--tag kind:decision` — you found a choice, not a defect: options with no clear winner, an accepted trade-off, or a resolution that turns on a preference nobody has stated. Say what the options are and what each costs.
+
+Mislabelling a decision as a bug is what stranded QP-37, QP-41, QP-49 and QP-50 for two months: filed as bugs they looked actionable, so every sweep picked them up and every agent put them back down. `kind:decision` does not route work away from agents — those tickets are still dispatched, with authority to choose (see `wave-orchestrate` Phase 1). The tag tells the implementer that judgement is required and permitted, which is exactly what a critic knows and the implementer otherwise has to rediscover.
 
 ## Lens scope quick reference
 
