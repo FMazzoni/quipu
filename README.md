@@ -69,6 +69,10 @@ reading any other field:
 | `invalid_input` | — | bad CLI input |
 | `internal` | — | uncategorized failure; treat as a bug |
 
+The first five are the `QuipuError` variants in `src/db.rs`; `internal` is not a
+variant but the fallback `main.rs` emits for any error that does not downcast to
+one, so a consumer matching on `kind` must handle all six.
+
 `code` (on `conflict` and `invariant` only) is a stable string for precise skill
 authoring (e.g. `already_claimed`, `not_ready`, `state_changed_under_us`) and
 grows additively.

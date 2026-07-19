@@ -290,7 +290,7 @@ directly.
 | code | meaning |
 |---|---|
 | 0 | success |
-| 1 | `invalid_input` — bad CLI input, including argument-parse failures — or any error outside the taxonomy |
+| 1 | `invalid_input` — bad CLI input, including argument-parse failures — or `internal`, the envelope kind for any error outside the taxonomy |
 | 2 | `conflict`, `not_owner`, `not_found`, `invariant` — the state of the store refused the operation |
 | 3 | `wait` timed out |
 | 4 | `wait --cohort-done` matched an empty cohort |
