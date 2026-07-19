@@ -5,9 +5,9 @@ command is a narrowing of this one: [`decisions`](../decisions/index.html) is
 through one `store::EventFilter` rather than growing parallel queries, which is
 what stops them drifting apart on the semantics below.
 
-## `--since` is an event id, not a timestamp
+## `--since`
 
-This is the one thing to know before using it. `--since 730` means "events with
+`--since` is an event id, not a timestamp. `--since 730` means "events with
 `event.id > 730`" — an **exclusive** lower bound on a monotonic integer, so it
 returns events starting at 731. It does *not* accept `24h`, `7d`, or a date.
 
@@ -29,7 +29,7 @@ happens to admit everything because ids start at 1. `decisions` passes `None`
 here instead; the results coincide today, and the difference is only visible to
 someone reading the generated SQL.
 
-## `--kind` ORs, `--tag` on `list` ANDs
+## Repeated `--kind` flags
 
 Repeated `--kind` flags compile to `kind IN (?, ?, …)`, so
 `--kind decision --kind blocker` returns events that are **either**. This is the

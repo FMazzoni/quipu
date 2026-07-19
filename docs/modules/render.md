@@ -1,5 +1,5 @@
-Used by `timeline` and `show` so that one event kind reads the same
-wherever it appears.
+`summarize_payload` is called by `timeline` and `show`, so that one event kind
+reads the same wherever it appears.
 
 The reason to centralise this is drift, not reuse. Two views formatting
 `state_change` independently will eventually disagree about it, and a reader

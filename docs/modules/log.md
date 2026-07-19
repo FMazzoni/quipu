@@ -5,7 +5,7 @@ defines no vocabulary for it beyond the kinds its own commands emit
 (`state_change`, `blocker`, `dep_added`, …), so a skill can invent its own and
 `timeline --kind` will filter on it.
 
-## Auto-attribution happens only while the task is `running`
+## Auto-attribution
 
 With no `--as`, the entry is attributed to the task's latest open assignee — but
 **only if the task is currently `running`**. That is the one state where the
@@ -24,7 +24,7 @@ assignment by id. See `docs/modules/list.md` for why those two must not be
 swapped: the agent column in `qp list` is the latter, and using it here would let
 a former assignee's name land on someone else's entry.
 
-## `--auto` is a payload flag, not an attribution flag
+## `--auto` versus `--as`
 
 `--auto` sets `auto: true` inside the event payload and has nothing to do with
 `--as`. It marks the entry as machine-generated so `qp decisions --auto-only`

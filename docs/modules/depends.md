@@ -1,7 +1,9 @@
-Cycle-checked before insert. Adding or removing an edge can change what
-is ready, so both paths re-derive readiness.
+One invocation moves exactly one edge: `qp depends <TASK> --on <ON>` adds it,
+`--rm` removes it. There is no multi-edge form. Adds are cycle-checked before
+the insert, and both directions re-derive readiness, because either can change
+what is workable.
 
-## The two directions are not mirror images
+## Demotion on add, promotion on rm
 
 Adding an edge can only ever *demote*, and removing one can only ever *promote*.
 That asymmetry is why the two branches look so different, and why the outcome's
@@ -21,7 +23,7 @@ in `ready` and emits an event for it. Without the snapshot the promotions would
 be silent, and a `watch` consumer would see a task become workable with nothing
 in the log explaining why (`depends_rm_emits_state_change_on_promote`).
 
-## Why the *downstream* task is the one whose owner is checked
+## Ownership gate on the downstream task
 
 Adding a dependency to a task somebody is actively working on can yank it out
 from under them, so `--as` is required and must match the assignee when the

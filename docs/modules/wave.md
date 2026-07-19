@@ -2,7 +2,7 @@ A projection, not an orchestrator. `qp wave` groups in-flight tasks into four
 state buckets — `ready`, `assigned`, `running`, `pending` — in that display
 order, and writes nothing.
 
-## `pending` is filtered to genuinely blocked work
+## The `pending` filter
 
 The first three groups list every task in that state. `pending` does not: a
 `pending` task appears here **if and only if** it has at least one unresolved
@@ -15,7 +15,7 @@ The distinction the filter is drawing is *stuck* versus *not yet promoted*. Thos
 look identical in the `state` column and want opposite reactions from a
 coordinator, so the wave view answers only the first.
 
-## Why the rule is structural and not tag-based
+## Structural, not tag-based
 
 The definition above is deliberately broader than the skill-layer `kind:blocker`
 tag convention: any unresolved dep qualifies, tagged or not. Two consequences,

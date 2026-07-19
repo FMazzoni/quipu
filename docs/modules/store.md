@@ -11,12 +11,14 @@ still hand-roll `SELECT`s that have not migrated here. Extraction is incremental
 by design; treat an un-migrated query as unfinished work rather than as a
 counter-example to the rule.
 
-## Why this module exists
+## Purpose
 
-The same queries were hand-written across many command files in subtly divergent
-forms — the "latest agent" lookup existed in 3 shapes across 11 sites, the
-unresolved-dep predicate in 9, the event-tail `SELECT` in 3 column shapes across
-6.
+Three query families were hand-written across command modules in divergent
+forms before this extraction: the "latest agent" lookup (`list.rs`, `wave.rs`),
+the unresolved-dep predicate, and the `event LEFT JOIN task` tail
+(`timeline.rs`, `watch.rs`, `decisions.rs`, which numbered their `?N`
+placeholders differently). They are now `LATEST_AGENT_SUBQUERY`,
+`unresolved_blockers_by_task`, and `events` + `EventFilter`.
 
 Divergence is the risk, not verbosity. Adding a terminal state means updating
 every copy correctly, and missing one is a silent logic bug.
@@ -33,7 +35,7 @@ Deliberate, from the QP-68 research:
   and markdown/HTML rendering has moved out of the binary entirely into the
   `report-render` skill.
 
-## The unresolved-dep predicate lives in three places, deliberately
+## The unresolved-dep predicate
 
 `t2.state NOT IN ('done','cancelled')` — "this dependency is not yet resolved" —
 is written three times and stays that way (QP-146, closed won't-do). Two of the
@@ -59,9 +61,13 @@ demotion `UPDATE`, snapshotting promotion candidates before calling
 not a fourth independent site — but it is a fourth textual occurrence, and a
 sweep that misses it will still compile.
 
-Search for the literal `NOT IN ('done','cancelled')` to find every occurrence.
-It is spelled identically at all of them, with no whitespace variation, which is
-worth preserving for exactly that reason.
+Search for the literal `NOT IN ('done','cancelled')`. It is spelled identically
+at every site, with no whitespace variation, which is worth preserving for
+exactly that reason. The search returns seven SQL occurrences, not four: the
+other three — `cmd/cancel.rs`, `cmd/edit.rs`, `cmd/wait.rs` — apply the same
+literal to the task's *own* state as a terminal-state guard, not to its
+dependencies. Renaming a terminal state touches all seven; the reasoning above
+about promotion and demotion applies only to the four dep-side ones.
 
 **What would reopen this:** a fourth independent site appearing, a terminal
 state actually being added and one of the three being missed in the process, or
