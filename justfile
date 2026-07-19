@@ -47,6 +47,22 @@ docs:
     cargo doc --no-deps
     @echo "open: file://$(pwd)/target/doc/qp/index.html"
 
+# dump every rendered module page as text, for the verify-docs sweep
+#
+# The denominator is `index.html` only: the crate front page plus one page per
+# module. `find target/doc -name '*.html'` would also sweep target/doc/src/, the
+# syntax-highlighted source mirror, which is not documentation; dropping the
+# -name filter under target/doc/qp still pulls in every per-item page and
+# quintuples the count.
+#
+# w3m, not lynx/pandoc/html2text — those are not installed here. It halves the
+# bytes versus raw HTML, which is what makes the sweep fit in an agent's context.
+docs-dump: docs
+    @find target/doc/qp -name 'index.html' | sort | while read -r p; do \
+        printf '\n===== %s =====\n' "$p"; \
+        w3m -dump -cols 100 "$p"; \
+    done
+
 # stripped-binary size + cold start (verifies leanness budget)
 # The RSS probe needs GNU time (-v); it degrades to a skip elsewhere (macOS/BSD).
 check-lean:
