@@ -128,15 +128,22 @@ is what makes `watch` correct.
 This is the heart of the system. Read it once and ~13 files become the same file.
 
 ```rust,ignore
-db::with_tx(&mut conn, |tx| {              // 1. BEGIN IMMEDIATE — take the write lock now
+db::with_tx(&mut conn, |tx| {                       // 1. BEGIN IMMEDIATE — take the write lock now
     let n = tx.execute(
-        "UPDATE task SET state = 'X' WHERE id = ? AND state = 'Y'",  // 2. guarded edge
-        [task_id])?;
-    if n != 1 { return Err(db::constraint(...)); }                   // 3. exactly-one check
+        "UPDATE task SET state = ?1 WHERE id = ?2 AND state = ?3",   // 2. guarded edge
+        rusqlite::params![db::State::Assigned, task_id, db::State::Ready])?;
+    if n != 1 {
+        return Err(db::conflict("not_ready", "...", Some(display_id)));  // 3. exactly-one check
+    }
     db::insert_event(tx, ..., "state_change", ...)?;                 // 4. audit trail
     Ok(())
 })?;
 ```
+
+State values are bound as `db::State` rather than spelled as SQL string
+literals, so the CLI vocabulary and the transition vocabulary come from one
+definition. Multi-state predicates (`WHERE state IN (...)`) stay literal —
+they do not parametrise idiomatically in rusqlite.
 
 Four parts, and each one is load-bearing:
 
@@ -148,7 +155,11 @@ Four parts, and each one is load-bearing:
    still where the caller thought it was.
 3. **`n != 1`** means you *find out* when it wasn't, instead of silently
    clobbering. This is what makes a claim atomic: two agents racing the same
-   task produce exactly one winner and one constraint error.
+   task produce exactly one winner and one `conflict` error. The error
+   constructors — `conflict`, `not_owner`, `not_found`, `invariant`,
+   `invalid_input` — are the agent-facing taxonomy: the variant says whether
+   to retry, give up, or escalate, and `conflict` carries a stable code
+   string such as `not_ready` or `already_claimed`.
 4. **The event** means the change is never invisible.
 
 Read-then-write is banned as a matter of policy. Where a read is unavoidable, it
@@ -167,10 +178,11 @@ The most useful split in the codebase, and it is not visible from the file tree.
 | **Mutators** | `add`, `assign`, `claim`, `complete`, `abandon`, `reclaim`, `cancel`, `block`, `depends`, `edit`, `tag`, `log`, `relation` | **all of it** |
 | **Projections** | `list`, `tree`, `show`, `status`, `wave`, `timeline`, `decisions`, `watch`, `report`, `wait` | none — read-only |
 
-Projections cannot corrupt anything. [`report.rs`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/report.rs) is by
-far the largest file in the crate and is also the least dangerous — worst case it
-renders something wrong. Meanwhile [`claim.rs`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/claim.rs) is one of
-the smallest, and if it is wrong you double-dispatch work to two agents.
+Projections cannot corrupt anything, and the risk asymmetry is stark.
+[`report.rs`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/report.rs) is among the largest command files and
+also the least dangerous — worst case it emits a wrong number. Meanwhile
+[`claim.rs`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/claim.rs) is one of the smallest, and if it is wrong
+you double-dispatch work to two agents.
 
 Scrutiny should follow risk, not line count.
 
@@ -194,9 +206,23 @@ incrementally, and `cmd/*.rs` files still contain SQL that has not migrated yet.
 
 ## Storage
 
-One SQLite file, default `.quipu/db.sqlite`, discovered by walking up from the
-cwd — with a git-aware fallback so that commands run inside a worktree find the
-main repo's store.
+One SQLite file, default `.quipu/db.sqlite`. `resolve_path` in
+[`db.rs`](https://github.com/FMazzoni/quipu/blob/main/src/db.rs) picks it in three tiers:
+
+1. An explicit `--db` / `QP_DB`, which wins outright.
+2. Otherwise the nearest `.quipu/db.sqlite` walking up from the cwd.
+3. Otherwise the one beside the repo root from `git rev-parse --git-common-dir`.
+
+Tier 3 exists for worktrees: a `wt`-managed worktree is a *sibling* of the main
+checkout, not a child, so walking up ancestors never reaches its `.quipu/`. This
+is what lets a subagent run bare `qp` with no environment set up.
+
+Each store stamps a `project_uuid` at `qp init`. Passing `--db`/`QP_DB`
+explicitly while the cwd would have resolved to a *different* store emits a
+mismatch warning — the guard against filing into the wrong project. Because that
+only fires under an explicit path, its audience is automation, which is why under
+`--json` it is emitted as JSON rather than prose (stderr is JSON Lines: warnings,
+then at most one error).
 
 PRAGMAs set on every open, in [`db.rs`](https://github.com/FMazzoni/quipu/blob/main/src/db.rs):
 
@@ -212,9 +238,13 @@ Tables: `meta`, `default_tag`, `task`, `dep`, `assignment`, `event`, `tag`,
 
 Two notes on the schema as it stands:
 
-- `task.state` is bare `TEXT`. The legal values are documented in a comment and
-  enforced by the guarded `WHERE` clauses, but **there is no `CHECK`
-  constraint** — the domain is not enforced by the database itself.
+- `task.state` is bare `TEXT`: **there is no `CHECK` constraint**, so the domain
+  is not enforced by the database itself. That is deliberate — adding one would
+  require SQLite's full table-rebuild dance, and no other `TEXT` column carries a
+  `CHECK` either. Enforcement is Rust-side instead: `db::State` is the single
+  definition, bound as a parameter in every transition and derived as a
+  `clap::ValueEnum` so `--state` rejects a typo at parse time rather than
+  silently matching zero rows.
 - `created_at` and friends default to SQLite's `strftime`, while Rust-side
   timestamps come from `now_rfc3339` in [`time.rs`](https://github.com/FMazzoni/quipu/blob/main/src/time.rs). These
   produce different sub-second precision, so cross-table lexicographic time
@@ -224,8 +254,13 @@ Two notes on the schema as it stands:
 
 Tasks carry a rowid and a display id (`QP-1`), formatted by
 [`id.rs`](https://github.com/FMazzoni/quipu/blob/main/src/id.rs). The prefix is per-store, fixed at `qp init`, default
-`QP`. `resolve` matches on the display-id string, so the prefix in user input is
-informational.
+`QP`.
+
+`resolve_full` parses the reference and matches on the **numeric rowid**, not on
+the display-id string. So the prefix and any zero padding in user input are
+informational: `QP-1`, `QP-001`, and `qp-1` all reach the same row. It returns
+both the rowid and the canonical `display_id`, which is what mutating commands
+echo — never the raw argument the user typed.
 
 ## Exit codes
 
