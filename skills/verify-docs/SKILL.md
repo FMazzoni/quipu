@@ -98,12 +98,53 @@ against the source. Leave it alone if it merely sounds outdated.
 - **Never reference line numbers.** They rot within a week. Files and function
   names only. This rule has been broken repeatedly — including in the tickets
   that created this skill — so check your own output for it.
-- Prefer deleting a stale sentence over rewriting it into vagueness.
-- Do not restate what the code already says plainly.
 - Fenced code blocks in doc comments are parsed as Rust and doctested. Tag them
   ` ```text ` or ` ```rust,ignore ` or they will produce build warnings.
 - Angle-bracket placeholders (`<duration>`) in doc comments are swallowed as
   unknown HTML tags. Put them inside backticks or a fenced block.
+
+## Keep, fix, or cut
+
+Correctness is not the only question. A sentence can be accurate and still not
+worth the maintenance. Before you fix a drifted claim, decide whether it earns
+the repair.
+
+**The test:** if this code were rewritten tomorrow in a different shape, would
+the sentence still be true *and* still be useful? Prose that only describes the
+current arrangement of lines will rot again after the next refactor. Prose that
+records something the code cannot say for itself survives it.
+
+**Keep** — it carries one of the four durable kinds:
+
+- **WHY** — the reason the code has this shape, and what was rejected. A reader
+  can see what `with_tx` does; they cannot see that read-then-write was banned
+  deliberately.
+- **INVARIANTS** — what must stay true, and what breaks when it does not.
+  Prefer the ones that state a consequence; if a claim states only the rule,
+  adding the consequence is a legitimate fix.
+- **GOTCHAS** — the thing that looks wrong but is correct, or looks safe but is
+  not. The blank `//!` line before a `#![doc = include_str!]` pointer is one:
+  invisible, load-bearing, and a reader will delete it.
+- **BOUNDARIES** — what deliberately does *not* belong in this module, and where
+  it lives instead.
+
+**Fix** — durable content, wrong details. A renamed function, a moved module, a
+changed exit code inside a sentence that is otherwise worth having.
+
+**Cut** — it restates the code. `/// Returns the task id` above
+`fn task_id() -> i64` is negative value: staleness surface carrying no
+information. If deleting a sentence would lose nothing a reader could not get
+from the signature or the body, delete it rather than re-verifying it every
+sweep.
+
+Deletion is also the right move for a stale sentence you cannot repair
+precisely. **Prefer deleting over rewriting into vagueness** — softening
+`refresh_ready is the only function that computes readiness` into "readiness is
+computed in a few places" produces a claim that is unfalsifiable, survives every
+future sweep, and tells a reader nothing. Cut it and, if the real behaviour
+matters, file a ticket.
+
+Deleting is a finding. Report what you removed and why, the same as a fix.
 
 ## What to do with a finding
 

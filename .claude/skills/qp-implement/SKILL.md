@@ -17,6 +17,38 @@ allowed-tools: Read Glob Grep Bash Edit Write
 - [ ] **Every file you touch exits with a `//!` header.** One short sentence, a period, then a blank `//!` line before any detail — rustdoc uses everything before that blank line as the module-list summary, so a multi-line first paragraph renders as a wall of text in the table. For a command module, the summary is which state-machine edge it implements (`claim` is the `assigned` → `running` edge). Reference files and function names, never line numbers. Fence any example containing `<placeholders>` as ```text or rustdoc deletes them. If a header grows past ~15 lines of prose, keep the one-line summary in the `.rs` and move the detail to `docs/modules/<name>.md` behind `#![doc = include_str!(...)]` — with a blank `//!` line before the pointer, or the summary runs on into the detail.
 - [ ] **All of CLAUDE.md applies:** guarded state transitions, `with_tx` + `IMMEDIATE`, no async runtime, no `tracing` crate, no `db::now()` (use `time::now_rfc3339`), leanness budget.
 
+## What to write in that header
+
+The rule above says where prose goes. This says what is worth putting there.
+
+**Write the durable half** — what the code cannot say for itself:
+
+- **WHY** — the reason it has this shape, and what was rejected. A reader can
+  see what `with_tx` does; they cannot see that read-then-write was banned
+  deliberately, or that `IMMEDIATE` is there so two agents racing on the same
+  ticket fail fast instead of deadlocking mid-transaction.
+- **INVARIANTS** — what must stay true, and what breaks when it does not. State
+  the consequence, not just the rule: "every transition is one conditional
+  `UPDATE ... WHERE state IN (...)` plus a `changes() == 1` check — a
+  read-then-write here lets a concurrent claim silently win and the loser
+  reports success."
+- **GOTCHAS** — the thing that looks wrong but is correct, or looks safe but is
+  not. If you had to work something out while writing the code, that is the
+  paragraph worth keeping. The blank `//!` line before a `#![doc = include_str!]`
+  pointer is exactly this: invisible, load-bearing, and a reader will delete it.
+- **BOUNDARIES** — what deliberately does *not* belong here, and where it lives
+  instead. "Wave sequencing is not modelled in the binary; it lives in
+  `skills/wave-orchestrate/`."
+
+**Do not restate the code.** `/// Returns the task id` above
+`fn task_id() -> i64` is negative value: staleness surface carrying no
+information. If deleting a sentence would lose nothing a reader could not get
+from the signature or the body, delete it.
+
+**The test:** if this code were rewritten tomorrow in a different shape, would
+the sentence still be true *and* still be useful? If yes, it is durable. If it
+only describes the current arrangement of lines, it will rot — leave it out.
+
 ## First three commands
 
 ```bash
