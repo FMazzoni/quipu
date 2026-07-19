@@ -74,7 +74,9 @@ pub fn resolve_full(conn: &rusqlite::Connection, s: &str) -> Result<Resolved> {
         })
     })
     .map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => anyhow!("no such task: {s}"),
+        rusqlite::Error::QueryReturnedNoRows => {
+            crate::db::not_found(format!("no such task: {s}"), Some(s.trim().to_string()))
+        }
         other => other.into(),
     })
 }

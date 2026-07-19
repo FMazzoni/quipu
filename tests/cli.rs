@@ -182,6 +182,22 @@ fn qp(db: &std::path::Path) -> Command {
     c
 }
 
+/// Parse an `assert_cmd` success output's stdout as a bare JSON object
+/// (no `{"ok":...}` wrapper expected — success is disjoint from error by
+/// stream + exit code, per `outcome::emit`).
+fn json_stdout(assert: &assert_cmd::assert::Assert) -> serde_json::Value {
+    let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    serde_json::from_str(out.trim())
+        .unwrap_or_else(|e| panic!("stdout was not valid JSON: {e}\nstdout:\n{out}"))
+}
+
+/// Parse a failing `assert_cmd` output's stderr as the `{"error": {...}}` envelope.
+fn json_stderr(assert: &assert_cmd::assert::Assert) -> serde_json::Value {
+    let out = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    serde_json::from_str(out.trim())
+        .unwrap_or_else(|e| panic!("stderr was not valid JSON: {e}\nstderr:\n{out}"))
+}
+
 #[test]
 fn timeline_global_includes_all_event_kinds() {
     let tmp = tempfile::tempdir().unwrap();
@@ -2825,4 +2841,524 @@ fn legacy_t_form_still_resolves_against_t_prefixed_row() {
     let out = qp(&db).args(["show", "T1"]).assert().success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(s.contains("T1"));
+}
+
+// --- QP-117 / QP-114: --json + error envelope coverage --------------------
+//
+// Wave 5 shipped `--json` on 12 mutating commands and a 4-variant error
+// taxonomy with zero test functions locking either in. These tests parse
+// real JSON (never string-match) against the actual `Outcome`/`QuipuError`
+// shapes in src/outcome.rs and src/db.rs.
+
+#[test]
+fn json_assign_emits_bare_object_with_canonical_display_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    let assert = qp(&db)
+        .args(["assign", "QP-1", "--to", "bob", "--json"])
+        .assert()
+        .success();
+    let v = json_stdout(&assert);
+    assert_eq!(v["display_id"], "QP-1");
+    assert_eq!(v["agent_id"], "bob");
+    assert_eq!(v["state"], "assigned");
+    assert!(v.get("ok").is_none(), "must be a bare object, not wrapped");
+}
+
+#[test]
+fn json_claim_emits_bare_object() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "bob"])
+        .assert()
+        .success();
+    let assert = qp(&db)
+        .args(["claim", "QP-1", "--as", "bob", "--json"])
+        .assert()
+        .success();
+    let v = json_stdout(&assert);
+    assert_eq!(v["display_id"], "QP-1");
+    assert_eq!(v["agent_id"], "bob");
+    assert_eq!(v["state"], "running");
+}
+
+#[test]
+fn json_complete_emits_bare_object() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "bob"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "bob"])
+        .assert()
+        .success();
+    let assert = qp(&db)
+        .args(["complete", "QP-1", "--as", "bob", "--json"])
+        .assert()
+        .success();
+    let v = json_stdout(&assert);
+    assert_eq!(v["display_id"], "QP-1");
+    assert_eq!(v["state"], "done");
+    assert!(v["decisions"].is_array());
+    assert!(v["artifacts"].is_array());
+}
+
+#[test]
+fn json_cancel_emits_bare_object() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    let assert = qp(&db)
+        .args(["cancel", "QP-1", "--reason", "obsolete", "--json"])
+        .assert()
+        .success();
+    let v = json_stdout(&assert);
+    assert_eq!(v["display_id"], "QP-1");
+    assert_eq!(v["state"], "cancelled");
+    assert_eq!(v["reason"], "obsolete");
+}
+
+#[test]
+fn json_abandon_emits_bare_object() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "alice"])
+        .assert()
+        .success();
+    let assert = qp(&db)
+        .args(["abandon", "QP-1", "--as", "alice", "--json"])
+        .assert()
+        .success();
+    let v = json_stdout(&assert);
+    assert_eq!(v["display_id"], "QP-1");
+    // No unresolved deps -> refresh_ready promotes it straight back to ready.
+    assert_eq!(v["state"], "ready");
+}
+
+#[test]
+fn json_reclaim_emits_bare_object() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "alice"])
+        .assert()
+        .success();
+    let assert = qp(&db)
+        .args(["reclaim", "QP-1", "--reason", "timeout", "--json"])
+        .assert()
+        .success();
+    let v = json_stdout(&assert);
+    assert_eq!(v["display_id"], "QP-1");
+    assert_eq!(v["state"], "ready");
+    assert_eq!(v["reason"], "timeout");
+}
+
+#[test]
+fn json_block_exposes_blocker_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success(); // QP-1
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "alice"])
+        .assert()
+        .success();
+    let assert = qp(&db)
+        .args([
+            "block",
+            "QP-1",
+            "--as",
+            "alice",
+            "--new",
+            "need infra",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let v = json_stdout(&assert);
+    assert_eq!(v["display_id"], "QP-1");
+    assert_eq!(v["blocker_id"], "QP-2");
+    assert_eq!(v["blocker_title"], "need infra");
+    assert_eq!(v["state"], "pending");
+}
+
+#[test]
+fn json_depends_emits_bare_object() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success(); // QP-1
+    qp(&db).args(["add", "b"]).assert().success(); // QP-2
+    let assert = qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1", "--json"])
+        .assert()
+        .success();
+    let v = json_stdout(&assert);
+    assert_eq!(v["display_id"], "QP-2");
+    assert_eq!(v["on_id"], "QP-1");
+    assert_eq!(v["op"], "add");
+}
+
+#[test]
+fn json_edit_emits_bare_object() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    let assert = qp(&db)
+        .args(["edit", "QP-1", "--title", "new title", "--json"])
+        .assert()
+        .success();
+    let v = json_stdout(&assert);
+    assert_eq!(v["display_id"], "QP-1");
+    assert_eq!(v["changed"], true);
+    assert!(v["changes"]["title"].is_object());
+}
+
+#[test]
+fn json_log_emits_bare_object() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    let assert = qp(&db)
+        .args([
+            "log", "QP-1", "decision", "chose B", "--as", "bob", "--json",
+        ])
+        .assert()
+        .success();
+    let v = json_stdout(&assert);
+    assert_eq!(v["display_id"], "QP-1");
+    assert_eq!(v["kind"], "decision");
+    assert_eq!(v["agent"], "bob");
+}
+
+#[test]
+fn json_init_emits_bare_object() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    let assert = qp(&db).args(["init", "--json"]).assert().success();
+    let v = json_stdout(&assert);
+    assert!(v["db_path"].is_string());
+    assert_eq!(v["prefix"], "QP");
+    // `InitOutcome.schema_version` is a `String`, not a number — pinning "2"
+    // as a JSON string is intentional, matching the reference output.
+    assert_eq!(v["schema_version"], serde_json::Value::String("2".into()));
+}
+
+#[test]
+fn json_tag_reports_success_in_both_add_and_rm() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+
+    // clap quirk: --json must precede the add/rm subcommand.
+    let assert = qp(&db)
+        .args(["tag", "QP-1", "--json", "add", "kind:x"])
+        .assert()
+        .success();
+    let v = json_stdout(&assert);
+    assert_eq!(v["display_id"], "QP-1");
+    assert_eq!(v["op"], "added");
+    assert_eq!(v["name"], "kind:x");
+
+    let assert = qp(&db)
+        .args(["tag", "QP-1", "--json", "rm", "kind:x"])
+        .assert()
+        .success();
+    let v = json_stdout(&assert);
+    assert_eq!(v["op"], "removed");
+    assert_eq!(v["name"], "kind:x");
+}
+
+#[test]
+fn human_tag_reports_success_in_both_add_and_rm() {
+    // Regression guard: `qp tag` used to be silent in human mode. A regression
+    // back to silence must fail this test.
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+
+    let out = qp(&db)
+        .args(["tag", "QP-1", "add", "kind:x"])
+        .assert()
+        .success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("QP-1") && s.contains("tagged"), "got: {s:?}");
+
+    let out = qp(&db)
+        .args(["tag", "QP-1", "rm", "kind:x"])
+        .assert()
+        .success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("QP-1") && s.contains("untagged"), "got: {s:?}");
+}
+
+#[test]
+fn json_canonicalizes_scruffy_reference_on_assign() {
+    // QP-61/QP-78 guarantee, now locked in for the --json path specifically:
+    // the reference argument may be scruffy, but the JSON always carries the
+    // canonical display_id.
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    let assert = qp(&db)
+        .args(["assign", " qp-1 ", "--to", "bob", "--json"])
+        .assert()
+        .success();
+    let v = json_stdout(&assert);
+    assert_eq!(v["display_id"], "QP-1");
+}
+
+#[test]
+fn json_canonicalizes_zero_padded_reference_on_claim() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "bob"])
+        .assert()
+        .success();
+    let assert = qp(&db)
+        .args(["claim", "qp-001", "--as", "bob", "--json"])
+        .assert()
+        .success();
+    let v = json_stdout(&assert);
+    assert_eq!(v["display_id"], "QP-1");
+}
+
+#[test]
+fn error_conflict_envelope_on_stderr_for_already_claimed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "bob"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "bob"])
+        .assert()
+        .success();
+    let assert = qp(&db)
+        .args(["claim", "QP-1", "--as", "bob", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+    // The envelope must be on stderr, not stdout.
+    assert!(
+        assert.get_output().stdout.is_empty(),
+        "expected empty stdout on error"
+    );
+    let v = json_stderr(&assert);
+    assert_eq!(v["error"]["kind"], "conflict");
+    assert_eq!(v["error"]["code"], "already_claimed");
+    assert_eq!(v["error"]["task"], "QP-1");
+}
+
+#[test]
+fn error_not_owner_envelope_on_stderr_for_abandon() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "alice"])
+        .assert()
+        .success();
+    let assert = qp(&db)
+        .args(["abandon", "QP-1", "--as", "bob", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+    assert!(
+        assert.get_output().stdout.is_empty(),
+        "expected empty stdout on error"
+    );
+    let v = json_stderr(&assert);
+    assert_eq!(v["error"]["kind"], "not_owner");
+    assert_eq!(v["error"]["message"], "QP-1 not yours");
+    assert_eq!(v["error"]["owner"], "alice");
+    assert_eq!(v["error"]["task"], "QP-1");
+}
+
+#[test]
+fn error_not_found_envelope_on_stderr_for_depends_rm() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success(); // QP-1
+    qp(&db).args(["add", "b"]).assert().success(); // QP-2
+    let assert = qp(&db)
+        .args(["depends", "QP-2", "--rm", "--on", "QP-1", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+    assert!(
+        assert.get_output().stdout.is_empty(),
+        "expected empty stdout on error"
+    );
+    let v = json_stderr(&assert);
+    assert_eq!(v["error"]["kind"], "not_found");
+    assert_eq!(v["error"]["message"], "no dep QP-2 \u{2192} QP-1");
+    assert_eq!(v["error"]["task"], "QP-2");
+}
+
+#[test]
+fn block_wrong_agent_yields_not_owner_not_conflict() {
+    // The ownership-vs-state split is the QP-114 deliverable: wrong agent must
+    // NOT collapse back into the generic conflict message it used to be.
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "alice"])
+        .assert()
+        .success();
+    let assert = qp(&db)
+        .args(["block", "QP-1", "--as", "bob", "--new", "x", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+    let v = json_stderr(&assert);
+    assert_eq!(v["error"]["kind"], "not_owner");
+}
+
+#[test]
+fn block_wrong_state_yields_conflict_not_owner() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success(); // still `ready`, never assigned
+    let assert = qp(&db)
+        .args(["block", "QP-1", "--as", "alice", "--new", "x", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+    let v = json_stderr(&assert);
+    assert_eq!(v["error"]["kind"], "conflict");
+    assert_eq!(v["error"]["code"], "not_blockable");
+}
+
+#[test]
+fn human_mode_renders_prose_not_json_on_success() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    let out = qp(&db)
+        .args(["assign", "QP-1", "--to", "bob"])
+        .assert()
+        .success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert_eq!(s, "QP-1 assigned to bob\n");
+    assert!(
+        serde_json::from_str::<serde_json::Value>(s.trim()).is_err(),
+        "human-mode stdout parsed as JSON, expected prose: {s:?}"
+    );
+}
+
+#[test]
+fn human_mode_renders_prose_not_json_on_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "bob"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "bob"])
+        .assert()
+        .success();
+    let assert = qp(&db)
+        .args(["claim", "QP-1", "--as", "bob"])
+        .assert()
+        .failure()
+        .code(2);
+    let s = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        s.starts_with("error: "),
+        "expected `error: ` prefix, got: {s:?}"
+    );
+    assert!(
+        serde_json::from_str::<serde_json::Value>(s.trim()).is_err(),
+        "human-mode stderr parsed as JSON, expected prose: {s:?}"
+    );
+}
+
+// --- QP-117 / QP-115: missing task resolves to NotFound, not internal -----
+
+#[test]
+fn show_missing_task_json_is_not_found_and_exits_2() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    let assert = qp(&db)
+        .args(["show", "QP-99", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+    let v = json_stderr(&assert);
+    assert_eq!(v["error"]["kind"], "not_found");
+    assert!(
+        v["error"].get("code").is_none(),
+        "NotFound has no `code` field"
+    );
+}
+
+#[test]
+fn show_missing_task_human_message_stays_readable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    let assert = qp(&db).args(["show", "QP-99"]).assert().failure().code(2);
+    let s = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(s.contains("QP-99"), "expected task ref in message: {s:?}");
+    assert!(
+        s.contains("no such task"),
+        "expected readable message: {s:?}"
+    );
 }
