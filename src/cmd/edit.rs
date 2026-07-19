@@ -29,7 +29,8 @@ pub fn run(db_path: &std::path::Path, a: EditArgs) -> Result<()> {
         }
     }
     let mut conn = db::open(db_path)?;
-    let task_id = id::resolve(&conn, &a.task)?;
+    let resolved = id::resolve_full(&conn, &a.task)?;
+    let task_id = resolved.id;
     let any_changed = db::with_tx(&mut conn, |tx| -> Result<bool> {
         let (cur_title, cur_tier, cur_description): (String, Option<String>, Option<String>) = tx
             .query_row(
@@ -114,9 +115,9 @@ pub fn run(db_path: &std::path::Path, a: EditArgs) -> Result<()> {
         Ok(true)
     })?;
     if any_changed {
-        println!("{} edited", a.task.to_uppercase());
+        println!("{} edited", resolved.display_id);
     } else {
-        println!("{} no changes", a.task.to_uppercase());
+        println!("{} no changes", resolved.display_id);
     }
     Ok(())
 }

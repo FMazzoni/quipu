@@ -15,7 +15,8 @@ pub struct CompleteArgs {
 
 pub fn run(db_path: &std::path::Path, a: CompleteArgs) -> Result<()> {
     let mut conn = db::open(db_path)?;
-    let task_id = id::resolve(&conn, &a.task)?;
+    let resolved = id::resolve_full(&conn, &a.task)?;
+    let task_id = resolved.id;
     db::with_tx(&mut conn, |tx| {
         let Some(open) = db::current_assignment(tx, task_id)? else {
             return Err(db::constraint(format!("{} not assigned", a.task)));
@@ -66,6 +67,6 @@ pub fn run(db_path: &std::path::Path, a: CompleteArgs) -> Result<()> {
         db::refresh_ready(tx)?;
         Ok(())
     })?;
-    println!("{} done", a.task.to_uppercase());
+    println!("{} done", resolved.display_id);
     Ok(())
 }

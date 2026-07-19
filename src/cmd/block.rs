@@ -22,7 +22,8 @@ pub struct BlockArgs {
 
 pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
     let mut conn = db::open(db_path)?;
-    let task_id = id::resolve(&conn, &a.task)?;
+    let resolved = id::resolve_full(&conn, &a.task)?;
+    let task_id = resolved.id;
 
     let blocker_display = db::with_tx(&mut conn, |tx| {
         // (1) Create the blocker task. State = ready (no deps of its own).
@@ -102,6 +103,6 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
         )?;
         Ok(blocker_display)
     })?;
-    println!("{} blocked by {}", a.task.to_uppercase(), blocker_display);
+    println!("{} blocked by {}", resolved.display_id, blocker_display);
     Ok(())
 }

@@ -19,8 +19,10 @@ pub struct DependsArgs {
 
 pub fn run(db_path: &std::path::Path, a: DependsArgs) -> Result<()> {
     let mut conn = db::open(db_path)?;
-    let task_id = id::resolve(&conn, &a.task)?;
-    let on_id = id::resolve(&conn, &a.on)?;
+    let task_resolved = id::resolve_full(&conn, &a.task)?;
+    let on_resolved = id::resolve_full(&conn, &a.on)?;
+    let task_id = task_resolved.id;
+    let on_id = on_resolved.id;
     db::with_tx(&mut conn, |tx| {
         // Ownership gate: if the downstream task (the one gaining the dep) is
         // assigned/running, --as must match the assignee. We guard the downstream
@@ -126,6 +128,9 @@ pub fn run(db_path: &std::path::Path, a: DependsArgs) -> Result<()> {
         Ok(())
     })?;
     let verb = if a.rm { "unlinked" } else { "linked" };
-    println!("{} {} {}", a.task.to_uppercase(), verb, a.on.to_uppercase());
+    println!(
+        "{} {} {}",
+        task_resolved.display_id, verb, on_resolved.display_id
+    );
     Ok(())
 }

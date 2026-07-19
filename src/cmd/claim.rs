@@ -11,7 +11,8 @@ pub struct ClaimArgs {
 
 pub fn run(db_path: &std::path::Path, a: ClaimArgs) -> Result<()> {
     let mut conn = db::open(db_path)?;
-    let task_id = id::resolve(&conn, &a.task)?;
+    let resolved = id::resolve_full(&conn, &a.task)?;
+    let task_id = resolved.id;
     db::with_tx(&mut conn, |tx| {
         // Latest open assignment must be (a) for this agent (b) un-claimed.
         let Some(open) = db::current_assignment(tx, task_id)? else {
@@ -48,6 +49,6 @@ pub fn run(db_path: &std::path::Path, a: ClaimArgs) -> Result<()> {
         )?;
         Ok(())
     })?;
-    println!("{} claimed by {}", a.task.to_uppercase(), a.agent);
+    println!("{} claimed by {}", resolved.display_id, a.agent);
     Ok(())
 }
