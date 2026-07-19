@@ -9,11 +9,31 @@ description, then what has happened to it); its JSON mode is deliberately a
 superset of that same record, so an agent and a human are looking at the same
 facts rather than two views that can disagree.
 
-The event tail is capped rather than complete. `show` answers "what is going on
-with this ticket", and the recent events are context for the current state, not
-an audit trail — the uncapped history is `qp timeline --task` and
-`qp report --ticket`. If you find yourself wanting the cap raised, the question
-being asked has probably become a forensic one and belongs to those commands.
+The header line carries the agent even though the labelled block six lines below
+repeats it, and both render the same value: the *latest* assignee from
+`store::latest_agent`, which is what `list` and `wave` show too. That name
+outlives the assignment — after an `abandon` nobody holds the task but the last
+assignee is still named — so it is not evidence of an open claim; ownership
+questions go to `db::current_assignment`. The redundancy is the point. The
+header used to omit the field, which left the unlabelled tier column sitting
+where `list` puts AGENT, and a reader cross-checking the two commands concluded
+`list` was wrong (QP-154). One field rendered one way in one command is worth a
+duplicated word.
+
+The event tail is capped in human mode only, and the cap is a readability limit
+rather than a statement about the data. `HUMAN_EVENT_TAIL` is an arbitrary
+number — it exists so a ticket with hundreds of events still fits on a screen,
+and nothing else depends on it. An earlier version of this document claimed the
+cap encoded a distinction between "context" and "audit trail"; it did not, and
+that rationale was invented after the fact (QP-152). What the cap does owe the
+reader is a signal: when it drops events the human view says how many and points
+at `qp timeline <id>`, because a silently shortened list is what made an
+arbitrary number look like a promise.
+
+`--json` is uncapped. Machine output is complete or it is misleading — a
+consumer handed ten events with no marker cannot tell a quiet ticket from a
+truncated one — so `show --json` and `report --ticket` return the same full
+history.
 
 Ordering is worth knowing because the two modes reverse each other. The query
 takes the newest events, then human mode prints them oldest-first so a reader
