@@ -35,6 +35,29 @@ unused = "warn"
 [lints.clippy]
 all = "warn"
 
+# There is deliberately NO [lints.rustdoc] table. Evaluated and rejected (QP-138).
+# The rustdoc gate stays as `cargo rustdoc -- -D warnings` in the justfile and CI.
+#
+# `[lints.rustdoc] all = "deny"` looks like it removes flag plumbing, but:
+#
+# 1. It does not remove the plumbing that matters. The `--html-after-content`
+#    injection in .cargo/config.toml has to stay either way — that is the fragile
+#    part. All this would drop is `-- -D warnings` from one recipe.
+# 2. `rustdoc::all` is broader than `-D warnings`. It pulls in three
+#    allow-by-default lints — unescaped-backticks, missing-crate-level-docs,
+#    private-doc-tests — that the current gate does not enforce. Measured:
+#    a single stray backtick in a `//!` header is exit 0 under the gate and a
+#    hard error under all = "deny", and it reports the span of an unrelated
+#    earlier line. private-doc-tests is a live hazard on a bin-only crate where
+#    cargo passes --document-private-items and every item is private.
+# 3. It denies for a plain developer `cargo doc` too (measured: exit 101).
+#    That breaks the convention stated above — warn locally, deny in the gate —
+#    for rustdoc alone, so iterating on docs means hard errors rather than
+#    warnings.
+#
+# If you want this anyway, name the individual lints rather than the `all` group,
+# and keep them at "warn" so the gate stays the single place that denies.
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
