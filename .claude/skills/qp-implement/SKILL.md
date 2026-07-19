@@ -110,6 +110,11 @@ about — and it is exactly what a bare `cargo test` gives up. Do not "simplify"
 this to `--tests`, which fans the targets out in parallel again and puts you
 back where you started.
 
+`just test` is this loop as a recipe, and `just lint` delegates its test step to
+it. The sanctioned gate therefore no longer ends in the bare `cargo test` this
+rule forbids (QP-167): running `just lint` is allowed, and is no longer
+something to work around by invoking the underlying gates by hand.
+
 The prohibition itself stands unchanged: nobody has measured whether the OOM
 risk is still real, and an unmeasured safety rule is not relaxed on the grounds
 that breaking it happened not to hurt.

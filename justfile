@@ -6,9 +6,31 @@ install:
 build:
     cargo build --release
 
-# run the full test suite
+# run the full test suite, one target at a time
+#
+# Deliberately NOT a bare `cargo test`. The qp-implement skill forbids agents
+# from running one — concurrent rustc graphs OOM the machine — so a sanctioned
+# `just` recipe ending in one puts the gate in conflict with the rule, and
+# agents resolve that by skipping the gate (QP-167). Looping the targets runs
+# exactly the same tests with one rustc live at a time.
+#
+# `ls tests` rather than a hardcoded list, so a new integration target is gated
+# the day it is added. `--bins`, not `--lib`: quipu has no src/lib.rs, so the
+# unit tests compile into the `qp` binary and `--lib` matches no target, prints
+# nothing, and silently drops all of them. Do not "simplify" this to `--tests`,
+# which fans the targets back out in parallel and gives up the whole point.
+#
+# The `[doc]` attribute rather than the leading comment: `just --list` shows only
+# the *last* comment line before a recipe, so a multi-paragraph rationale like
+# this one turns the listing into a fragment. `[doc]` decouples the two.
+[doc("run the full test suite, one target at a time")]
 test:
-    cargo test
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for t in $(ls tests | sed 's/\.rs$//'); do
+        cargo test --test "$t"
+    done
+    cargo test --bins
 
 # apply rustfmt
 fmt:
@@ -36,9 +58,15 @@ doc-check:
     cargo rustdoc -- -D warnings
 
 # the gate: formatting + clippy (denied) + rustdoc (denied) + tests
-lint: fmt-check doc-check
+#
+# `&& test` is a post-dependency: it runs after this recipe's body, so the cheap
+# static gates still fail first. The tests come from the `test` recipe rather
+# than an inline `cargo test` so there is exactly one definition of how this
+# repo runs its suite, and it is the per-target sequential one an agent is
+# allowed to run (QP-167).
+[doc("formatting + rustdoc + clippy gates, then the full suite")]
+lint: fmt-check doc-check && test
     cargo clippy --all-targets -- -D warnings
-    cargo test
 
 # browsable code docs, with the "copy fix command" button injected
 # The --html-after-content flag lives in .cargo/config.toml so that a bare
