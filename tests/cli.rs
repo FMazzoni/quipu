@@ -4788,3 +4788,103 @@ fn help_and_version_still_exit_zero() {
         .assert()
         .success();
 }
+
+// ---------------------------------------------------------------------------
+// QP-158: read-only commands must honour `--json` on the ERROR path too.
+//
+// `wants_json()` in main.rs used to collapse `list`/`tree`/`timeline`/`wave`/
+// `status`/`decisions`/`watch` into one `=> false` arm. All seven emit JSON on
+// success, so the bug was invisible until something failed — then a `--json`
+// consumer got prose on stderr and the "stderr is JSON Lines" contract broke
+// exactly when it mattered. One test per command so a regression names the
+// command that regressed rather than a single opaque table failure.
+// ---------------------------------------------------------------------------
+
+/// A store file that SQLite will reject outright.
+///
+/// It must be **longer than one page header** — a 1-byte junk file is treated
+/// as a brand-new empty database, silently migrated, and then the command
+/// succeeds or reports `not_found`, so the error path under test never runs.
+/// 200 bytes of non-magic content reliably yields SQLITE_NOTADB.
+fn corrupt_db(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+    let db = tmp.path().join("corrupt.sqlite");
+    std::fs::write(&db, vec![b'x'; 200]).unwrap();
+    db
+}
+
+/// Run `qp <args> --json` against a corrupt store and assert the failure is
+/// reported as the `{"error": {...}}` envelope on stderr, not as prose.
+fn assert_json_error_envelope(args: &[&str]) {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = corrupt_db(&tmp);
+    let assert = qp(&db).args(args).arg("--json").assert().failure();
+    let v = json_stderr(&assert);
+    assert!(
+        v["error"].is_object(),
+        "`qp {} --json` did not emit an error envelope on stderr; stderr was:\n{}",
+        args.join(" "),
+        String::from_utf8_lossy(&assert.get_output().stderr)
+    );
+    assert!(
+        !v["error"]["kind"].is_null(),
+        "error envelope missing `kind`: {v}"
+    );
+}
+
+#[test]
+fn list_json_reports_errors_as_envelope() {
+    assert_json_error_envelope(&["list"]);
+}
+
+#[test]
+fn tree_json_reports_errors_as_envelope() {
+    assert_json_error_envelope(&["tree"]);
+}
+
+#[test]
+fn timeline_json_reports_errors_as_envelope() {
+    assert_json_error_envelope(&["timeline"]);
+}
+
+#[test]
+fn wave_json_reports_errors_as_envelope() {
+    assert_json_error_envelope(&["wave"]);
+}
+
+#[test]
+fn status_json_reports_errors_as_envelope() {
+    assert_json_error_envelope(&["status"]);
+}
+
+#[test]
+fn decisions_json_reports_errors_as_envelope() {
+    assert_json_error_envelope(&["decisions"]);
+}
+
+#[test]
+fn watch_json_reports_errors_as_envelope() {
+    // `watch --json` defaults to true, but pass it explicitly: the point of the
+    // test is the flag-to-error-path wiring, not the default.
+    assert_json_error_envelope(&["watch", "--max-ticks", "1"]);
+}
+
+#[test]
+fn read_only_commands_still_print_prose_errors_without_json() {
+    // The other half of the contract: no `--json`, no envelope. If a future
+    // change makes the error path unconditionally JSON, this catches it.
+    let tmp = tempfile::tempdir().unwrap();
+    let db = corrupt_db(&tmp);
+    for cmd in ["list", "tree", "timeline", "wave", "status", "decisions"] {
+        let assert = qp(&db).arg(cmd).assert().failure();
+        let err = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+        let last = err
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("");
+        assert!(
+            !last.trim_start().starts_with('{'),
+            "`qp {cmd}` (no --json) emitted JSON on stderr: {err}"
+        );
+    }
+}
