@@ -15,6 +15,15 @@
 //! names (`install_<wbr>skills`), so a naive name regex over the HTML produces
 //! a false PASS on exactly the module most likely to drift.
 //!
+//! No file is exempt, including the crate root. `src/main.rs` used to be, on
+//! the grounds that its exit-code table was "reference material a reader wants
+//! inline, on the page they land on, not one hop away in
+//! `docs/architecture.md`". That premise was false: `include_str!` splices
+//! `architecture.md` into the crate page itself, so the inline copy and
+//! `architecture.md`'s own `## Exit codes` section rendered twenty lines apart
+//! on `qp/index.html` and drifted apart in content (QP-169). Reintroducing an
+//! exemption needs a rationale that survives looking at the rendered page.
+//!
 //! Asymmetry worth knowing: rule 3 is only checkable in one direction. Three
 //! modules (`status`, `tag`, `tree`) are correctly one-line with no `.md` and
 //! no pointer. Nothing in the source distinguishes
@@ -54,21 +63,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-
-/// `src/main.rs` is exempt from rules 2 and 3 (one-line summary, no inline
-/// detail) and from those two only.
-///
-/// The rationale behind rules 2 and 3 is the module list: rustdoc uses
-/// everything before the first blank `//!` as the one-line summary in the
-/// table of modules, so a multi-line first paragraph renders there as a wall
-/// of text. The crate root has no such row — its doc *is* the front page. The
-/// exit-code table is reference material a reader wants inline, on the page
-/// they land on, not one hop away in `docs/architecture.md`.
-///
-/// Rules 1, 4, 5 and 6 still apply to it: it must still open with a summary,
-/// must still keep the blank `//!` before its pointer, and its pointer target
-/// must still exist.
-const CRATE_ROOT_EXEMPT: &str = "src/main.rs";
 
 /// Max length of the summary line, excluding the `//! ` prefix.
 const MAX_SUMMARY: usize = 100;
@@ -290,8 +284,7 @@ fn module_headers_follow_convention() {
 
         // Rule 4 — a blank `//!` immediately precedes every pointer.
         //
-        // Checked for every file including the crate root: this is the rule
-        // that has actually regressed, and no file is exempt from it.
+        // This is the rule that has actually regressed, twice.
         for (i, line) in header.iter().enumerate() {
             if !is_pointer(line) {
                 continue;
@@ -322,11 +315,6 @@ fn module_headers_follow_convention() {
                     resolved.display()
                 ));
             }
-        }
-
-        if rel == CRATE_ROOT_EXEMPT {
-            // Exempt from rules 2 and 3 only — see CRATE_ROOT_EXEMPT.
-            continue;
         }
 
         // Rule 2 — the summary is ONE line: followed by a blank `//!`, or the
@@ -366,17 +354,5 @@ fn module_headers_follow_convention() {
         "module header convention violations ({}):\n\n{}\n",
         failures.len(),
         failures.join("\n\n")
-    );
-}
-
-/// Guards the guard: if the exempt path stops naming a real file, the
-/// exemption has silently widened or gone stale.
-#[test]
-fn crate_root_exemption_names_a_real_file() {
-    let path = repo_root().join(CRATE_ROOT_EXEMPT);
-    assert!(
-        path.exists(),
-        "CRATE_ROOT_EXEMPT points at {CRATE_ROOT_EXEMPT}, which does not exist. \
-         Update or delete the exemption in tests/docs.rs."
     );
 }
