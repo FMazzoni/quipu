@@ -23,8 +23,10 @@ pub struct EventRow {
     pub payload: serde_json::Value, // parsed; malformed/absent payload -> Null
 }
 
-/// Filter for [`events`]. All fields are conjunctive (`AND`); `None`/empty
-/// means "no constraint on this dimension".
+/// Filter for [`events`].
+///
+/// All fields are conjunctive (`AND`); `None`/empty means "no constraint on
+/// this dimension".
 ///
 /// This is the smallest shape covering all three event-tail callers —
 /// `timeline.rs`, `watch.rs`, and `decisions.rs` — which previously hand-rolled
@@ -50,8 +52,9 @@ pub struct EventFilter<'a> {
     pub auto_only: bool,
 }
 
-/// The event tail: `event LEFT JOIN task`, filtered by `f`, ordered
-/// `e.id ASC`. Bound parameters throughout — no string-interpolated values.
+/// The event tail: `event LEFT JOIN task`, filtered by `f`, ordered `e.id ASC`.
+///
+/// Bound parameters throughout — no string-interpolated values.
 pub fn events(conn: &rusqlite::Connection, f: &EventFilter) -> anyhow::Result<Vec<EventRow>> {
     let mut sql = String::from(
         "SELECT e.id, t.display_id, e.ts, e.kind, e.agent_id, e.payload
@@ -148,9 +151,11 @@ pub struct TaskRow {
     pub agent: Option<String>,
 }
 
-/// Filter for `tasks`. Every field is optional/empty-by-default so call
-/// sites only populate what they actually filter on (`tree.rs` uses only
-/// `tier`; `list.rs` uses all four).
+/// Filter for `tasks`.
+///
+/// Every field is optional/empty-by-default so call sites only populate what
+/// they actually filter on (`tree.rs` uses only `tier`; `list.rs` uses all
+/// four).
 ///
 /// The two free-text predicates — `assigned_to_glob` and `tag_globs` — both
 /// match with SQLite `GLOB`, deliberately and identically. A pattern with no
@@ -171,12 +176,13 @@ pub struct TaskFilter<'a> {
     pub tier: Option<&'a str>,
 }
 
-/// The "latest agent for a task" correlated subquery: the most recent
-/// assignment row by id, regardless of whether it's still open. This is
-/// distinct from `db::current_assignment`, which filters to open
+/// The "latest agent for a task" correlated subquery.
+///
+/// The most recent assignment row by id, regardless of whether it's still
+/// open. This is distinct from `db::current_assignment`, which filters to open
 /// (`completed_at IS NULL`) assignments only — the two answer different
-/// questions ("who was last assigned" vs "who currently holds it") and are
-/// not interchangeable. Embedded byte-identically across `list.rs` (x2) and
+/// questions ("who was last assigned" vs "who currently holds it") and are not
+/// interchangeable. Embedded byte-identically across `list.rs` (x2) and
 /// `wave.rs` (x4) prior to this extraction.
 pub const LATEST_AGENT_SUBQUERY: &str =
     "(SELECT a.agent_id FROM assignment a WHERE a.task_id = t.id ORDER BY a.id DESC LIMIT 1)";
@@ -231,10 +237,11 @@ pub fn tasks(conn: &Connection, f: &TaskFilter) -> Result<Vec<TaskRow>> {
     Ok(rows)
 }
 
-/// The latest agent assigned to a single task, regardless of whether that
-/// assignment is still open. Standalone-query counterpart to
-/// `LATEST_AGENT_SUBQUERY` for call sites that already have one task in
-/// hand (e.g. `show.rs`) rather than embedding it in a larger SELECT.
+/// The latest agent assigned to a single task, open or not.
+///
+/// Standalone-query counterpart to `LATEST_AGENT_SUBQUERY` for call sites that
+/// already have one task in hand (e.g. `show.rs`) rather than embedding it in
+/// a larger SELECT.
 pub fn latest_agent(conn: &Connection, task_id: i64) -> Result<Option<String>> {
     conn.query_row(
         "SELECT agent_id FROM assignment WHERE task_id = ?1 ORDER BY id DESC LIMIT 1",
@@ -277,10 +284,12 @@ pub fn tags_by_task(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, Vec<S
     Ok(out)
 }
 
-/// Unresolved (not done/cancelled) dependency display-ids for each of `ids`,
-/// bulk-fetched. This is the read-side form of the unresolved-dep predicate
-/// that also appears (as a guarded-transition UPDATE/EXISTS check, out of
-/// scope here) in `db::refresh_ready` and `depends.rs`.
+/// Unresolved dependency display-ids for each of `ids`, bulk-fetched.
+///
+/// Unresolved means not `done` and not `cancelled`. This is the read-side form
+/// of the unresolved-dep predicate that also appears (as a guarded-transition
+/// UPDATE/EXISTS check, out of scope here) in `db::refresh_ready` and
+/// `depends.rs`.
 pub fn unresolved_blockers_by_task(
     conn: &Connection,
     ids: &[i64],

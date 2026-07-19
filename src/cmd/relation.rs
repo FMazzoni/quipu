@@ -38,8 +38,9 @@ pub enum RelOp {
 }
 
 impl RelationArgs {
-    /// Whether `--json` was passed on whichever subcommand was chosen, so
-    /// `main`'s error path can match the stream format the success path uses.
+    /// Whether `--json` was passed on whichever subcommand was chosen.
+    ///
+    /// Lets `main`'s error path match the stream format the success path uses.
     pub fn json(&self) -> bool {
         match &self.op {
             RelOp::Add { json, .. } | RelOp::Rm { json, .. } | RelOp::List { json, .. } => *json,

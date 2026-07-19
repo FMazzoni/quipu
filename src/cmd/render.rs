@@ -4,8 +4,9 @@
 
 use serde_json::Value;
 
-/// Render a short, human-readable summary of an event's payload for a given
-/// event `kind`. Shared by `timeline` and `show`.
+/// Render an event payload as a short human-readable line, keyed on `kind`.
+///
+/// Shared by `timeline` and `show`.
 pub fn summarize_payload(kind: &str, p: &Value) -> String {
     match kind {
         "state_change" => format!("→ {}", p.get("to").and_then(|v| v.as_str()).unwrap_or("")),

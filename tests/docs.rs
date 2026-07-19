@@ -1,4 +1,5 @@
-//! Mechanically enforces the `//!` module-header conventions across `src/**/*.rs`.
+//! Mechanically enforces the `//!` module-header and `///` item-doc conventions
+//! across `src/**/*.rs`.
 //!
 //! Why a test and not a lint or a shell script: it runs under `cargo test`, so
 //! CI picks it up with no new wiring, no new deps, and nothing external.
@@ -20,6 +21,36 @@
 //! "correctly single-line" from "detail was lost on the way here", so this
 //! test catches prose that should have moved out and never catches prose that
 //! should have existed.
+//!
+//! Rule 7 extends the same budget to `///` item docs, for the same reason: the
+//! item table on a module page prints the entire first paragraph untruncated,
+//! so a multi-line first paragraph on `pub fn open` is the identical wall of
+//! text rules 2 and 4 exist to prevent, one page down. Rules 1–6 read only the
+//! contiguous header block at the top of a file; rule 7 is the only one that
+//! scans the whole body.
+//!
+//! Rule 7 governs `pub` *items* — `fn`, `struct`, `enum`, `trait`, `const` and
+//! the rest of `DOC_ITEM_KEYWORDS` — and not `pub` struct fields, which parse
+//! the same way and are excluded deliberately. A field renders on its struct's
+//! page as a definition list entry carrying its doc in full; it never appears
+//! in a summary table, so there is nothing for the budget to protect. Three
+//! fields exceed 100 chars today (`cmd/decisions.rs`, `cmd/report.rs`,
+//! `cmd/wait.rs`) and read correctly where they render.
+//!
+//! Known gap: rule 7 checks `pub` items only, and quipu is a binary crate, so
+//! rustdoc documents private items too — they get rows in the same table. Nine
+//! private items exceed the budget today, `db::migrate` (370 chars) worst.
+//! Dropping the `pub` requirement is the fix and is a one-line change to
+//! `is_documented_pub_item`; it was left out of QP-160 because the offenders
+//! sit in files that slice did not own.
+//!
+//! A rule requiring *every* `pub` item to carry a doc was considered and
+//! rejected. It fires on 29 items, ~20 of which are the uniform command
+//! entrypoint `pub fn run(db_path, args)` — one per `src/cmd/*.rs`. Satisfying
+//! it means twenty lines of "Run the add command.", which is the restating-the-
+//! signature anti-pattern the module-header guidance already bans, minted at
+//! scale and mechanically enforced. Rule 7 caps prose that exists; it does not
+//! demand prose that does not.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -87,6 +118,122 @@ fn pointer_target(line: &str) -> Option<&str> {
     let (_, rest) = line.split_once("include_str!(\"")?;
     let (target, _) = rest.split_once('"')?;
     Some(target)
+}
+
+/// Item keywords rule 7 applies to.
+///
+/// A `pub` line whose next token is not one of these is a struct field
+/// (`pub since_id: Option<i64>,`). Fields render on the struct page as a
+/// definition list with the doc in full — there is no summary table to blow
+/// out, so the budget that motivates rule 7 does not apply to them.
+const DOC_ITEM_KEYWORDS: &[&str] = &[
+    "fn", "struct", "enum", "trait", "const", "static", "type", "mod", "union", "macro", "use",
+];
+
+/// Whether a source line declares a `pub` item rule 7 governs.
+fn is_documented_pub_item(line: &str) -> bool {
+    let t = line.trim_start();
+    let rest = if let Some(r) = t.strip_prefix("pub(") {
+        match r.split_once(')') {
+            Some((_, after)) => after,
+            None => return false,
+        }
+    } else {
+        match t.strip_prefix("pub") {
+            Some(r) => r,
+            None => return false,
+        }
+    };
+    let Some(word) = rest.split_whitespace().next() else {
+        return false;
+    };
+    DOC_ITEM_KEYWORDS.contains(&word)
+}
+
+/// The first paragraph of a `///` block, joined into the single line rustdoc
+/// renders it as.
+///
+/// Everything up to the first blank `///`; that is the span rustdoc lifts into
+/// the item table, so it is the span rule 7 measures.
+fn first_doc_paragraph(block: &[&str]) -> String {
+    block
+        .iter()
+        .map(|l| l.trim_start().trim_start_matches("///").trim())
+        .take_while(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Rule 7 — the first paragraph of a `///` block on a `pub` item fits the
+/// module-table budget.
+///
+/// Separate from the header test because it is the only rule that scans past
+/// the header block: `///` docs are anywhere in the file.
+#[test]
+fn item_docs_follow_convention() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    rust_sources(&root.join("src"), &mut files);
+    assert!(!files.is_empty(), "found no .rs files under src/");
+
+    let mut failures: Vec<String> = Vec::new();
+
+    for path in &files {
+        let rel = path
+            .strip_prefix(&root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let src = fs::read_to_string(path).expect("read source file");
+        let lines: Vec<&str> = src.lines().collect();
+
+        let mut i = 0;
+        while i < lines.len() {
+            if !lines[i].trim_start().starts_with("///") {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < lines.len() && lines[i].trim_start().starts_with("///") {
+                i += 1;
+            }
+            let block = &lines[start..i];
+
+            // Attributes sit between the doc block and the item it documents.
+            let mut j = i;
+            while j < lines.len() && lines[j].trim_start().starts_with('#') {
+                j += 1;
+            }
+            let Some(item) = lines.get(j) else { continue };
+            if !is_documented_pub_item(item) {
+                continue;
+            }
+            let item = item.trim_start();
+
+            let para = first_doc_paragraph(block);
+            if para.len() > MAX_SUMMARY {
+                failures.push(format!(
+                    "{rel}:{}: the first paragraph of the `///` block on `{}` is {} \
+                     chars, over the {MAX_SUMMARY}-char budget. The item table on the \
+                     module page prints the whole first paragraph untruncated, so this \
+                     renders there as a wall of text — the same failure rules 2 and 4 \
+                     prevent for module headers. Split it: a one-line summary naming \
+                     the subject, a blank `///`, then the existing detail. Keep the \
+                     detail. Paragraph was: {para:?}",
+                    start + 1,
+                    item.trim_end_matches('{').trim(),
+                    para.len(),
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "item doc convention violations ({}):\n\n{}\n",
+        failures.len(),
+        failures.join("\n\n")
+    );
 }
 
 /// One assertion per rule, collected so a single run reports every violation
