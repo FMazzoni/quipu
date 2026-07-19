@@ -2793,6 +2793,104 @@ fn show_json_includes_recent_events() {
     assert!(v["recent_events"].as_array().unwrap().len() >= 2); // ready + assigned
 }
 
+/// QP-154: after `abandon` the task has no holder but keeps naming its last
+/// assignee. `list`, the `show` header, and the `show` body must all report
+/// that one fact identically — the header used to omit it, so a reader
+/// cross-checking the two commands concluded `list` was wrong.
+#[test]
+fn show_header_and_body_agree_on_agent_after_abandon() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "t"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "alice"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["abandon", "QP-1", "--as", "alice"])
+        .assert()
+        .success();
+
+    let out = qp(&db).args(["show", "QP-1"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let header = s.lines().next().unwrap();
+    assert!(
+        header.contains("alice"),
+        "header must name the latest assignee:\n{s}"
+    );
+    assert!(
+        s.contains("  agent: alice"),
+        "body must name the latest assignee:\n{s}"
+    );
+
+    // ...and `list` must say the same thing.
+    let out = qp(&db).args(["list"]).assert().success();
+    let l = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(l.contains("alice"), "list disagrees with show:\n{l}");
+}
+
+/// QP-152: `--json` is complete (matching `report --ticket`); human mode caps
+/// for readability but must announce what it dropped.
+#[test]
+fn show_json_event_tail_is_uncapped_and_human_signals_truncation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "t"]).assert().success();
+    // 1 state_change + 20 notes = 21 events, comfortably over the human cap.
+    for i in 0..20 {
+        qp(&db)
+            .args(["log", "QP-1", "note", &format!("note {i}")])
+            .assert()
+            .success();
+    }
+
+    let out = qp(&db).args(["show", "QP-1", "--json"]).assert().success();
+    let v: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    let json_events = v["recent_events"].as_array().unwrap().len();
+    assert_eq!(json_events, 21, "--json must not truncate: {json_events}");
+
+    // The same completeness contract `report --ticket` already honours.
+    let out = qp(&db)
+        .args(["report", "--json", "--ticket", "QP-1"])
+        .assert()
+        .success();
+    let r: serde_json::Value = serde_json::from_str(
+        std::str::from_utf8(&out.get_output().stdout)
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    assert_eq!(
+        r["events"].as_array().unwrap().len(),
+        json_events,
+        "show --json and report --ticket disagree on event count"
+    );
+
+    let out = qp(&db).args(["show", "QP-1"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let shown = s.lines().filter(|l| l.contains("note ")).count();
+    assert_eq!(shown, 10, "human mode should cap the tail:\n{s}");
+    assert!(
+        s.contains("Recent events (10 of 21):"),
+        "human header must state the total:\n{s}"
+    );
+    assert!(
+        s.contains("… 11 older (qp timeline QP-1)"),
+        "human mode must signal the truncation and where to get the rest:\n{s}"
+    );
+}
+
 #[test]
 fn show_zero_padded_ref_renders_canonical_display_id() {
     let tmp = tempfile::tempdir().unwrap();

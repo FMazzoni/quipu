@@ -7,6 +7,16 @@ use anyhow::Result;
 use clap::Args;
 use serde_json::Value;
 
+/// How many events the human view prints before it starts saying "… N older".
+///
+/// A readability limit, not a data contract: nothing downstream may assume a
+/// ticket has at most this many events, and `--json` ignores it entirely. The
+/// number is arbitrary — it exists so a ticket with hundreds of events still
+/// fits on a screen. Raise or lower it freely; the only rule is that human mode
+/// must keep announcing what it dropped, because a silently truncated list is
+/// what made the old cap look like a promise about the data.
+const HUMAN_EVENT_TAIL: usize = 10;
+
 #[derive(Args, Debug)]
 pub struct ShowArgs {
     /// Task display id (e.g. QP-26)
@@ -47,10 +57,13 @@ pub fn run(db_path: &std::path::Path, a: ShowArgs) -> Result<()> {
         .remove(&tid)
         .unwrap_or_default();
 
-    // Recent events: last 10, newest first.
+    // Every event, newest first. The query is deliberately unbounded: `--json`
+    // emits all of them (see `report --ticket` for the same contract), and the
+    // human tail is trimmed below where the total is still known, so the
+    // rendering can say how many it dropped.
     let mut s = conn.prepare(
         "SELECT ts, kind, agent_id, payload FROM event
-          WHERE task_id = ?1 ORDER BY id DESC LIMIT 10",
+          WHERE task_id = ?1 ORDER BY id DESC",
     )?;
     let mut events: Vec<(String, String, Option<String>, Value)> = s
         .query_map([tid], |r| {
@@ -121,7 +134,18 @@ pub fn run(db_path: &std::path::Path, a: ShowArgs) -> Result<()> {
     } else {
         tags.join(", ")
     };
-    println!("{}  {}  {}  {}", display_id, state, tier_str, tag_summary);
+    // Agent sits in the header at the same position `list` puts it, and holds
+    // the same value the labelled `agent:` line below holds — one field, one
+    // rendering. Omitting it here made the unlabelled tier column read as an
+    // empty AGENT column to anyone coming from `list` (QP-154).
+    println!(
+        "{}  {}  {}  {}  {}",
+        display_id,
+        state,
+        agent.as_deref().unwrap_or("-"),
+        tier_str,
+        tag_summary
+    );
     println!("{}", title);
     println!();
     println!("  agent: {}", agent.as_deref().unwrap_or("—"));
@@ -143,9 +167,24 @@ pub fn run(db_path: &std::path::Path, a: ShowArgs) -> Result<()> {
     }
 
     println!();
-    println!("Recent events ({}):", events.len());
+    let total = events.len();
+    if total > HUMAN_EVENT_TAIL {
+        events.truncate(HUMAN_EVENT_TAIL);
+        println!("Recent events ({} of {}):", HUMAN_EVENT_TAIL, total);
+    } else {
+        println!("Recent events ({}):", total);
+    }
     // Render oldest -> newest for readability.
     events.reverse();
+    if total > HUMAN_EVENT_TAIL {
+        // Named where the dropped events would have been printed: older than
+        // everything below it.
+        println!(
+            "  … {} older ({})",
+            total - HUMAN_EVENT_TAIL,
+            format_args!("qp timeline {}", display_id)
+        );
+    }
     for (ts, kind, _agent, payload) in &events {
         // Short HH:MM:SS slice if RFC3339; otherwise full ts.
         let short_ts = ts.get(11..19).unwrap_or(ts.as_str());
