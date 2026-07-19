@@ -14,13 +14,17 @@ pub struct DecisionsArgs {
     pub json: bool,
     #[arg(long)]
     pub auto_only: bool,
+    /// Exclusive lower bound on event id: `--since 730` starts at 731.
+    /// Same semantics as `timeline --since`, because it is the same clause.
+    #[arg(long)]
+    pub since: Option<i64>,
 }
 
 pub fn run(db_path: &std::path::Path, a: DecisionsArgs) -> Result<()> {
     let conn = db::open(db_path)?;
     let kinds = ["decision".to_string()];
     let filter = EventFilter {
-        since_id: None,
+        since_id: a.since,
         task_id: None,
         kinds: &kinds,
         auto_only: a.auto_only,

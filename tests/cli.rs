@@ -4144,3 +4144,145 @@ fn human_mode_keeps_prose_warning_on_mismatch() {
         "human mode must not emit JSON, got: {err:?}"
     );
 }
+
+/// QP-144: `decisions --since` and `timeline --kind decision --since` must
+/// return byte-identical event sets. `decisions` is documented as a filter
+/// alias over `timeline`, and both route through one `EventFilter`; this test
+/// is what catches a future divergence if someone grows a parallel query.
+#[test]
+fn decisions_since_matches_timeline_kind_decision_since() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    for i in 0..6 {
+        qp(&db)
+            .args(["log", "QP-1", "decision", &format!("d{i}"), "--auto"])
+            .assert()
+            .success();
+        // Interleave non-decision events so the two commands must agree on
+        // kind filtering as well as on the id bound.
+        qp(&db)
+            .args(["log", "QP-1", "note", &format!("n{i}")])
+            .assert()
+            .success();
+    }
+
+    let all = json_stdout(&qp(&db).args(["decisions", "--json"]).assert().success());
+    let ids: Vec<i64> = all
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 6, "expected 6 decisions, got {ids:?}");
+
+    // Probe every boundary, including before-first and past-last.
+    let mut probes = vec![0, ids[0] - 1, ids[ids.len() - 1] + 1];
+    probes.extend(ids.iter().copied());
+    for since in probes {
+        let s = since.to_string();
+        let d = json_stdout(
+            &qp(&db)
+                .args(["decisions", "--since", &s, "--json"])
+                .assert()
+                .success(),
+        );
+        let t = json_stdout(
+            &qp(&db)
+                .args(["timeline", "--kind", "decision", "--since", &s, "--json"])
+                .assert()
+                .success(),
+        );
+        assert_eq!(d, t, "alias contract broken at --since {since}");
+    }
+}
+
+/// QP-144: `--since` is an EXCLUSIVE lower bound, matching `timeline`.
+/// `--since N` where N is an event id must not return event N itself.
+#[test]
+fn decisions_since_is_exclusive() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    for i in 0..3 {
+        qp(&db)
+            .args(["log", "QP-1", "decision", &format!("d{i}")])
+            .assert()
+            .success();
+    }
+
+    let all = json_stdout(&qp(&db).args(["decisions", "--json"]).assert().success());
+    let rows = all.as_array().unwrap();
+    let first = rows[0]["id"].as_i64().unwrap();
+
+    let after = json_stdout(
+        &qp(&db)
+            .args(["decisions", "--since", &first.to_string(), "--json"])
+            .assert()
+            .success(),
+    );
+    let after_rows = after.as_array().unwrap();
+    assert_eq!(
+        after_rows.len(),
+        rows.len() - 1,
+        "--since <first id> must drop exactly the first event"
+    );
+    assert!(
+        after_rows.iter().all(|e| e["id"].as_i64().unwrap() > first),
+        "every returned id must be strictly greater than --since"
+    );
+    assert_eq!(after_rows[0]["payload"]["text"], "d1");
+}
+
+/// QP-144: `--since` composes with `--auto-only` — both clauses AND together
+/// rather than one silently replacing the other.
+#[test]
+fn decisions_since_composes_with_auto_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    // auto/human pairs, so neither filter alone yields the answer.
+    for i in 0..3 {
+        qp(&db)
+            .args(["log", "QP-1", "decision", &format!("auto{i}"), "--auto"])
+            .assert()
+            .success();
+        qp(&db)
+            .args(["log", "QP-1", "decision", &format!("human{i}")])
+            .assert()
+            .success();
+    }
+
+    let all = json_stdout(&qp(&db).args(["decisions", "--json"]).assert().success());
+    let rows = all.as_array().unwrap();
+    assert_eq!(rows.len(), 6);
+    // Cut after the first auto/human pair.
+    let cut = rows[1]["id"].as_i64().unwrap();
+
+    let got = json_stdout(
+        &qp(&db)
+            .args([
+                "decisions",
+                "--auto-only",
+                "--since",
+                &cut.to_string(),
+                "--json",
+            ])
+            .assert()
+            .success(),
+    );
+    let texts: Vec<&str> = got
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["payload"]["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        texts,
+        vec!["auto1", "auto2"],
+        "--since must AND with --auto-only, not replace it"
+    );
+}
