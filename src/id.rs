@@ -56,10 +56,11 @@ pub fn resolve(conn: &rusqlite::Connection, s: &str) -> Result<i64> {
     Ok(resolve_full(conn, s)?.id)
 }
 
-/// Resolve a user-supplied task reference to both its rowid and canonical
-/// `display_id`. Matches numerically on the parsed rowid, so `QP-1`, `qp-001`,
-/// and (for one more release) `T1` all resolve to the same row regardless of
-/// case, zero-padding, or the store's actual prefix.
+/// Resolve a task reference to both its rowid and its canonical `display_id`.
+///
+/// Matches numerically on the parsed rowid, so `QP-1`, `qp-001`, and (for one
+/// more release) `T1` all resolve to the same row regardless of case,
+/// zero-padding, or the store's actual prefix.
 pub fn resolve_full(conn: &rusqlite::Connection, s: &str) -> Result<Resolved> {
     let n = parse(s)?;
     conn.query_row("SELECT id, display_id FROM task WHERE id = ?", [n], |r| {

@@ -9,11 +9,14 @@ use thiserror::Error;
 
 const SCHEMA: &str = include_str!("schema.sql");
 
-/// Typed state of a task in the workflow. Use this anywhere the database
-/// schema's `state` column is read or written. Also the CLI-facing `--state`
-/// vocabulary (`clap::ValueEnum`) — one definition for both surfaces, so they
-/// can't drift. clap's default `ValueEnum` rendering is kebab-case, which for
-/// these single-word variants is identical to `as_str()`'s lowercase spelling;
+/// Typed state of a task in the workflow.
+///
+/// Use this anywhere the database schema's `state` column is read or written.
+/// It is also the CLI-facing `--state` vocabulary (`clap::ValueEnum`) — one
+/// definition for both surfaces, so they can't drift.
+///
+/// clap's default `ValueEnum` rendering is kebab-case, which for these
+/// single-word variants is identical to `as_str()`'s lowercase spelling;
 /// `state_enum_values_match_as_str` in the test module below pins that down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, clap::ValueEnum)]
 pub enum State {
@@ -70,8 +73,10 @@ impl rusqlite::ToSql for State {
 pub const STATE_PENDING: &str = State::Pending.as_str();
 pub const STATE_READY: &str = State::Ready.as_str();
 
-/// Typed errors. `main` matches on the variant to pick an exit code and (in
-/// `--json` mode) a `kind` string for the `{"error": {...}}` envelope.
+/// The agent-facing error taxonomy.
+///
+/// `main` matches on the variant to pick an exit code and (in `--json` mode) a
+/// `kind` string for the `{"error": {...}}` envelope.
 ///
 /// Five buckets, deliberately — not one variant per failure site. The
 /// *variant* is what a calling agent branches retry-vs-give-up on; the *code*
@@ -204,8 +209,10 @@ pub fn invalid_input(msg: impl Into<String>) -> anyhow::Error {
     anyhow::Error::from(QuipuError::InvalidInput(msg.into()))
 }
 
-/// Locates the store: explicit `--db`/`QP_DB` wins, else the nearest
-/// `.quipu/db.sqlite` walking up from the cwd, else the git-aware fallback.
+/// Locates the store.
+///
+/// Explicit `--db`/`QP_DB` wins, else the nearest `.quipu/db.sqlite` walking
+/// up from the cwd, else the git-aware fallback.
 ///
 /// The fallback is what makes a bare `qp` work from inside a git worktree. A
 /// worktree's checkout is a *sibling* of the main repo, not a descendant, so
@@ -256,8 +263,10 @@ pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
     Ok(cwd.join(".quipu").join("db.sqlite"))
 }
 
-/// Warn when an explicit `--db`/`QP_DB` points at a different store than the one
-/// the cwd would have resolved to. Guards against filing into the wrong project.
+/// Guard against filing into the wrong project.
+///
+/// Warns when an explicit `--db`/`QP_DB` points at a different store than the
+/// one the cwd would have resolved to.
 ///
 /// Only fires when the path was given explicitly — that is, in automation. Which
 /// is exactly why `json` matters: under `--json`, stderr is JSON Lines (zero or
@@ -322,10 +331,11 @@ fn read_project_uuid(path: &Path) -> Result<Option<String>> {
     Ok(v)
 }
 
-/// The schema version this binary was compiled against. Bump whenever
-/// `schema.sql` changes in a way that requires a migration. The value is
-/// stamped into `meta(key='schema_version')` on first init; subsequent
-/// `open()` calls compare it to decide whether to (re)apply DDL.
+/// The schema version this binary was compiled against.
+///
+/// Bump it whenever `schema.sql` changes in a way that requires a migration.
+/// The value is stamped into `meta(key='schema_version')` on first init;
+/// subsequent `open()` calls compare it to decide whether to (re)apply DDL.
 ///
 /// Bumping this is the ONLY thing that gets new DDL onto an existing store.
 /// `migrate` skips the entire `execute_batch(SCHEMA)` when the stamped version
@@ -417,23 +427,25 @@ fn migrate(conn: &Connection, prefix: Option<&str>) -> Result<Option<String>> {
     Ok(current)
 }
 
-/// The hot path: open + migrate. No prefix handling, no default-tag
-/// seeding — those are init-time-only concerns (see `init`). Every command
-/// but `init` calls this, and it must remain migration-capable so a stale
-/// on-disk schema self-heals on the first read command after a binary
-/// upgrade, rather than surfacing as a confusing `no such table` /
-/// `no such column` error.
+/// The hot path: open + migrate.
+///
+/// No prefix handling, no default-tag seeding — those are init-time-only
+/// concerns (see `init`). Every command but `init` calls this, and it must
+/// remain migration-capable so a stale on-disk schema self-heals on the first
+/// read command after a binary upgrade, rather than surfacing as a confusing
+/// `no such table` / `no such column` error.
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = open_conn(path)?;
     migrate(&conn, None)?;
     Ok(conn)
 }
 
+/// Open a store, applying the one-time bookkeeping only `qp init` needs.
+///
 /// Init-time concerns only: prefix validation (via `migrate`'s first-stamp
-/// path), the prefix-mismatch warning, and `--default-tag` seeding. Shares
-/// the actual DDL/version-check logic with `open` via `migrate` — this is
-/// not a separate migration path, just the extra one-time bookkeeping that
-/// only `qp init` needs to do.
+/// path), the prefix-mismatch warning, and `--default-tag` seeding. Shares the
+/// actual DDL/version-check logic with `open` via `migrate` — this is not a
+/// separate migration path.
 pub fn init(path: &Path, prefix: Option<&str>, default_tags: &[String]) -> Result<Connection> {
     let conn = open_conn(path)?;
     let current = migrate(&conn, prefix)?;
@@ -481,8 +493,9 @@ pub fn insert_default_tags(conn: &Connection, tags: &[String]) -> Result<usize> 
     Ok(total)
 }
 
-/// Read the display-id prefix from the `meta` table. Defaults to `"QP"` if absent
-/// (older databases predating the prefix work).
+/// Read the display-id prefix from the `meta` table.
+///
+/// Defaults to `"QP"` if absent (older databases predating the prefix work).
 pub fn display_prefix(conn: &rusqlite::Connection) -> Result<String> {
     let v: Option<String> = conn
         .query_row(
@@ -509,8 +522,9 @@ pub fn validate_prefix(s: &str) -> Result<()> {
     Ok(())
 }
 
-/// Runs `f` inside a `BEGIN IMMEDIATE` transaction — the primitive every
-/// guarded state transition is built on.
+/// Runs `f` inside a `BEGIN IMMEDIATE` transaction.
+///
+/// The primitive every guarded state transition is built on.
 ///
 /// `IMMEDIATE` is the whole point, and it is why two agents racing the same
 /// ticket produce exactly one winner and one clean conflict. It takes the
@@ -573,8 +587,9 @@ pub fn insert_event(
     Ok(tx.last_insert_rowid())
 }
 
-/// Re-derives readiness store-wide: every `pending` task whose dependencies
-/// are all resolved becomes `ready`.
+/// Re-derives readiness store-wide.
+///
+/// Every `pending` task whose dependencies are all resolved becomes `ready`.
 ///
 /// The only edge into `ready`. No command promotes a task directly; they
 /// change whatever they change and call this, which is why `abandon` and
@@ -615,9 +630,10 @@ pub struct OpenAssignment {
     pub claimed_at: Option<String>,
 }
 
-/// The decided semantic for "who currently owns this task": latest-OPEN-row.
-/// `ORDER BY id DESC LIMIT 1` is a defensive tiebreak — Slice A's guard against
-/// more than one open assignment per task makes latest-open and latest-by-id
+/// Who currently owns this task, defined as the latest open assignment row.
+///
+/// `ORDER BY id DESC LIMIT 1` is a defensive tiebreak — the guard against more
+/// than one open assignment per task makes latest-open and latest-by-id
 /// provably equivalent, so it should never actually need to fire.
 pub fn current_assignment(tx: &Transaction, task_id: i64) -> Result<Option<OpenAssignment>> {
     tx.query_row(
