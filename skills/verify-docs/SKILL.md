@@ -27,8 +27,7 @@ verified" after one.
 /qp-verify-docs --sweep                               # every documented file
 ```
 
-The argument is deliberately minimal — the caller may have typed extra context
-after pasting it. Read anything they added; it is usually the specific
+Read anything the caller typed after the argument; it is usually the specific
 complaint and the most valuable input you have.
 
 ### Resolving `#<anchor>`
@@ -64,14 +63,13 @@ in from `src/main.rs`.
 Two things that break silently here:
 
 - **The blank `//!` line before the pointer is load-bearing.** Without it the
-  summary and the first line of the markdown concatenate into one paragraph,
-  and the module-list summary becomes a run-on.
-- **A pointer file is a build dependency.** Renaming or deleting it breaks the
-  build — which is the point, but means you cannot simply drop a stale doc.
+  summary and the first line of the markdown concatenate, and the module-list
+  summary becomes a run-on.
+- **A pointer file is a build dependency.** `include_str!` resolves at compile
+  time, so renaming or deleting it breaks the build.
 
-Never move prose out to markdown just to shorten a `.rs`. The threshold is
-whether there is real prose: for a one-line header the pointer costs more than
-the content it replaces, and adds a file hop for no gain.
+Never move prose out to markdown just to shorten a `.rs` — for a one-line
+header the pointer costs more than the content it replaces.
 
 ## What to check
 
@@ -93,11 +91,18 @@ fastest, because refactors move code without changing behaviour.
 against `$QUIPU_VAULT/decisions/` and qp decision events (`qp decisions`), not
 against the source. Leave it alone if it merely sounds outdated.
 
+**When `$QUIPU_VAULT` is unset or the path does not exist** — the vault is
+external and per-machine, so this is the common case, not an error. Check
+rationale against `qp decisions` alone, then mark every rationale claim you
+could not reach `unverifiable` and name the vault as the reason. Do not edit
+or delete a rationale claim you could not check: an unreachable source is not
+evidence the claim is wrong. Behavioural and structural claims are unaffected
+— keep verifying them.
+
 ## Rules for anything you write
 
 - **Never reference line numbers.** They rot within a week. Files and function
-  names only. This rule has been broken repeatedly — including in the tickets
-  that created this skill — so check your own output for it.
+  names only. This rule is broken often — check your own output for it.
 - Fenced code blocks in doc comments are parsed as Rust and doctested. Tag them
   ` ```text ` or ` ```rust,ignore ` or they will produce build warnings.
 - Angle-bracket placeholders (`<duration>`) in doc comments are swallowed as
@@ -137,12 +142,25 @@ information. If deleting a sentence would lose nothing a reader could not get
 from the signature or the body, delete it rather than re-verifying it every
 sweep.
 
+**The cut test does not apply to a module's `//!` summary line.** A one-line
+`//!` header is the module's row in the rustdoc module list; a module with no
+prose worth expanding is *correct* at one line, not under-documented, and
+`tests/docs.rs` enforces exactly that shape. Never delete a summary line to
+satisfy the cut test — improve the wording or leave it. Deleting a pointer
+target (`docs/modules/*.md`) is worse: `include_str!` resolves at compile
+time, so the build breaks. Cut applies to prose *inside* a header or markdown
+file, never to the last line standing.
+
 Deletion is also the right move for a stale sentence you cannot repair
-precisely. **Prefer deleting over rewriting into vagueness** — softening
+precisely. **Prefer deleting over rewriting into vagueness.** Softening
 `refresh_ready is the only function that computes readiness` into "readiness is
 computed in a few places" produces a claim that is unfalsifiable, survives every
-future sweep, and tells a reader nothing. Cut it and, if the real behaviour
-matters, file a ticket.
+future sweep, and tells a reader nothing — it does not fix the drift, it hides
+it permanently. You have two honest moves: go find every call site and write
+the exact claim, or cut the sentence and file a ticket. Vagueness is not the
+compromise between them; it is worse than either. Before you write a hedge
+(`generally`, `a few`, `mostly`, `usually`, `in some cases`), treat it as a
+signal you stopped reading the code too early and go back.
 
 Deleting is a finding. Report what you removed and why, the same as a fix.
 
@@ -167,21 +185,32 @@ thorough — a clean result is a real result.
 
 ## Sweep mode
 
-Enumerate every file with a `//!` header plus every markdown file under
-`docs/`. Check each one independently; a stale header in one file says nothing
-about another.
+**Establish the denominator first.** Before checking anything, enumerate the
+full list and count it:
 
-Report a per-file verdict — `ok`, `drifted`, or `unverifiable` — and file one
-ticket per drifted file. Then state plainly how many files you actually
-checked, so a partial sweep is never mistaken for a complete one.
+```
+rg -l '^//!' src/ ; find docs/ -name '*.md'
+```
+
+Never accept a file count from the prompt, a previous sweep, or a ticket — the
+set grows every wave, and a briefed "23 files" against an actual 25 turns a
+92% sweep into a reported-complete one. If your enumeration disagrees with the
+number you were given, say so and use yours.
+
+Check each file independently; a stale header in one says nothing about
+another. Report a per-file verdict — `ok`, `drifted`, or `unverifiable` — and
+file one ticket per drifted file. Then state checked-of-total against the
+denominator you enumerated, so a partial sweep is never mistaken for a
+complete one.
 
 ## Verifying afterwards
 
-Whatever you changed, `cargo doc --no-deps` must produce no new warnings:
+Whatever you changed, run `just lint`. It must be green with no pre-existing
+failures to excuse. It gates `cargo rustdoc -- -D warnings` (so an unclosed
+HTML tag or a stray untagged code fence is an error, not a warning you have to
+grep for) and `cargo test`, which runs `tests/docs.rs` — the mechanical check
+on `//!` header shape, summary length, and pointer targets. Both are stricter
+than reading the output yourself; do not substitute a narrower command.
 
-```
-cargo doc --no-deps 2>&1 | grep -c "unclosed HTML"
-```
-
-Pre-existing warnings in `cmd/report.rs` are tracked separately; do not claim
-them as yours or silently fix them under a docs ticket.
+If `just lint` fails on something you did not touch, that is a finding: file
+it, do not fold the fix into a docs ticket.
