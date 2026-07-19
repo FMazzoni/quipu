@@ -5,6 +5,7 @@
 //! Architecture overview — state machine, guarded-transition contract, module
 //! map — lives in `docs/architecture.md`, included below rather than inlined so
 //! that reading this file costs one line instead of the whole document.
+//!
 #![doc = include_str!("../docs/architecture.md")]
 
 mod cmd;
