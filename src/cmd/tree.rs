@@ -1,3 +1,5 @@
+//! Render the dependency DAG.
+
 use crate::{db, id, store};
 use anyhow::Result;
 use clap::Args;

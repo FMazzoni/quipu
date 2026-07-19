@@ -1,3 +1,5 @@
+//! Add or remove flat labels on a task.
+
 use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;

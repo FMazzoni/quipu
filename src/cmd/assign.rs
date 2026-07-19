@@ -1,3 +1,7 @@
+//! The `ready` → `assigned` edge.
+//!
+//! Orchestrator-only. Agents take work with `qp claim`, never this.
+
 use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;

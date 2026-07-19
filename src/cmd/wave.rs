@@ -1,3 +1,5 @@
+//! Group in-flight work by state: ready, assigned, running, pending.
+
 use crate::{db, store};
 use anyhow::Result;
 use clap::Args;

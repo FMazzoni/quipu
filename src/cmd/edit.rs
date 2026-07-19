@@ -1,4 +1,6 @@
-//! `qp edit` — mutate task fields (title, tier, description). Emits one `edit` event.
+//! `qp edit` — mutate task fields (title, tier, description).
+//!
+//! Emits one `edit` event.
 
 use crate::outcome::{emit, Outcome};
 use crate::{db, id};

@@ -1,5 +1,7 @@
-//! Single canonical UTC-timestamp source. All RFC3339 strings the rest of the crate
-//! emits must come from `now_rfc3339()`. Tested for the `Z` UTC suffix.
+//! Single canonical UTC-timestamp source.
+//!
+//! All RFC3339 strings the rest of the crate emits must come from
+//! `now_rfc3339()`. Tested for the `Z` UTC suffix.
 
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 

@@ -1,3 +1,5 @@
+//! Show the event log, for one task or across the store.
+
 use crate::store::{self, EventFilter};
 use crate::{db, id};
 use anyhow::Result;

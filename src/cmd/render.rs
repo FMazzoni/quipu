@@ -1,3 +1,8 @@
+//! Shared human-readable rendering of event payloads.
+//!
+//! Used by `timeline`, `show` and `report` so that one event kind reads the
+//! same wherever it appears.
+
 use serde_json::Value;
 
 /// Render a short, human-readable summary of an event's payload for a given
