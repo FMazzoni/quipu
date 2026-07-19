@@ -25,7 +25,7 @@ The coordinator never edits code directly; subagents do all changes inside `wt`-
 - **No Co-Authored-By trailer, no "Generated with Claude Code" footer** on commits.
 - **No async runtime.** rusqlite-sync, anyhow, sync stdlib. No tokio, hyper, axum in the dep tree.
 - **No tracing crate.** Use `eprintln!` for the rare error path.
-- **`docs/` is compile-referenced prose only.** It holds markdown pulled into the crate via `#[doc = include_str!()]` — currently `docs/architecture.md`, referenced from `src/main.rs`. Deleting or moving a file there breaks the build, which is the point. Plans, critiques, session logs and decisions go to `$QUIPU_VAULT`; work items go to qp tickets. Do not add free-floating markdown to `docs/` — that is what QP-35 deleted, and it kept getting re-created by parallel agents.
+- **`docs/` is compile-referenced prose plus the assets that render it.** Markdown pulled into the crate via `#[doc = include_str!()]` — currently `docs/architecture.md`, referenced from `src/main.rs` — and rustdoc build assets under `docs/assets/`. Deleting or moving a referenced file breaks the build, which is the point. Plans, critiques, session logs and decisions go to `$QUIPU_VAULT`; work items go to qp tickets. Do not add free-floating markdown to `docs/` — that is what QP-35 deleted, and it kept getting re-created by parallel agents.
 
 ## Commit style
 
