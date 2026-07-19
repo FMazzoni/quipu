@@ -11,7 +11,8 @@ pub struct AssignArgs {
 
 pub fn run(db_path: &std::path::Path, a: AssignArgs) -> Result<()> {
     let mut conn = db::open(db_path)?;
-    let task_id = id::resolve(&conn, &a.task)?;
+    let resolved = id::resolve_full(&conn, &a.task)?;
+    let task_id = resolved.id;
     db::with_tx(&mut conn, |tx| {
         let n = tx.execute(
             "UPDATE task SET state = 'assigned' WHERE id = ? AND state = 'ready'",
@@ -44,6 +45,6 @@ pub fn run(db_path: &std::path::Path, a: AssignArgs) -> Result<()> {
         )?;
         Ok(())
     })?;
-    println!("{} assigned to {}", a.task.to_uppercase(), a.to);
+    println!("{} assigned to {}", resolved.display_id, a.to);
     Ok(())
 }

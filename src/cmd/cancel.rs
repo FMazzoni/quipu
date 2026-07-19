@@ -11,7 +11,8 @@ pub struct CancelArgs {
 
 pub fn run(db_path: &std::path::Path, a: CancelArgs) -> Result<()> {
     let mut conn = db::open(db_path)?;
-    let task_id = id::resolve(&conn, &a.task)?;
+    let resolved = id::resolve_full(&conn, &a.task)?;
+    let task_id = resolved.id;
     db::with_tx(&mut conn, |tx| {
         let n = tx.execute(
             "UPDATE task SET state = 'cancelled'
@@ -36,6 +37,6 @@ pub fn run(db_path: &std::path::Path, a: CancelArgs) -> Result<()> {
         db::refresh_ready(tx)?;
         Ok(())
     })?;
-    println!("{} cancelled", a.task.to_uppercase());
+    println!("{} cancelled", resolved.display_id);
     Ok(())
 }

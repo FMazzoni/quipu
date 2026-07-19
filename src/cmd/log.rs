@@ -15,7 +15,8 @@ pub struct LogArgs {
 
 pub fn run(db_path: &std::path::Path, a: LogArgs) -> Result<()> {
     let mut conn = db::open(db_path)?;
-    let task_id = id::resolve(&conn, &a.task)?;
+    let resolved = id::resolve_full(&conn, &a.task)?;
+    let task_id = resolved.id;
     db::with_tx(&mut conn, |tx| {
         let mut payload = serde_json::json!({"text": a.body});
         if a.auto {
@@ -48,6 +49,6 @@ pub fn run(db_path: &std::path::Path, a: LogArgs) -> Result<()> {
         db::insert_event(tx, Some(task_id), &a.kind, agent, Some(&payload))?;
         Ok(())
     })?;
-    println!("logged {} on {}", a.kind, a.task.to_uppercase());
+    println!("logged {} on {}", a.kind, resolved.display_id);
     Ok(())
 }

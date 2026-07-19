@@ -2597,3 +2597,83 @@ fn depends_abandon_block_all_reject_wrong_agent_consistently() {
         .failure()
         .code(2);
 }
+
+#[test]
+fn assign_echoes_canonical_id_stripping_whitespace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    let out = qp(&db)
+        .args(["assign", " qp-1 ", "--to", "bob"])
+        .assert()
+        .success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert_eq!(s, "QP-1 assigned to bob\n");
+}
+
+#[test]
+fn claim_echoes_canonical_id_for_mixed_case_input() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "bob"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["claim", "qp-1", "--as", "bob"])
+        .assert()
+        .success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert_eq!(s, "QP-1 claimed by bob\n");
+}
+
+#[test]
+fn zero_padded_id_resolves_identically_across_show_claim_depends() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success(); // QP-1
+    qp(&db).args(["add", "b"]).assert().success(); // QP-2
+
+    let out = qp(&db).args(["show", "QP-001"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("QP-1"));
+
+    qp(&db)
+        .args(["assign", "QP-001", "--to", "bob"])
+        .assert()
+        .success();
+    let out = qp(&db)
+        .args(["claim", "QP-0001", "--as", "bob"])
+        .assert()
+        .success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert_eq!(s, "QP-1 claimed by bob\n");
+
+    qp(&db)
+        .args(["depends", "QP-002", "--on", "QP-01"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn legacy_t_form_still_resolves_against_t_prefixed_row() {
+    // `T<n>` prefixes predate the 2-5-uppercase-letter `--prefix` validation,
+    // so we can't recreate one via `qp init`. Simulate a pre-existing legacy
+    // row by writing `display_id` directly, then confirm `T1` still resolves.
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success(); // QP-1
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute("UPDATE task SET display_id = 'T1' WHERE id = 1", [])
+            .unwrap();
+    }
+    let out = qp(&db).args(["show", "T1"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("T1"));
+}
