@@ -11,7 +11,7 @@ allowed-tools: Read Glob Grep Bash Edit Write
 ## Hard rules
 
 - [ ] **One lens per agent.** The coordinator dispatched you with exactly one of: correctness / architecture / spec-compliance / UX / perf / API-surface. Stay in your lane — other lenses run in parallel agents.
-- [ ] **No worktree needed.** Findings go to the vault at `$QUIPU_VAULT/critiques/YYYY-MM-DD-HHMMSS-<wave-slug>-<lens>.md`. Read the wave's code on its integration branch (`wave-<N>-<slug>`), which the coordinator names in your prompt — `main` is protected, so the wave has not merged there yet; it is still an open PR.
+- [ ] **No worktree needed.** Findings go to the vault at `$QUIPU_VAULT/critiques/YYYY-MM-DD-HHMMSS-<wave-slug>-<lens>.md`. Read the wave's code on its integration branch (the coordinator names it in your prompt) — `main` is protected, so the wave has not merged there yet; it is still an open PR.
 - [ ] **Locked decisions are out of scope.** If the plan has a "Locked decisions" section, treat those as pre-decided. Don't dispute them. (You may flag *spec divergence from* a locked decision — that's in-scope correctness.)
 - [ ] **No Co-Authored-By trailer** on any commit you make (you generally make none — you only write to the vault's `critiques/`).
 - [ ] **Friction logging is required** before finishing your ticket (if you were given one).
@@ -42,7 +42,7 @@ allowed-tools: Read Glob Grep Bash Edit Write
 | Minor        | Style, ergonomics, micro-perf, cosmetic                                    |
 | Observation  | FYI; not actionable; context for next maintainer                           |
 
-Auto-mode triage (run by coordinator): **only Critical findings are acted on automatically**. Important/Minor/Observation get filed as qp tickets (`qp add ... --tag harness:claude-code`). Calibrate your severities accordingly — don't inflate to force action.
+Auto-mode triage (run by coordinator): **only Critical findings are acted on automatically**. Important/Minor/Observation get filed as qp tickets (`qp add ...`). Calibrate your severities accordingly — don't inflate to force action.
 
 **Pick the `kind:` tag honestly — this is the highest-leverage thing you do when filing.**
 
