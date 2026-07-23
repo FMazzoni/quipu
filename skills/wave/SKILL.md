@@ -6,28 +6,12 @@ description: Execute a wave with qp. Plan tasks, assign in parallel, dispatch su
 ## When to use
 Independent work units that can be parallelized, with a mandatory adversarial-review step.
 
-## The adversarial-review pass is mandatory, not optional
+## Adversarial review — mandatory
 
-After **every** wave lands and before you commit or promote it, spawn a dedicated
-adversarial agent over the wave's diff. This is not a nicety — passing the
-project's own gates (linters, type checks, tests, whatever CI runs) is necessary
-but **insufficient**. The failures that survive the gates are the dangerous ones:
-work that passes every check, exits 0, and is silently wrong. A dedicated
-adversarial read is the only thing that reliably catches them.
-
-Do NOT substitute inline self-review. A wave reviewed only inline ships bugs an
-adversarial agent would have caught — e.g. a config field wired in but read by
-nothing, or an error path that returns the same value as success. Both pass every
-gate.
-
-The order is fixed: **land → run the project's gates → adversarial pass →
-address findings → THEN commit.** Not commit-then-review.
-
-Give the adversarial agent: the exact diff range (`git diff <base>..<head>`), what
-the code is *for* (so it can judge severity), the project's known failure modes,
-and an explicit instruction to rank findings and distinguish "would silently
-produce a wrong result" from "untidy". Tell it to verify claims against the code,
-not trust the implementing agent's report. Read-only; it proposes, you apply.
+- After a wave lands, before you commit: spawn a dedicated adversarial agent over the diff. Inline self-review does not substitute.
+- Gates (lint, types, tests) are necessary but insufficient — the failures that survive them pass every check, exit 0, and are silently wrong: a field wired in but read by nothing, an error path that returns the success value.
+- Order is fixed: **land → gates → adversarial pass → fix → commit** — never commit-then-review.
+- Brief it with the diff range, what the code is *for*, and the known failure modes. It ranks findings, separates "silently wrong" from "untidy", verifies every claim against the code rather than the implementer's report, and only proposes — you apply.
 
 ## Conventions
 
@@ -115,29 +99,19 @@ qp relation add $WINNER supersedes $ROOT
 
 When a running task hits an obstacle, the agent doesn't mark it `blocked` (that state no longer exists). Instead, it creates a blocker task as a new dep:
 
-    qp block QP-3 --as wave-7:agent-a --new "DB schema migration needed for QP-3"
+    qp block QP-3 --as wave-N:agent-a --new "DB schema migration needed for QP-3"
 
 This is shorthand for:
 
     qp add "DB schema migration needed for QP-3" --tag kind:blocker  # QP-9
-    qp depends QP-3 --on QP-9 --as wave-7:agent-a
-    qp abandon QP-3 --as wave-7:agent-a   # demoted to pending due to new dep
+    qp depends QP-3 --on QP-9 --as wave-N:agent-a
+    qp abandon QP-3 --as wave-N:agent-a   # demoted to pending due to new dep
 
 `kind:blocker` is this skill's convention, not a substrate rule — it is only the default of `qp block --tag`. Another orchestration pattern passes its own (`--tag kind:review`, repeatable; supplying any replaces the default). Nothing in the binary reads the tag back: `qp wave` classifies a task as blocked from its unresolved dep edges alone, so the tag is purely a `qp list --tag` filter handle.
 
 The orchestrator sees QP-9 appear in `qp wave` under `ready`, dispatches an agent to resolve it. When QP-9 completes, `refresh_ready` automatically thaws QP-3 back to `ready`, and the orchestrator re-dispatches it.
 
 Exploratory planners use the same primitive *without* `qp block` — they just call `qp depends parent --on child` to push planning work down the DAG.
-
-### Harness attribution
-
-`agent_id` is a free-form string. The convention is `<harness>:<instance>`:
-
-- `claude-code:main`, `claude-code:wt-wave-7-agent-a` — Claude Code sessions
-- `cli:nando` — a human operator running `qp` directly
-- `cron:nightly-gc` — automated maintenance
-
-Pair this with a `harness:<name>` tag on any task the harness creates, so `qp list --tag harness:claude-code` filters cleanly. The substrate doesn't enforce this — it's an orchestrator convention.
 
 ### Editing tasks
 
