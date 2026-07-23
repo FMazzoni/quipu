@@ -99,29 +99,19 @@ qp relation add $WINNER supersedes $ROOT
 
 When a running task hits an obstacle, the agent doesn't mark it `blocked` (that state no longer exists). Instead, it creates a blocker task as a new dep:
 
-    qp block QP-3 --as wave-7:agent-a --new "DB schema migration needed for QP-3"
+    qp block QP-3 --as wave-N:agent-a --new "DB schema migration needed for QP-3"
 
 This is shorthand for:
 
     qp add "DB schema migration needed for QP-3" --tag kind:blocker  # QP-9
-    qp depends QP-3 --on QP-9 --as wave-7:agent-a
-    qp abandon QP-3 --as wave-7:agent-a   # demoted to pending due to new dep
+    qp depends QP-3 --on QP-9 --as wave-N:agent-a
+    qp abandon QP-3 --as wave-N:agent-a   # demoted to pending due to new dep
 
 `kind:blocker` is this skill's convention, not a substrate rule — it is only the default of `qp block --tag`. Another orchestration pattern passes its own (`--tag kind:review`, repeatable; supplying any replaces the default). Nothing in the binary reads the tag back: `qp wave` classifies a task as blocked from its unresolved dep edges alone, so the tag is purely a `qp list --tag` filter handle.
 
 The orchestrator sees QP-9 appear in `qp wave` under `ready`, dispatches an agent to resolve it. When QP-9 completes, `refresh_ready` automatically thaws QP-3 back to `ready`, and the orchestrator re-dispatches it.
 
 Exploratory planners use the same primitive *without* `qp block` — they just call `qp depends parent --on child` to push planning work down the DAG.
-
-### Harness attribution
-
-`agent_id` is a free-form string. The convention is `<harness>:<instance>`:
-
-- `claude-code:main`, `claude-code:wt-wave-7-agent-a` — Claude Code sessions
-- `cli:nando` — a human operator running `qp` directly
-- `cron:nightly-gc` — automated maintenance
-
-Pair this with a `harness:<name>` tag on any task the harness creates, so `qp list --tag harness:claude-code` filters cleanly. The substrate doesn't enforce this — it's an orchestrator convention.
 
 ### Editing tasks
 
