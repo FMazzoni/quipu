@@ -13,28 +13,28 @@ You are the **coordinator**. Subagents do all code changes inside `wt`-managed w
 ## Hard rules (read before phasing)
 
 - [ ] Never edit code. Exception: resolve merge conflicts during `wt merge` rebase.
-- [ ] **Never push to `main`.** It is protected (ruleset `protect-main`): direct pushes are rejected server-side, a PR with `lint` green is required, and there is no bypass. A wave lands on its own branch and reaches `main` through a PR you open at Phase 8. You confirm `lint` is green and then **stop** — the human merges. Name branches descriptively (no wave numbers or qp ids) and fix the branch/PR strategy at kickoff; see "Branch strategy" below.
+- [ ] **Never push to `main`.** It is protected (ruleset `protect-main`): direct pushes are rejected server-side, a PR with `lint` green is required, no bypass. A wave lands on its own branch and reaches `main` through a PR you open at Phase 8; you confirm `lint` green and **stop** — the human merges. Name branches descriptively (no wave numbers or qp ids); fix branch/PR strategy at kickoff (see "Branch strategy").
 - [ ] Never use `isolation: "worktree"` on Agent calls. Always `wt switch -c`.
-- [ ] Never run `cargo test` (workspace-wide) while subagents are active — multiple rustc graphs OOM the machine. Run the single full test pass at wrap-up.
-- [ ] **Never ask a subagent for a full-suite test count.** You own the suite total; they own their filters. See "Do not ask subagents for suite totals" under Phase 3.
+- [ ] Never run workspace-wide `cargo test` while subagents are active — multiple rustc graphs OOM the machine. Run the single full test pass at wrap-up.
+- [ ] **Never ask a subagent for a full-suite test count.** You own the suite total; they own their filters. See Phase 3.
 - [ ] No Co-Authored-By trailer, no "Generated with Claude Code" footer on commits.
 - [ ] All other hard rules: see `CLAUDE.md` (leanness, no async, no tracing, guarded state transitions).
 
 ## Branch strategy (decide once, at kickoff)
 
-`main` is protected, so every wave reaches it through a PR — never a direct push. Before Phase 0, fix the branch/PR strategy for the **whole run** and do not revisit it per wave:
+`main` is protected, so every wave reaches it through a PR — never a direct push. Before Phase 0, fix the branch/PR strategy for the **whole run**; do not revisit per wave:
 
 - **If the invoking prompt names a strategy, obey it silently** — do not ask.
-- **Otherwise, if a human is present, ask once** (then run the rest unattended under the answer):
-  - **one branch, one PR** — every wave in this run lands on a single branch named for the campaign (`<slug>`); one PR merges the whole run to `main` at the end (Phase 8 runs once, after the final wave).
-  - **staged PR per wave** — each wave gets its own descriptively-named branch and its own PR (Phase 8 runs per wave). Stack them: branch a wave off the previous wave's branch when it depends on that wave's unmerged work, off `main` when it is independent. Read the plan's slice dependencies to decide which.
-- **If fully autonomous (no human to ask), default to `staged PR per wave` and log the choice:** `./target/release/qp log <first-ticket> decision "branch strategy: staged PRs (default — no human at kickoff)" --auto`.
+- **Otherwise, if a human is present, ask once** (then run unattended under the answer):
+  - **one branch, one PR** — every wave lands on a single branch named for the campaign (`<slug>`); one PR merges the whole run to `main` at the end (Phase 8 runs once, after the final wave).
+  - **staged PR per wave** — each wave gets its own descriptively-named branch and PR (Phase 8 runs per wave). Stack them: branch a wave off the previous wave's branch when it depends on that wave's unmerged work, off `main` when independent. Read the plan's slice dependencies to decide.
+- **If fully autonomous, default to `staged PR per wave` and log it:** `./target/release/qp log <first-ticket> decision "branch strategy: staged PRs (default — no human at kickoff)" --auto`.
 
-Name branches descriptively for the work — `embeddings-search`, never `wave-3` or anything carrying a wave number or qp id. On a public repo the branch and PR names are visible, and those ids are instance-local: they mean nothing to anyone else and reconcile to nothing. The quipu↔branch link is the internal `branch:<name>` tag, not the branch name — at kickoff, once the branch is named, tag every ticket in the wave: `./target/release/qp tag <QP-N> add branch:<name>`. That tag is the durable ticket↔code pointer (see Phase 4); establish it here, once.
+Name branches descriptively — `embeddings-search`, never `wave-3` or anything carrying a wave number or qp id. Those ids are instance-local: on a public repo they're visible and mean nothing to anyone else. The quipu↔branch link is the internal `branch:<name>` tag, not the branch name — at kickoff, once the branch is named, tag every ticket in the wave: `./target/release/qp tag <QP-N> add branch:<name>`. That tag is the durable ticket↔code pointer (see Phase 4); establish it here, once.
 
 ### The wave branch is a worktree; slices fan off it
 
-The wave branch is the **integration worktree** — one branch, checked out in exactly one place (a branch cannot be checked out in two worktrees). Every slice is a *separate* worktree on its *own* branch, created with `--base` pointing at the wave branch, so each slice starts from the wave's actual current state. There is no "worktree off a worktree": a worktree is based on a **commit**, and the wave branch's tip is just a commit. No patches, no snapshots — `--base` gives each slice the real, live state for free.
+The wave branch is the **integration worktree** — one branch, checked out in exactly one place (a branch cannot be checked out in two worktrees). Every slice is a *separate* worktree on its *own* branch, created with `--base` pointing at the wave branch, so each slice starts from the wave's actual current state. A worktree is based on a **commit**, and the wave branch's tip is just a commit — no patches, no snapshots; `--base` gives each slice the real, live state for free.
 
 Create the wave's integration worktree off its base, before Phase 0:
 
@@ -42,11 +42,11 @@ Create the wave's integration worktree off its base, before Phase 0:
 wt switch -c <branch> --base <base>   # <branch> = the descriptive name; base = main, or the prior wave's branch when stacked
 ```
 
-`--base` defaults to the default branch (`main`), so it must be passed explicitly whenever the base is a prior wave's branch. Every slice worktree (Phase 3) is then created `--base <branch>`, and every slice merge (Phase 4) targets `<branch>` — never `main`, which is protected. Pre-scaffold, slice merges, everything below lands on **this branch**; it reaches `main` only through the Phase 8 PR.
+`--base` defaults to the default branch (`main`), so pass it explicitly whenever the base is a prior wave's branch. Every slice worktree (Phase 3) is created `--base <branch>`, and every slice merge (Phase 4) targets `<branch>` — never `main`, which is protected. It reaches `main` only through the Phase 8 PR.
 
 ## Phase 0 — Pre-scaffold (when needed)
 
-When parallel slices will all touch `src/cmd/mod.rs` and `src/main.rs` (i.e. each slice adds a new subcommand), land the structural shape on **the wave branch** *first* (never `main` — it is protected; see "Branch strategy"), in a single coordinator-dispatched scaffold commit. This eliminates the rote add/add conflict pattern.
+When parallel slices will all touch `src/cmd/mod.rs` and `src/main.rs` (each slice adds a new subcommand), land the structural shape on **the wave branch** first (never `main`), in a single coordinator-dispatched scaffold commit. This eliminates the rote add/add conflict pattern.
 
 Scaffold commit contains:
 - empty stub modules (`src/cmd/<new>.rs` with `pub fn run(_a: Args) -> Result<()> { unimplemented!() }`)
@@ -99,10 +99,7 @@ Plan structure:
 
 (`--tag` globs, so `"kind:decision*"` works too if you namespace them.)
 
-Sweep these into the wave like any other ticket. A `kind:decision` body offers
-options with no clear winner — the tag means **"this needs a judgement call,
-not just implementation, and you are authorised to make it."** It is not a
-routing flag that sends work to the human.
+Sweep these into the wave like any other ticket. A `kind:decision` body offers options with no clear winner — the tag means **"this needs a judgement call, not just implementation, and you are authorised to make it."** It is not a routing flag that sends work to the human.
 
 Say so in the dispatch prompt, explicitly:
 
@@ -118,22 +115,9 @@ If your call is one of the four loud kinds below, also run
 `qp tag QP-<N> add decision:critical` — you still decide, you just mark it.
 ```
 
-The agent decides and finishes. This is the normal mode here, not an
-exception: `qp decisions --auto-only` returns 71 of 133 decision events in
-this store — more than half of every call on record was made by an agent
-mid-wave. Wave 10 is the worked example. QP-37, QP-41, QP-49 and QP-137 were
-all "no clear winner" bodies; each was dispatched with authority and each
-resolved in minutes.
+The agent decides and finishes. This is the normal mode, not an exception — over half of all decision events on record were made by an agent mid-wave.
 
-**What makes an autonomous decision acceptable is the evidence, not the
-confidence.** The wave-10 calls hold up because every one of them checked the
-store before choosing: QP-37 picked the `--tag` override after confirming zero
-`kind:blocker` tags exist in the real data; QP-41 closed won't-do after
-confirming no `agent_id` anywhere contains brackets; QP-49 answered a broader
-question than the one it was handed, having found the two tickets were one.
-A confident choice with nothing checked behind it is a guess wearing a
-decision's clothes — that is the failure mode to reject in a report, not the
-act of deciding.
+**What makes an autonomous decision acceptable is the evidence, not the confidence.** A good call checks the store before choosing (e.g. confirm zero `kind:blocker` tags exist before picking a `--tag` override). A confident choice with nothing checked behind it is a guess wearing a decision's clothes — that is the failure mode to reject in a report, not the act of deciding.
 
 Four kinds of call are loud enough that the human must see them at wrap-up:
 
@@ -142,33 +126,19 @@ Four kinds of call are loud enough that the human must see them at wrap-up:
 - it changes a public contract other in-flight slices depend on
 - there is genuinely no evidence either way and the choice is pure preference
 
-**These are not stop-and-ask.** The agent still decides and still finishes; it
-just marks the call so it cannot be missed:
+**These are not stop-and-ask.** The agent still decides and finishes; it just marks the call so it cannot be missed:
 
 ```bash
 ./target/release/qp tag QP-<n> add decision:critical
 ```
 
-Put that instruction in the dispatch prompt alongside the authority grant.
-`--tag` globs, so `qp list --tag "decision:*"` finds them all later. A tag is
-the right marker because tags are the pattern-agnostic extension point — the
-binary stays ignorant of what `decision:critical` means, exactly as it stays
-ignorant of `kind:decision`.
+Put that instruction in the dispatch prompt alongside the authority grant. `--tag` globs, so `qp list --tag "decision:*"` finds them all later. A tag is the right marker because tags are the pattern-agnostic extension point — the binary stays ignorant of what `decision:critical` means, exactly as it stays ignorant of `kind:decision`.
 
-The surfacing is post-hoc, and that is the whole design: nothing gates, the
-coordinator reports at Phase 7. A pre-hoc approval clause is how tickets rot —
-four decision-shaped tickets filed 2026-05-25 sat untouched for two months,
-and the cause was not that they needed a human, it was that nobody dispatched
-them at all.
+The surfacing is post-hoc, and that is the design: nothing gates, the coordinator reports at Phase 7. A pre-hoc approval clause is how tickets rot — decision-shaped tickets that need a human before dispatch sit untouched for months.
 
-This lives here, in the skill, on purpose. `qp` does not know what a decision
-ticket is and must not learn — orchestration patterns stay out of the binary
-(CLAUDE.md). The tag is a convention this playbook reads, nothing more.
+This lives here, in the skill, on purpose. `qp` does not know what a decision ticket is and must not learn — orchestration patterns stay out of the binary (CLAUDE.md). The tag is a convention this playbook reads, nothing more.
 
-**When filing, tag honestly.** If a finding or bug report is a choice between
-options rather than a defect, tag it `kind:decision`, not `kind:bug`. A
-decision dressed as a bug looks actionable to every sweep and satisfies none
-of them — that mislabelling is the actual root cause of the May tickets.
+**When filing, tag honestly.** If a finding or bug report is a choice between options rather than a defect, tag it `kind:decision`, not `kind:bug`. A decision dressed as a bug looks actionable to every sweep and satisfies none of them.
 
 ## Phase 2 — Ticket (when multi-subagent)
 
@@ -184,27 +154,19 @@ For multi-subagent waves: open a wave ticket and child impl tickets so `qp tree`
 ./target/release/qp depends QP-<wave> --on QP-<b>
 ```
 
-The wave ticket depends on its slices, so it sits `pending` until they all
-complete and then auto-promotes to `ready`. Use the same one-edge-per-call
-form to express ordering *between* slices (`qp depends QP-<b> --on QP-<a>`
-when B must land after A) — the DAG then enforces the sequence instead of
-you remembering it.
+The wave ticket depends on its slices, so it sits `pending` until they all complete and then auto-promotes to `ready`. Use the same one-edge-per-call form to express ordering *between* slices (`qp depends QP-<b> --on QP-<a>` when B must land after A) — the DAG then enforces the sequence instead of you remembering it.
 
 **Skip ticketing** for single-subagent waves — open the impl ticket directly, no wave wrapper.
 
 ## Phase 3 — Dispatch
 
-**First, record the wave boundary.** Capture the current max event id before
-anything is dispatched — Phase 7 needs it to report what this wave decided:
+**First, record the wave boundary.** Capture the current max event id before anything is dispatched — Phase 7 needs it to report what this wave decided:
 
 ```bash
 ./target/release/qp timeline --json | jq '[.[].id] | max'   # e.g. 730
 ```
 
-Keep that number. Event ids are gap-free (every event is inserted inside its
-mutation's `IMMEDIATE` transaction — the watch-correctness invariant in
-`schema.sql`), so an id captured here is an exact cut, not an approximation.
-`--since` is exclusive: `--since 730` starts at event 731.
+Keep that number. Event ids are gap-free (every event is inserted inside its mutation's `IMMEDIATE` transaction — the watch-correctness invariant in `schema.sql`), so an id captured here is an exact cut. `--since` is exclusive: `--since 730` starts at event 731.
 
 ```bash
 wt switch -c wu-<slug-a> --base <branch> --no-cd --no-verify -y
@@ -264,26 +226,11 @@ cd there first. All commands and paths are relative to it.
 
 ### Do not ask subagents for suite totals
 
-`qp-implement` forbids a bare `cargo test`, because concurrent rustc graphs OOM
-the machine. A dispatch prompt that asks a subagent to "run the FULL suite
-before committing" or to report a total test count therefore instructs it to
-break that rule — a suite total is not obtainable from narrow filters without
-summing per-target runs by hand.
+`qp-implement` forbids a bare `cargo test` because concurrent rustc graphs OOM the machine. A prompt that asks a subagent to "run the FULL suite before committing" or to report a total test count therefore instructs it to break that rule — a suite total is not obtainable from narrow filters without summing per-target runs by hand.
 
-This is not a hypothetical conflict. Wave-10 dispatch prompts asked for exactly
-that, and the QP-37 and QP-41/49 agents both ran a bare `cargo test` and both
-self-reported it as a process slip. The prompts were wrong, not the rule.
+So: **ask subagents which filters they ran and whether those passed. Never ask for a total.** You run the full suite once at Phase 7, after all merges, with no agents live — the only place a suite total is both safe to produce and meaningful (a pre-merge total from one worktree does not describe the tree you are shipping anyway).
 
-So: **ask subagents which filters they ran and whether those passed. Never ask
-for a total.** You run the full suite once at Phase 7, after all merges, with no
-agents live — that is already the documented practice, and it is the only place
-a suite total is both safe to produce and meaningful (a pre-merge total from one
-worktree does not describe the tree you are shipping anyway).
-
-The OOM rule itself stays as written. Nobody has measured whether the risk is
-still real on current hardware, and "three agents broke it and nothing burned"
-is not a measurement. If you want it relaxed, measure it and file a
-`kind:decision` ticket — do not relax a safety rule to excuse a prompt error.
+The OOM rule itself stays as written. "Three agents broke it and nothing burned" is not a measurement. If you want it relaxed, measure it and file a `kind:decision` ticket — do not relax a safety rule to excuse a prompt error.
 
 **Model selection:**
 
@@ -303,7 +250,7 @@ is not a measurement. If you want it relaxed, measure it and file a
 
 ## Phase 4 — Merge
 
-`<target-branch>` is **this wave's branch** (from "Branch strategy") — a descriptive slug, never `main`, which is protected. Pass it explicitly; `wt merge` with no target defaults to `main`, which is both wrong here and rejected by the ruleset.
+`<target-branch>` is **this wave's branch** (from "Branch strategy") — a descriptive slug, never `main`. Pass it explicitly; `wt merge` with no target defaults to `main`, which is both wrong here and rejected by the ruleset.
 
 ```bash
 wt merge -C <worktree-path> <target-branch> -y || exit 1   # target = the wave's descriptive branch, never main
@@ -354,35 +301,18 @@ Dispatch ≤4 critic agents in parallel, one lens each. Reference `.claude/skill
    cargo test 2>&1 | grep "^test result"
    ```
 2. Leanness gates: stripped-binary size, `qp --version` cold start, RSS. Confirm under budget (CLAUDE.md).
-3. **Surface every decision the wave made.** Agents decide autonomously during
-   the wave (Phase 1); this is where the human sees what they decided. Use the
-   boundary id you captured in Phase 3:
+3. **Surface every decision the wave made.** Agents decide autonomously during the wave (Phase 1); this is where the human sees what they decided. Use the boundary id you captured in Phase 3:
    ```bash
    ./target/release/qp decisions --since <boundary-id>
    ./target/release/qp decisions --since <boundary-id> --auto-only   # agent-made only
    ./target/release/qp list --tag "decision:critical"                # the loud ones
    ```
-   **Use `qp decisions --since`, not `timeline --kind decision`.** The alias
-   grew `--since` (QP-144) and is now strictly the more ergonomic way to write
-   the same query — same clause, same semantics. `--auto-only` composes with
-   `--since`, so the second line above narrows to decisions this wave's agents
-   made themselves.
+   **Use `qp decisions --since`, not `timeline --kind decision`.** The alias grew `--since` (QP-144) and is now strictly the more ergonomic way to write the same query — same clause, same semantics. `--auto-only` composes with `--since`.
 
-   `--since` is **exclusive**: `--since 730` starts at event 731. The Phase 3
-   boundary is the max id *before* anything was dispatched, so passing it
-   exactly as captured is already correct — the first wave event is the first
-   one returned. Do not adjust it: +1 silently drops the wave's first decision,
-   −1 pulls in a pre-wave event that is not yours to report.
+   `--since` is **exclusive**: `--since 730` starts at event 731. The Phase 3 boundary is the max id *before* anything was dispatched, so passing it exactly as captured is correct. Do not adjust it: +1 silently drops the wave's first decision, −1 pulls in a pre-wave event that is not yours to report.
 
-   Report to the human as a short scannable list — **critical ones first and
-   marked**, then the rest, one line each: ticket id, the choice, the one-line
-   why. This is a report, not an approval request; the work merged in Phase 4.
-   Anything that reads as "should I have done this?" belongs in a vault
-   decision note, not in this list.
-4. Vault notes for any new decision: `$QUIPU_VAULT/decisions/<slug>.md`. If the
-   wave reversed an earlier decision, link the two tickets as described in
-   `qp-implement` (`qp relation add <new> supersedes <old>`) — the subagent
-   normally does this, so here you are just confirming it happened.
+   Report to the human as a short scannable list — **critical ones first and marked**, then the rest, one line each: ticket id, the choice, the one-line why. This is a report, not an approval request; the work merged in Phase 4. Anything that reads as "should I have done this?" belongs in a vault decision note, not this list.
+4. Vault notes for any new decision: `$QUIPU_VAULT/decisions/<slug>.md`. If the wave reversed an earlier decision, link the two tickets as described in `qp-implement` (`qp relation add <new> supersedes <old>`) — the subagent normally does this, so here you just confirm it happened.
 5. Append a session entry at `$QUIPU_VAULT/sessions/YYYY-MM-DD-HHMMSS-<slug>.md` (built / decisions / critic count / next). Use the real wall-clock time the session ends (e.g. `date +%H%M%S`) — do **not** use a daily counter like `000001`.
 6. File deferred bugs as qp tickets (`qp add ... --tag kind:bug`).
 7. Report to user: PR link(s), test count, decisions made, deferred items.
