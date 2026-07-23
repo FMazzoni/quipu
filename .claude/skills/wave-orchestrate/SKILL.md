@@ -309,8 +309,6 @@ is not a measurement. If you want it relaxed, measure it and file a
 wt merge -C <worktree-path> <target-branch> -y || exit 1   # target = the wave's descriptive branch, never main
 ```
 
-**No per-ticket SHA tagging.** The tickets were tagged `branch:<name>` at kickoff (see "Branch strategy"), and that is the whole ticket↔code link. A branch *name* is stable; a commit SHA is not — the merge rewrites it, which is exactly what made the old `commit:<sha>` tags go stale and forced the post-merge SHA resolution, the bare-`commit:` guard, and the Phase 7 audit, all now deleted. The name maps to the wave's PR, which GitHub keeps with its full commit list and diff even after the branch is deleted (`gh pr list --search "head:<name>" --state all`). To pin a single ticket's change *within* that PR, use the ticket's own immutable timestamps (`qp show` — `created_at`, `completed_at`, event `ts`, coupled to nothing in git). Branch tag → which PR; timestamp → which commit.
-
 For coordinator-direct commits (justfile edits, reactive fixes, doc-only work) that bypass the wave flow: still ticket them, and tag the ticket `branch:<name>` with the branch you landed them on. The system-of-record stays complete.
 
 Merge order: foundational slice first (data model, types); feature slices that build on it second. If slice B references slice A's APIs, merge A first.
@@ -345,7 +343,7 @@ Dispatch ≤4 critic agents in parallel, one lens each. Reference `.claude/skill
 
 ## Phase 6 — Fix
 
-**Auto mode:** act only on Critical findings. Important/Minor/Observation get filed as qp tickets: `qp add "<short>" --tag kind:bug --tag harness:claude-code --description "<finding body>"`. Use `--tag kind:decision` instead of `kind:bug` when the finding is a choice between options rather than a defect — see Phase 1.
+**Auto mode:** act only on Critical findings. Important/Minor/Observation get filed as qp tickets: `qp add "<short>" --tag kind:bug --description "<finding body>"`. Use `--tag kind:decision` instead of `kind:bug` when the finding is a choice between options rather than a defect — see Phase 1.
 
 **Interactive mode:** triage all findings with the user, then dispatch fix subagents in parallel (one worktree per topic-affinity group via `wt switch -c fix-<slug> --base <branch>`, and `wt merge <branch> ...` back into the wave branch — same base/target discipline as slices, never `main`). After merge, mark addressed findings `**Status: FIXED in <sha>**` in the critic file.
 

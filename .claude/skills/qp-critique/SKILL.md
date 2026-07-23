@@ -42,7 +42,7 @@ allowed-tools: Read Glob Grep Bash Edit Write
 | Minor        | Style, ergonomics, micro-perf, cosmetic                                    |
 | Observation  | FYI; not actionable; context for next maintainer                           |
 
-Auto-mode triage (run by coordinator): **only Critical findings are acted on automatically**. Important/Minor/Observation get filed as qp tickets (`qp add ... --tag harness:claude-code`). Calibrate your severities accordingly — don't inflate to force action.
+Auto-mode triage (run by coordinator): **only Critical findings are acted on automatically**. Important/Minor/Observation get filed as qp tickets (`qp add ...`). Calibrate your severities accordingly — don't inflate to force action.
 
 **Pick the `kind:` tag honestly — this is the highest-leverage thing you do when filing.**
 
