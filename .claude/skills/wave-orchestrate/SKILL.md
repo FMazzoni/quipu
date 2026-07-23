@@ -32,13 +32,17 @@ You are the **coordinator**. Subagents do all code changes inside `wt`-managed w
 
 Name branches for humans — `wave-3-embeddings-search`, not `wave-3` — and tag each wave's tickets with its branch so the mapping survives a merge: `./target/release/qp tag <QP-N> add branch:<name>`.
 
-Create the wave's branch off its base before Phase 0:
+### The wave branch is a worktree; slices fan off it
+
+The wave branch is the **integration worktree** — one branch, checked out in exactly one place (a branch cannot be checked out in two worktrees). Every slice is a *separate* worktree on its *own* branch, created with `--base` pointing at the wave branch, so each slice starts from the wave's actual current state. There is no "worktree off a worktree": a worktree is based on a **commit**, and the wave branch's tip is just a commit. No patches, no snapshots — `--base` gives each slice the real, live state for free.
+
+Create the wave's integration worktree off its base, before Phase 0:
 
 ```bash
-git -C <main-repo-path> switch -c wave-<N>-<slug> <base>   # base = main, or the prior wave's branch when stacked
+wt switch -c wave-<N>-<slug> --base <base>   # base = main, or the prior wave's branch when stacked
 ```
 
-Everything below — pre-scaffold, every slice merge — targets **this branch**, never `main`.
+`--base` defaults to the default branch (`main`), so it must be passed explicitly whenever the base is a prior wave's branch. Every slice worktree (Phase 3) is then created `--base wave-<N>-<slug>`, and every slice merge (Phase 4) targets `wave-<N>-<slug>` — never `main`, which is protected. Pre-scaffold, slice merges, everything below lands on **this branch**; it reaches `main` only through the Phase 8 PR.
 
 ## Phase 0 — Pre-scaffold (when needed)
 
@@ -203,10 +207,12 @@ mutation's `IMMEDIATE` transaction — the watch-correctness invariant in
 `--since` is exclusive: `--since 730` starts at event 731.
 
 ```bash
-wt switch -c wu-<slug-a> --no-cd --no-verify -y
-wt switch -c wu-<slug-b> --no-cd --no-verify -y
+wt switch -c wu-<slug-a> --base wave-<N>-<slug> --no-cd --no-verify -y
+wt switch -c wu-<slug-b> --base wave-<N>-<slug> --no-cd --no-verify -y
 wt list --full   # capture exact worktree paths
 ```
+
+`--base wave-<N>-<slug>` is required: without it `wt switch -c` bases the slice off the default branch (`main`), so the slice would miss everything already on the wave branch (pre-scaffold, earlier-merged slices) and merge back with needless conflicts. Every slice bases off the wave branch's current tip.
 
 Then dispatch one `Agent` per slice **in a single message** for true parallelism. Embed the slice body inline — never tell a subagent to read `.tmp/QP-N.md` or the plan file. The prompt **is** the contract.
 
@@ -297,10 +303,10 @@ is not a measurement. If you want it relaxed, measure it and file a
 
 ## Phase 4 — Merge
 
-`<target-branch>` is **this wave's branch** from "Branch strategy" — never `main`, which is protected. Every slice merges here; the branch reaches `main` only through the Phase 8 PR.
+`<target-branch>` is **this wave's branch** from "Branch strategy" — never `main`, which is protected. Every slice merges here; the branch reaches `main` only through the Phase 8 PR. **Pass the target explicitly** — `wt merge` with no target defaults to the default branch (`main`), which is both wrong here and rejected by the ruleset.
 
 ```bash
-wt merge -C <worktree-path> -y || exit 1
+wt merge -C <worktree-path> <target-branch> -y || exit 1   # <target-branch> = wave-<N>-<slug>, NOT main
 SHA=$(git -C <main-repo-path> rev-parse --short=6 <target-branch>)
 [ -n "$SHA" ] || { echo "SHA resolution produced nothing — QP-<N> NOT tagged" >&2; exit 1; }
 ./target/release/qp tag QP-<N> add "commit:$SHA"
@@ -354,7 +360,7 @@ Dispatch ≤4 critic agents in parallel, one lens each. Reference `.claude/skill
 
 **Auto mode:** act only on Critical findings. Important/Minor/Observation get filed as qp tickets: `qp add "<short>" --tag kind:bug --tag harness:claude-code --description "<finding body>"`. Use `--tag kind:decision` instead of `kind:bug` when the finding is a choice between options rather than a defect — see Phase 1.
 
-**Interactive mode:** triage all findings with the user, then dispatch fix subagents in parallel (one worktree per topic-affinity group via `wt switch -c fix-<slug>`). After merge, mark addressed findings `**Status: FIXED in <sha>**` in the critic file.
+**Interactive mode:** triage all findings with the user, then dispatch fix subagents in parallel (one worktree per topic-affinity group via `wt switch -c fix-<slug> --base wave-<N>-<slug>`, and `wt merge <target> ...` back into the wave branch — same base/target discipline as slices, never `main`). After merge, mark addressed findings `**Status: FIXED in <sha>**` in the critic file.
 
 ## Phase 7 — Wrap
 
