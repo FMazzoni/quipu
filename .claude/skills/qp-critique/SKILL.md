@@ -11,7 +11,7 @@ allowed-tools: Read Glob Grep Bash Edit Write
 ## Hard rules
 
 - [ ] **One lens per agent.** The coordinator dispatched you with exactly one of: correctness / architecture / spec-compliance / UX / perf / API-surface. Stay in your lane — other lenses run in parallel agents.
-- [ ] **No worktree needed.** Findings go to the vault at `$QUIPU_VAULT/critiques/YYYY-MM-DD-HHMMSS-<wave-slug>-<lens>.md`. Read the merged code on `main`.
+- [ ] **No worktree needed.** Findings go to the vault at `$QUIPU_VAULT/critiques/YYYY-MM-DD-HHMMSS-<wave-slug>-<lens>.md`. Read the wave's code on its integration branch (`wave-<N>-<slug>`), which the coordinator names in your prompt — `main` is protected, so the wave has not merged there yet; it is still an open PR.
 - [ ] **Locked decisions are out of scope.** If the plan has a "Locked decisions" section, treat those as pre-decided. Don't dispute them. (You may flag *spec divergence from* a locked decision — that's in-scope correctness.)
 - [ ] **No Co-Authored-By trailer** on any commit you make (you generally make none — you only write to the vault's `critiques/`).
 - [ ] **Friction logging is required** before finishing your ticket (if you were given one).
@@ -28,7 +28,7 @@ allowed-tools: Read Glob Grep Bash Edit Write
 1. Read the plan, especially the **Locked decisions** section.
 2. `git log --oneline <BASE>..<HEAD>` to enumerate commits.
 3. `git diff <BASE>..<HEAD> -- <files>` to see what changed.
-4. Read the changed files at their new state on `main`.
+4. Read the changed files at their new state on the wave's integration branch (not `main` — the wave is still an open PR).
 5. Evaluate strictly through your assigned lens. Resist scope creep into other lenses — those critics exist.
 6. Write findings to `$QUIPU_VAULT/critiques/YYYY-MM-DD-HHMMSS-<wave-slug>-<lens>.md` using the template below.
 7. If ticketed: `./target/release/qp log <TICKET> decision "<friction note>" --auto` then `./target/release/qp complete <TICKET> --as <agent-id>`.

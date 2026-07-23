@@ -13,15 +13,40 @@ You are the **coordinator**. Subagents do all code changes inside `wt`-managed w
 ## Hard rules (read before phasing)
 
 - [ ] Never edit code. Exception: resolve merge conflicts during `wt merge` rebase.
+- [ ] **Never push to `main`.** It is protected (ruleset `protect-main`): direct pushes are rejected server-side, a PR with `lint` green is required, and there is no bypass. A wave lands on its own branch and reaches `main` through a PR you open at Phase 8. You confirm `lint` is green and then **stop** — the human merges (merge commit, never squash — squash rewrites the per-slice SHAs the `commit:` tags name). Fix the branch/PR strategy at kickoff; see "Branch strategy" below.
 - [ ] Never use `isolation: "worktree"` on Agent calls. Always `wt switch -c`.
 - [ ] Never run `cargo test` (workspace-wide) while subagents are active — multiple rustc graphs OOM the machine. Run the single full test pass at wrap-up.
 - [ ] **Never ask a subagent for a full-suite test count.** You own the suite total; they own their filters. See "Do not ask subagents for suite totals" under Phase 3.
 - [ ] No Co-Authored-By trailer, no "Generated with Claude Code" footer on commits.
 - [ ] All other hard rules: see `CLAUDE.md` (leanness, no async, no tracing, guarded state transitions).
 
+## Branch strategy (decide once, at kickoff)
+
+`main` is protected, so every wave reaches it through a PR — never a direct push. Before Phase 0, fix the branch/PR strategy for the **whole run** and do not revisit it per wave:
+
+- **If the invoking prompt names a strategy, obey it silently** — do not ask.
+- **Otherwise, if a human is present, ask once** (then run the rest unattended under the answer):
+  - **one branch, one PR** — every wave in this run lands on a single branch named for the campaign (`<slug>`); one PR merges the whole run to `main` at the end (Phase 8 runs once, after the final wave).
+  - **staged PR per wave** — each wave gets its own `wave-<N>-<slug>` branch and its own PR (Phase 8 runs per wave). Stack them: branch a wave off the previous wave's branch when it depends on that wave's unmerged work, off `main` when it is independent. Read the plan's slice dependencies to decide which.
+- **If fully autonomous (no human to ask), default to `staged PR per wave` and log the choice:** `./target/release/qp log <first-ticket> decision "branch strategy: staged PRs (default — no human at kickoff)" --auto`.
+
+Name branches for humans — `wave-3-embeddings-search`, not `wave-3` — and tag each wave's tickets with its branch so the mapping survives a merge: `./target/release/qp tag <QP-N> add branch:<name>`.
+
+### The wave branch is a worktree; slices fan off it
+
+The wave branch is the **integration worktree** — one branch, checked out in exactly one place (a branch cannot be checked out in two worktrees). Every slice is a *separate* worktree on its *own* branch, created with `--base` pointing at the wave branch, so each slice starts from the wave's actual current state. There is no "worktree off a worktree": a worktree is based on a **commit**, and the wave branch's tip is just a commit. No patches, no snapshots — `--base` gives each slice the real, live state for free.
+
+Create the wave's integration worktree off its base, before Phase 0:
+
+```bash
+wt switch -c wave-<N>-<slug> --base <base>   # base = main, or the prior wave's branch when stacked
+```
+
+`--base` defaults to the default branch (`main`), so it must be passed explicitly whenever the base is a prior wave's branch. Every slice worktree (Phase 3) is then created `--base wave-<N>-<slug>`, and every slice merge (Phase 4) targets `wave-<N>-<slug>` — never `main`, which is protected. Pre-scaffold, slice merges, everything below lands on **this branch**; it reaches `main` only through the Phase 8 PR.
+
 ## Phase 0 — Pre-scaffold (when needed)
 
-When parallel slices will all touch `src/cmd/mod.rs` and `src/main.rs` (i.e. each slice adds a new subcommand), land the structural shape on `main` *first*, in a single coordinator-dispatched scaffold commit. This eliminates the rote add/add conflict pattern.
+When parallel slices will all touch `src/cmd/mod.rs` and `src/main.rs` (i.e. each slice adds a new subcommand), land the structural shape on **the wave branch** *first* (never `main` — it is protected; see "Branch strategy"), in a single coordinator-dispatched scaffold commit. This eliminates the rote add/add conflict pattern.
 
 Scaffold commit contains:
 - empty stub modules (`src/cmd/<new>.rs` with `pub fn run(_a: Args) -> Result<()> { unimplemented!() }`)
@@ -182,10 +207,12 @@ mutation's `IMMEDIATE` transaction — the watch-correctness invariant in
 `--since` is exclusive: `--since 730` starts at event 731.
 
 ```bash
-wt switch -c wu-<slug-a> --no-cd --no-verify -y
-wt switch -c wu-<slug-b> --no-cd --no-verify -y
+wt switch -c wu-<slug-a> --base wave-<N>-<slug> --no-cd --no-verify -y
+wt switch -c wu-<slug-b> --base wave-<N>-<slug> --no-cd --no-verify -y
 wt list --full   # capture exact worktree paths
 ```
+
+`--base wave-<N>-<slug>` is required: without it `wt switch -c` bases the slice off the default branch (`main`), so the slice would miss everything already on the wave branch (pre-scaffold, earlier-merged slices) and merge back with needless conflicts. Every slice bases off the wave branch's current tip.
 
 Then dispatch one `Agent` per slice **in a single message** for true parallelism. Embed the slice body inline — never tell a subagent to read `.tmp/QP-N.md` or the plan file. The prompt **is** the contract.
 
@@ -276,8 +303,10 @@ is not a measurement. If you want it relaxed, measure it and file a
 
 ## Phase 4 — Merge
 
+`<target-branch>` is **this wave's branch** from "Branch strategy" — never `main`, which is protected. Every slice merges here; the branch reaches `main` only through the Phase 8 PR. **Pass the target explicitly** — `wt merge` with no target defaults to the default branch (`main`), which is both wrong here and rejected by the ruleset.
+
 ```bash
-wt merge -C <worktree-path> -y || exit 1
+wt merge -C <worktree-path> <target-branch> -y || exit 1   # <target-branch> = wave-<N>-<slug>, NOT main
 SHA=$(git -C <main-repo-path> rev-parse --short=6 <target-branch>)
 [ -n "$SHA" ] || { echo "SHA resolution produced nothing — QP-<N> NOT tagged" >&2; exit 1; }
 ./target/release/qp tag QP-<N> add "commit:$SHA"
@@ -331,7 +360,7 @@ Dispatch ≤4 critic agents in parallel, one lens each. Reference `.claude/skill
 
 **Auto mode:** act only on Critical findings. Important/Minor/Observation get filed as qp tickets: `qp add "<short>" --tag kind:bug --tag harness:claude-code --description "<finding body>"`. Use `--tag kind:decision` instead of `kind:bug` when the finding is a choice between options rather than a defect — see Phase 1.
 
-**Interactive mode:** triage all findings with the user, then dispatch fix subagents in parallel (one worktree per topic-affinity group via `wt switch -c fix-<slug>`). After merge, mark addressed findings `**Status: FIXED in <sha>**` in the critic file.
+**Interactive mode:** triage all findings with the user, then dispatch fix subagents in parallel (one worktree per topic-affinity group via `wt switch -c fix-<slug> --base wave-<N>-<slug>`, and `wt merge <target> ...` back into the wave branch — same base/target discipline as slices, never `main`). After merge, mark addressed findings `**Status: FIXED in <sha>**` in the critic file.
 
 ## Phase 7 — Wrap
 
@@ -380,3 +409,34 @@ Dispatch ≤4 critic agents in parallel, one lens each. Reference `.claude/skill
 6. Append a session entry at `$QUIPU_VAULT/sessions/YYYY-MM-DD-HHMMSS-<slug>.md` (built / decisions / critic count / next). Use the real wall-clock time the session ends (e.g. `date +%H%M%S`) — do **not** use a daily counter like `000001`.
 7. File deferred bugs as qp tickets (`qp add ... --tag kind:bug`).
 8. Report to user: commit range, test count, decisions made, deferred items.
+
+## Phase 8 — Ship (open the PR; the human merges)
+
+The wave is green on its branch (Phase 7). Get it to `main` through a PR — you never push `main`, and by default you do **not** merge the PR yourself.
+
+```bash
+git -C <main-repo-path> push -u origin wave-<N>-<slug>
+gh pr create --base <pr-base> --head wave-<N>-<slug> \
+  --title "<wave title>" \
+  --body "<tickets shipped, decisions made, test-count delta, leanness gates>"
+```
+
+`<pr-base>` is `main` for an independent wave, or the prior wave's branch for a stacked one — GitHub auto-retargets a stacked PR to `main` when its base merges.
+
+Wait for `lint` to go green, then stop:
+
+```bash
+gh pr checks <pr-number> --watch
+```
+
+Report to the human: `PR #<n> — <title> — lint green, ready to merge`, and **stop there**. The behavior for this repo is *pause for the human* — `main` is public, so a person looks before it lands. When it is merged (by the human, or by you only if explicitly told to auto-merge), it must be a **merge commit**:
+
+```bash
+gh pr merge <pr-number> --merge      # NEVER --squash: squash rewrites every per-slice SHA,
+                                     # so all the Phase 4 commit: tags go stale.
+```
+
+Which mode runs Phase 8 when (see "Branch strategy"):
+
+- **one branch, one PR** — Phase 8 runs **once**, after the final wave's Phase 7; every wave is already on the single branch.
+- **staged PR per wave** — Phase 8 runs **per wave**. In an unattended multi-wave run you keep going: branch wave N+1 off wave N (stacked), run it, open its PR, and collect the open PRs. Report them together at the end as an ordered merge list (base wave first). Do not merge them yourself unless told to.
