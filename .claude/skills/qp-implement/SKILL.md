@@ -151,7 +151,7 @@ The `--auto` flag marks the log entry for `qp decisions --auto-only`. This feeds
 
 `qp log` no longer needs `--as` while you hold an active assignment — it auto-attributes to the running assignee.
 
-**Those two commands are the whole list — do not add a `qp tag ... commit:<sha>` step.** Tagging the ticket with its commit SHA is the coordinator's job, after the merge. `wt merge` squashes *and rebases* before fast-forwarding, so every SHA on your branch is rewritten on the way to the target branch: a `commit:` tag you add here names a commit that never lands and dies at the next GC. `--no-squash` does not save you — it skips the squash but still rebases, so the SHAs are still new. Leave the ticket untagged and complete it normally. `qp tag` works on a `done` ticket, so your completing it costs the coordinator nothing.
+**Those two commands are the whole list — do not tag the ticket with a branch or a commit.** Linking the ticket to where it landed is the coordinator's job: tickets are tagged `branch:<name>` at kickoff, and that tag plus the ticket's timestamps are the whole ticket↔code link (see `wave-orchestrate` Phase 4). You just complete the ticket normally.
 
 ## Reporting back to coordinator
 
@@ -195,4 +195,4 @@ The `--auto` flag marks the log entry for `qp decisions --auto-only`. This feeds
 - Squashing your friction note ("nothing notable") when something *was* notable. The retro reads these.
 - Putting durable knowledge in repo files. Plans, critiques, sessions all live in the vault now (`$QUIPU_VAULT/`). Bugs are qp tickets tagged `kind:bug`.
 - Pulling in tokio/hyper/axum/tracing — see CLAUDE.md.
-- Tagging your ticket `commit:<sha>` from the worktree. The rebase rewrites that SHA; the coordinator tags the real one post-merge.
+- Tagging your ticket with a branch or commit. The coordinator owns the ticket↔code link (`branch:<name>` at kickoff); you just complete the ticket.
