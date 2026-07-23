@@ -6,28 +6,12 @@ description: Execute a wave with qp. Plan tasks, assign in parallel, dispatch su
 ## When to use
 Independent work units that can be parallelized, with a mandatory adversarial-review step.
 
-## The adversarial-review pass is mandatory, not optional
+## Adversarial review — mandatory
 
-After **every** wave lands and before you commit or promote it, spawn a dedicated
-adversarial agent over the wave's diff. This is not a nicety — passing the
-project's own gates (linters, type checks, tests, whatever CI runs) is necessary
-but **insufficient**. The failures that survive the gates are the dangerous ones:
-work that passes every check, exits 0, and is silently wrong. A dedicated
-adversarial read is the only thing that reliably catches them.
-
-Do NOT substitute inline self-review. A wave reviewed only inline ships bugs an
-adversarial agent would have caught — e.g. a config field wired in but read by
-nothing, or an error path that returns the same value as success. Both pass every
-gate.
-
-The order is fixed: **land → run the project's gates → adversarial pass →
-address findings → THEN commit.** Not commit-then-review.
-
-Give the adversarial agent: the exact diff range (`git diff <base>..<head>`), what
-the code is *for* (so it can judge severity), the project's known failure modes,
-and an explicit instruction to rank findings and distinguish "would silently
-produce a wrong result" from "untidy". Tell it to verify claims against the code,
-not trust the implementing agent's report. Read-only; it proposes, you apply.
+- After a wave lands, before you commit: spawn a dedicated adversarial agent over the diff. Inline self-review does not substitute.
+- Gates (lint, types, tests) are necessary but insufficient — the failures that survive them pass every check, exit 0, and are silently wrong: a field wired in but read by nothing, an error path that returns the success value.
+- Order is fixed: **land → gates → adversarial pass → fix → commit** — never commit-then-review.
+- Brief it with the diff range, what the code is *for*, and the known failure modes. It ranks findings, separates "silently wrong" from "untidy", verifies every claim against the code rather than the implementer's report, and only proposes — you apply.
 
 ## Conventions
 
