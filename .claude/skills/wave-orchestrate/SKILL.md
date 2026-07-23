@@ -13,7 +13,7 @@ You are the **coordinator**. Subagents do all code changes inside `wt`-managed w
 ## Hard rules (read before phasing)
 
 - [ ] Never edit code. Exception: resolve merge conflicts during `wt merge` rebase.
-- [ ] **Never push to `main`.** It is protected (ruleset `protect-main`): direct pushes are rejected server-side, a PR with `lint` green is required, and there is no bypass. A wave lands on its own branch and reaches `main` through a PR you open at Phase 8. You confirm `lint` is green and then **stop** — the human merges (merge commit, never squash — squash rewrites the per-slice SHAs the `commit:` tags name). Fix the branch/PR strategy at kickoff; see "Branch strategy" below.
+- [ ] **Never push to `main`.** It is protected (ruleset `protect-main`): direct pushes are rejected server-side, a PR with `lint` green is required, and there is no bypass. A wave lands on its own branch and reaches `main` through a PR you open at Phase 8. You confirm `lint` is green and then **stop** — the human merges. Name branches descriptively (no wave numbers or qp ids) and fix the branch/PR strategy at kickoff; see "Branch strategy" below.
 - [ ] Never use `isolation: "worktree"` on Agent calls. Always `wt switch -c`.
 - [ ] Never run `cargo test` (workspace-wide) while subagents are active — multiple rustc graphs OOM the machine. Run the single full test pass at wrap-up.
 - [ ] **Never ask a subagent for a full-suite test count.** You own the suite total; they own their filters. See "Do not ask subagents for suite totals" under Phase 3.
@@ -27,10 +27,10 @@ You are the **coordinator**. Subagents do all code changes inside `wt`-managed w
 - **If the invoking prompt names a strategy, obey it silently** — do not ask.
 - **Otherwise, if a human is present, ask once** (then run the rest unattended under the answer):
   - **one branch, one PR** — every wave in this run lands on a single branch named for the campaign (`<slug>`); one PR merges the whole run to `main` at the end (Phase 8 runs once, after the final wave).
-  - **staged PR per wave** — each wave gets its own `wave-<N>-<slug>` branch and its own PR (Phase 8 runs per wave). Stack them: branch a wave off the previous wave's branch when it depends on that wave's unmerged work, off `main` when it is independent. Read the plan's slice dependencies to decide which.
+  - **staged PR per wave** — each wave gets its own descriptively-named branch and its own PR (Phase 8 runs per wave). Stack them: branch a wave off the previous wave's branch when it depends on that wave's unmerged work, off `main` when it is independent. Read the plan's slice dependencies to decide which.
 - **If fully autonomous (no human to ask), default to `staged PR per wave` and log the choice:** `./target/release/qp log <first-ticket> decision "branch strategy: staged PRs (default — no human at kickoff)" --auto`.
 
-Name branches for humans — `wave-3-embeddings-search`, not `wave-3` — and tag each wave's tickets with its branch so the mapping survives a merge: `./target/release/qp tag <QP-N> add branch:<name>`.
+Name branches descriptively for the work — `embeddings-search`, never `wave-3` or anything carrying a wave number or qp id. On a public repo the branch and PR names are visible, and those ids are instance-local: they mean nothing to anyone else and reconcile to nothing. The quipu↔branch link is the internal `branch:<name>` tag, not the branch name — at kickoff, once the branch is named, tag every ticket in the wave: `./target/release/qp tag <QP-N> add branch:<name>`. That tag is the durable ticket↔code pointer (see Phase 4); establish it here, once.
 
 ### The wave branch is a worktree; slices fan off it
 
@@ -39,10 +39,10 @@ The wave branch is the **integration worktree** — one branch, checked out in e
 Create the wave's integration worktree off its base, before Phase 0:
 
 ```bash
-wt switch -c wave-<N>-<slug> --base <base>   # base = main, or the prior wave's branch when stacked
+wt switch -c <branch> --base <base>   # <branch> = the descriptive name; base = main, or the prior wave's branch when stacked
 ```
 
-`--base` defaults to the default branch (`main`), so it must be passed explicitly whenever the base is a prior wave's branch. Every slice worktree (Phase 3) is then created `--base wave-<N>-<slug>`, and every slice merge (Phase 4) targets `wave-<N>-<slug>` — never `main`, which is protected. Pre-scaffold, slice merges, everything below lands on **this branch**; it reaches `main` only through the Phase 8 PR.
+`--base` defaults to the default branch (`main`), so it must be passed explicitly whenever the base is a prior wave's branch. Every slice worktree (Phase 3) is then created `--base <branch>`, and every slice merge (Phase 4) targets `<branch>` — never `main`, which is protected. Pre-scaffold, slice merges, everything below lands on **this branch**; it reaches `main` only through the Phase 8 PR.
 
 ## Phase 0 — Pre-scaffold (when needed)
 
@@ -207,12 +207,12 @@ mutation's `IMMEDIATE` transaction — the watch-correctness invariant in
 `--since` is exclusive: `--since 730` starts at event 731.
 
 ```bash
-wt switch -c wu-<slug-a> --base wave-<N>-<slug> --no-cd --no-verify -y
-wt switch -c wu-<slug-b> --base wave-<N>-<slug> --no-cd --no-verify -y
+wt switch -c wu-<slug-a> --base <branch> --no-cd --no-verify -y
+wt switch -c wu-<slug-b> --base <branch> --no-cd --no-verify -y
 wt list --full   # capture exact worktree paths
 ```
 
-`--base wave-<N>-<slug>` is required: without it `wt switch -c` bases the slice off the default branch (`main`), so the slice would miss everything already on the wave branch (pre-scaffold, earlier-merged slices) and merge back with needless conflicts. Every slice bases off the wave branch's current tip.
+`--base <branch>` (the wave branch) is required: without it `wt switch -c` bases the slice off the default branch (`main`), so the slice would miss everything already on the wave branch (pre-scaffold, earlier-merged slices) and merge back with needless conflicts. Every slice bases off the wave branch's current tip.
 
 Then dispatch one `Agent` per slice **in a single message** for true parallelism. Embed the slice body inline — never tell a subagent to read `.tmp/QP-N.md` or the plan file. The prompt **is** the contract.
 
@@ -303,28 +303,13 @@ is not a measurement. If you want it relaxed, measure it and file a
 
 ## Phase 4 — Merge
 
-`<target-branch>` is **this wave's branch** from "Branch strategy" — never `main`, which is protected. Every slice merges here; the branch reaches `main` only through the Phase 8 PR. **Pass the target explicitly** — `wt merge` with no target defaults to the default branch (`main`), which is both wrong here and rejected by the ruleset.
+`<target-branch>` is **this wave's branch** (from "Branch strategy") — a descriptive slug, never `main`, which is protected. Pass it explicitly; `wt merge` with no target defaults to `main`, which is both wrong here and rejected by the ruleset.
 
 ```bash
-wt merge -C <worktree-path> <target-branch> -y || exit 1   # <target-branch> = wave-<N>-<slug>, NOT main
-SHA=$(git -C <main-repo-path> rev-parse --short=6 <target-branch>)
-[ -n "$SHA" ] || { echo "SHA resolution produced nothing — QP-<N> NOT tagged" >&2; exit 1; }
-./target/release/qp tag QP-<N> add "commit:$SHA"
+wt merge -C <worktree-path> <target-branch> -y || exit 1   # target = the wave's descriptive branch, never main
 ```
 
-**Tagging the merged SHA is a required step, not an aside.** Keep it in the same Bash call as the merge so it cannot be skipped — an untagged ticket is an incomplete merge, and Phase 7 checks for exactly this.
-
-**Resolve the SHA explicitly, and check it before tagging.** Do not write `add commit:$(git rev-parse --short=6 HEAD)` as a single chained expression. That form resolves `HEAD` in **your** cwd — not the worktree's, which `wt merge` has already removed — so it is correct only when your checkout happens to be the main repo sitting on the target branch. When it is not, the substitution can produce an empty string and the chain cheerfully tags the ticket `commit:` with no SHA. That is not hypothetical: it happened, the tag sat live on QP-56, and the Phase 7 audit below matched it (`commit:[0-9a-f]*` is happy with zero hex digits) and reported the ticket as correctly tagged. The `-C <main-repo-path> ... <target-branch>` form plus the `-n "$SHA"` guard removes both the cwd ambiguity and the silent-empty outcome.
-
-`qp tag add` now also rejects a name ending in `:` outright, so a bare `commit:` fails loudly even if this guard is bypassed. Treat that as the backstop, not the plan — the guard here is what produces a useful error at the point the SHA was supposed to be resolved.
-
-**Only the coordinator can tag, and only after the merge.** `wt merge` squashes *and rebases* before fast-forwarding, so every SHA on the worktree branch is rewritten on the way to the target branch. `--no-squash` does not change this — it skips the squash but still rebases, so the SHAs are still new. A SHA captured on the branch side, by anyone, names a commit that never lands on the target branch and dies at the next GC. The post-merge SHA is the only one that is real. This is why `qp-implement` forbids subagents from tagging.
-
-`qp tag` works on a `done` ticket. The subagent completing its ticket in its own final steps does not block you — no reopen, no state juggling. Tag it as-is.
-
-The tag uses the namespace `commit:<sha>` so reverse lookup is just `qp list --tag commit:<sha>` — no new commands needed.
-
-For coordinator-direct commits (justfile edits, reactive fixes, doc-only work) that bypass the wave-orchestrate flow: still ticket them. Open a `qp add` retroactively if needed, then `qp tag` with the SHA. The system-of-record stays complete.
+For coordinator-direct commits (justfile edits, reactive fixes, doc-only work) that bypass the wave flow: still ticket them, and tag the ticket `branch:<name>` with the branch you landed them on. The system-of-record stays complete.
 
 Merge order: foundational slice first (data model, types); feature slices that build on it second. If slice B references slice A's APIs, merge A first.
 
@@ -358,9 +343,9 @@ Dispatch ≤4 critic agents in parallel, one lens each. Reference `.claude/skill
 
 ## Phase 6 — Fix
 
-**Auto mode:** act only on Critical findings. Important/Minor/Observation get filed as qp tickets: `qp add "<short>" --tag kind:bug --tag harness:claude-code --description "<finding body>"`. Use `--tag kind:decision` instead of `kind:bug` when the finding is a choice between options rather than a defect — see Phase 1.
+**Auto mode:** act only on Critical findings. Important/Minor/Observation get filed as qp tickets: `qp add "<short>" --tag kind:bug --description "<finding body>"`. Use `--tag kind:decision` instead of `kind:bug` when the finding is a choice between options rather than a defect — see Phase 1.
 
-**Interactive mode:** triage all findings with the user, then dispatch fix subagents in parallel (one worktree per topic-affinity group via `wt switch -c fix-<slug> --base wave-<N>-<slug>`, and `wt merge <target> ...` back into the wave branch — same base/target discipline as slices, never `main`). After merge, mark addressed findings `**Status: FIXED in <sha>**` in the critic file.
+**Interactive mode:** triage all findings with the user, then dispatch fix subagents in parallel (one worktree per topic-affinity group via `wt switch -c fix-<slug> --base <branch>`, and `wt merge <branch> ...` back into the wave branch — same base/target discipline as slices, never `main`). After merge, mark addressed findings `**Status: FIXED in <sha>**` in the critic file.
 
 ## Phase 7 — Wrap
 
@@ -369,15 +354,7 @@ Dispatch ≤4 critic agents in parallel, one lens each. Reference `.claude/skill
    cargo test 2>&1 | grep "^test result"
    ```
 2. Leanness gates: stripped-binary size, `qp --version` cold start, RSS. Confirm under budget (CLAUDE.md).
-3. **Verify every wave ticket carries its `commit:` tag.** Subagents complete their own tickets (see `qp-implement`), so they are already `done` — you are not marking them done, you are auditing that Phase 4 tagged them:
-   ```bash
-   for t in QP-<a> QP-<b>; do
-     printf '%s %s\n' "$t" "$(./target/release/qp show $t | sed -n 1p | grep -o 'commit:[0-9a-f]*')"
-   done
-   ```
-   A blank second column means that ticket is untagged. Two gotchas baked into that line: `sed -n 1p` rather than `head -1`, because `head` closes the pipe early and `qp` panics with `failed printing to stdout: Broken pipe`; and it reads only line 1 (the tag line) because a ticket whose *description* discusses `commit:<sha>` would otherwise match itself.
-   Any ticket without a `commit:` tag means a Phase 4 merge dropped the chained tag. Backfill it now with the SHA that slice actually landed as (`git log --oneline` on the target branch), and treat the miss as friction worth a vault note — hand-backfilling is the failure mode this step exists to catch.
-4. **Surface every decision the wave made.** Agents decide autonomously during
+3. **Surface every decision the wave made.** Agents decide autonomously during
    the wave (Phase 1); this is where the human sees what they decided. Use the
    boundary id you captured in Phase 3:
    ```bash
@@ -402,21 +379,21 @@ Dispatch ≤4 critic agents in parallel, one lens each. Reference `.claude/skill
    why. This is a report, not an approval request; the work merged in Phase 4.
    Anything that reads as "should I have done this?" belongs in a vault
    decision note, not in this list.
-5. Vault notes for any new decision: `$QUIPU_VAULT/decisions/<slug>.md`. If the
+4. Vault notes for any new decision: `$QUIPU_VAULT/decisions/<slug>.md`. If the
    wave reversed an earlier decision, link the two tickets as described in
    `qp-implement` (`qp relation add <new> supersedes <old>`) — the subagent
    normally does this, so here you are just confirming it happened.
-6. Append a session entry at `$QUIPU_VAULT/sessions/YYYY-MM-DD-HHMMSS-<slug>.md` (built / decisions / critic count / next). Use the real wall-clock time the session ends (e.g. `date +%H%M%S`) — do **not** use a daily counter like `000001`.
-7. File deferred bugs as qp tickets (`qp add ... --tag kind:bug`).
-8. Report to user: commit range, test count, decisions made, deferred items.
+5. Append a session entry at `$QUIPU_VAULT/sessions/YYYY-MM-DD-HHMMSS-<slug>.md` (built / decisions / critic count / next). Use the real wall-clock time the session ends (e.g. `date +%H%M%S`) — do **not** use a daily counter like `000001`.
+6. File deferred bugs as qp tickets (`qp add ... --tag kind:bug`).
+7. Report to user: PR link(s), test count, decisions made, deferred items.
 
 ## Phase 8 — Ship (open the PR; the human merges)
 
 The wave is green on its branch (Phase 7). Get it to `main` through a PR — you never push `main`, and by default you do **not** merge the PR yourself.
 
 ```bash
-git -C <main-repo-path> push -u origin wave-<N>-<slug>
-gh pr create --base <pr-base> --head wave-<N>-<slug> \
+git -C <main-repo-path> push -u origin <branch>
+gh pr create --base <pr-base> --head <branch> \
   --title "<wave title>" \
   --body "<tickets shipped, decisions made, test-count delta, leanness gates>"
 ```
@@ -429,11 +406,10 @@ Wait for `lint` to go green, then stop:
 gh pr checks <pr-number> --watch
 ```
 
-Report to the human: `PR #<n> — <title> — lint green, ready to merge`, and **stop there**. The behavior for this repo is *pause for the human* — `main` is public, so a person looks before it lands. When it is merged (by the human, or by you only if explicitly told to auto-merge), it must be a **merge commit**:
+Report to the human: `PR #<n> — <title> — lint green, ready to merge`, and **stop there**. The behavior for this repo is *pause for the human* — `main` is public, so a person looks before it lands.
 
 ```bash
-gh pr merge <pr-number> --merge      # NEVER --squash: squash rewrites every per-slice SHA,
-                                     # so all the Phase 4 commit: tags go stale.
+gh pr merge <pr-number> --merge
 ```
 
 Which mode runs Phase 8 when (see "Branch strategy"):
