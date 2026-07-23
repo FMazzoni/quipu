@@ -307,7 +307,7 @@ Dispatch ≤4 critic agents in parallel, one lens each. Reference `.claude/skill
    ./target/release/qp decisions --since <boundary-id> --auto-only   # agent-made only
    ./target/release/qp list --tag "decision:critical"                # the loud ones
    ```
-   **Use `qp decisions --since`, not `timeline --kind decision`.** The alias grew `--since` (QP-144) and is now strictly the more ergonomic way to write the same query — same clause, same semantics. `--auto-only` composes with `--since`.
+   **Use `qp decisions --since`, not `timeline --kind decision`.** The alias grew `--since` and is now strictly the more ergonomic way to write the same query — same clause, same semantics. `--auto-only` composes with `--since`.
 
    `--since` is **exclusive**: `--since 730` starts at event 731. The Phase 3 boundary is the max id *before* anything was dispatched, so passing it exactly as captured is correct. Do not adjust it: +1 silently drops the wave's first decision, −1 pulls in a pre-wave event that is not yours to report.
 

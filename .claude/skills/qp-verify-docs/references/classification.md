@@ -15,8 +15,9 @@ function that computes readiness`. Verify by reading the code. These rot
 fastest, because refactors move code without changing behaviour.
 
 **Rationale** — why a decision was made. Not verifiable from code. Check it
-against `$QUIPU_VAULT/decisions/` and qp decision events (`qp decisions`), not
-against the source. Leave it alone if it merely sounds outdated.
+against known knowledge sources — `qp decisions`, a knowledge vault, or the
+surrounding context — not against the source. Leave it alone if it merely sounds
+outdated.
 
 **When `$QUIPU_VAULT` is unset or the path does not exist** — the vault is
 external and per-machine, so this is the common case, not an error. Check
