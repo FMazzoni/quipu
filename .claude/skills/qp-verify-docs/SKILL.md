@@ -51,8 +51,9 @@ Work claim by claim, whether targeted or sweeping:
 3. **For each claim, classify** — behavioural, structural, or rationale. This
    decides how you verify it.
 4. **Verify** — trace a behavioural claim to a test or a runnable command, a
-   structural claim by reading the code, rationale against `qp decisions` and
-   the vault.
+   structural claim by reading the code, a rationale claim against known
+   knowledge sources (`qp decisions`, a knowledge vault) or the surrounding
+   context.
 5. **Keep, fix, or cut** — a correct sentence still has to earn its maintenance.
    Fix in the source (`.rs` header or `docs/modules/*.md`), never in
    `target/doc/`.
@@ -86,7 +87,7 @@ than reading the output yourself; do not substitute a narrower command.
 
 `just lint` is safe to run as an agent: it delegates its test step to `just
 test`, which loops the targets one rustc at a time rather than issuing the bare
-`cargo test` that `qp-implement` forbids (QP-167). Run the recipe, not a
+`cargo test` that `qp-implement` forbids. Run the recipe, not a
 hand-rolled subset of it.
 
 If `just lint` fails on something you did not touch, that is a finding: file
