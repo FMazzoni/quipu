@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Structured, observable task substrate for agent orchestration"
-license = "MIT OR Apache-2.0"
+license = "MIT"
+repository = "https://github.com/FMazzoni/quipu"
+readme = "README.md"
 
 [[bin]]
 name = "qp"
