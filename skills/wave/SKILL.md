@@ -1,10 +1,33 @@
 ---
 name: qp-wave
-description: Execute a wave with qp. Plan tasks, assign in parallel, dispatch subagents, critique, loop until clean.
+description: Execute a wave with qp. Plan tasks, assign in parallel, dispatch subagents, adversarial review, loop until clean.
 ---
 
 ## When to use
-Independent work units that can be parallelized, with a critique step.
+Independent work units that can be parallelized, with a mandatory adversarial-review step.
+
+## The adversarial-review pass is mandatory, not optional
+
+After **every** wave lands and before you commit or promote it, spawn a dedicated
+adversarial agent over the wave's diff. This is not a nicety — passing the
+project's own gates (linters, type checks, tests, whatever CI runs) is necessary
+but **insufficient**. The failures that survive the gates are the dangerous ones:
+work that passes every check, exits 0, and is silently wrong. A dedicated
+adversarial read is the only thing that reliably catches them.
+
+Do NOT substitute inline self-review. A wave reviewed only inline ships bugs an
+adversarial agent would have caught — e.g. a config field wired in but read by
+nothing, or an error path that returns the same value as success. Both pass every
+gate.
+
+The order is fixed: **land → run the project's gates → adversarial pass →
+address findings → THEN commit.** Not commit-then-review.
+
+Give the adversarial agent: the exact diff range (`git diff <base>..<head>`), what
+the code is *for* (so it can judge severity), the project's known failure modes,
+and an explicit instruction to rank findings and distinguish "would silently
+produce a wrong result" from "untidy". Tell it to verify claims against the code,
+not trust the implementing agent's report. Read-only; it proposes, you apply.
 
 ## Conventions
 
@@ -42,8 +65,13 @@ qp complete $t --as "wave-$WAVE-agent-$i" --decision "result summary"
 #    (typo'd tag) is a distinct error (exit 4), never a silent instant success.
 qp wait --tag wave:$WAVE --cohort-done --interval-ms 1000 --timeout-secs 1800
 
-# 5) Critique pass (spawn a critic; for each issue):
+# 5) Adversarial pass — MANDATORY, before committing the wave (see top of file).
+#    Spawn a read-only adversarial agent over the wave's diff range. For each
+#    surviving finding, file a task:
 #    qp add "fix: <finding>" --depends-on <reviewed-QP-N> --tag wave:$WAVE --tag kind:critique
+#    Verify the adversarial agent's claims yourself before acting -- it can be wrong
+#    too; today one "eliminates it at zero cost" claim held, another's supporting
+#    detail did not, though its recommended fix was still right.
 
 # 6) Promote-and-loop: critiques that exist are already tasks; if any are ready, re-enter step 2.
 while [ -n "$(qp list --tag wave:$WAVE --tag kind:critique --state ready --json | jq -r '.[].display_id')" ]; do
