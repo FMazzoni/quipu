@@ -1,0 +1,85 @@
+name: pages
+
+# Publish the rustdoc to https://fmazzoni.github.io/quipu/ on every push to main.
+#
+# ONE-TIME MANUAL STEP: repo Settings → Pages → Source must be set to
+# "GitHub Actions". Without it `deploy-pages` fails with "Pages site not found";
+# nothing in this file can enable it.
+#
+# Deliberately separate from ci.yml: this deploys on push to main only, needs
+# `pages: write` + `id-token: write`, and must not run on pull_request (a fork PR
+# would otherwise try to deploy). ci.yml stays the required status check.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time. `cancel-in-progress: false` so a queued deploy of a newer
+# commit does not kill an in-flight one mid-upload and leave the site half-written.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Mirrors `just doc-check` and ci.yml's rustdoc step. `cargo rustdoc --
+      # -D warnings` APPENDS to the `[build] rustdocflags` in .cargo/config.toml;
+      # `RUSTDOCFLAGS="-D warnings" cargo doc` would REPLACE it and silently drop
+      # the --html-after-content injection — the docs would still build, this job
+      # would still pass green, and the published pages would lose the verify
+      # button and the item-table styling. Keep in sync with the justfile.
+      - name: build rustdoc
+        run: cargo rustdoc -- -D warnings
+
+      # cargo emits target/doc/qp/index.html but nothing at target/doc/index.html,
+      # so the artifact would 404 at the site root. docs/assets/landing.html is
+      # that root page; its links are relative to target/doc/.
+      - name: install root landing page
+        run: cp docs/assets/landing.html target/doc/index.html
+
+      # Fail loudly if the injection went missing rather than publishing a
+      # silently-degraded site. `qp-verify` is the button's element id and
+      # `fit-content(28%)` the item-table rule — both come only from
+      # docs/assets/verify-button.html.
+      - name: verify injection survived
+        run: |
+          for needle in 'qp-verify' 'fit-content(28%)'; do
+            if ! grep -qF "$needle" target/doc/qp/index.html; then
+              echo "::error::'$needle' missing from rustdoc output — the --html-after-content injection was dropped"
+              exit 1
+            fi
+          done
+          test -f target/doc/index.html
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/doc
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
