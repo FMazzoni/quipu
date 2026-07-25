@@ -46,7 +46,14 @@ else
 fi
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT INT HUP TERM
+# EXIT does the cleanup. The signal traps only exit — which itself fires the EXIT
+# trap — so cleanup is defined once and the script actually stops. Cleaning up
+# directly from a signal trap would delete $tmp and then resume where it left off,
+# because a handler returns to the interrupted command rather than exiting.
+trap 'rm -rf "$tmp"' EXIT
+trap 'exit 130' INT
+trap 'exit 129' HUP
+trap 'exit 143' TERM
 
 echo "Downloading $asset ..."
 curl -sSfL "$url" -o "$tmp/$asset" || die "download failed: $url"
