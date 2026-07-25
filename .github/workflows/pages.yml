@@ -1,18 +1,24 @@
 name: pages
 
-# Publish the rustdoc to https://fmazzoni.github.io/quipu/ on every push to main.
+# Publish the rustdoc to GitHub Pages. MANUAL TRIGGER ONLY — see below.
 #
-# ONE-TIME MANUAL STEP: repo Settings → Pages → Source must be set to
-# "GitHub Actions". Without it `deploy-pages` fails with "Pages site not found";
-# nothing in this file can enable it.
+# Not wired to `push` on purpose. A published docs site is deferred until quipu
+# has a home of its own (a custom domain, or an org), rather than living under a
+# personal account's github.io alongside unrelated content. Leaving a `push`
+# trigger here would fail on every commit to main with "Pages site not found",
+# so the workflow stays complete but dormant.
 #
-# Deliberately separate from ci.yml: this deploys on push to main only, needs
-# `pages: write` + `id-token: write`, and must not run on pull_request (a fork PR
-# would otherwise try to deploy). ci.yml stays the required status check.
+# TO TURN IT ON: set repo Settings → Pages → Source to "GitHub Actions", then run
+# this workflow from the Actions tab. Nothing here can enable Pages itself. Add a
+# `push: branches: [main]` trigger at that point if you want it automatic. A
+# custom domain needs no repo move: point a DNS CNAME at <user>.github.io and add
+# a CNAME file — the repo can stay exactly where it is.
+#
+# Deliberately separate from ci.yml: it needs `pages: write` + `id-token: write`
+# and must never run on pull_request (a fork PR would try to deploy). ci.yml
+# stays the required status check.
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
