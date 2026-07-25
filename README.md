@@ -2,6 +2,30 @@
 
 Structured, observable task substrate for agent orchestration. Per-project SQLite + small CLI. Patterns (wave, critique-loop, branch-and-evaluate) live in skills, not the binary.
 
+## Install
+
+    curl -sSfL https://raw.githubusercontent.com/FMazzoni/quipu/main/install.sh | sh
+
+Downloads the prebuilt binary for your platform from the latest release, verifies
+its SHA256, and installs it to `~/.local/bin` (override with `QP_INSTALL_DIR`).
+Re-running upgrades in place. Linux and macOS, x86_64 and aarch64; the Linux
+build is statically linked, so it runs on musl distros such as Alpine too.
+
+To read the script before running it:
+
+    curl -sSfL https://raw.githubusercontent.com/FMazzoni/quipu/main/install.sh -o install.sh
+    less install.sh
+    sh install.sh
+
+On macOS, Gatekeeper quarantines unsigned downloads. If the binary is refused,
+clear the attribute: `xattr -d com.apple.quarantine qp`.
+
+From source, if you have a Rust toolchain:
+
+    cargo install --git https://github.com/FMazzoni/quipu
+
+Then `qp init` in a project.
+
 ## Install (dev)
 
 Common workflows are wrapped in a [`justfile`](./justfile):
@@ -108,7 +132,7 @@ mismatch warning above — the guard against filing tickets into the wrong proje
 ## Where next
 
 - [`docs/architecture.md`](./docs/architecture.md) — the state machine, the guarded-transition invariant, and mutators vs projections. Its **Symptom index** (symptom → command → cause) is the place to start when something is stuck.
-- `just docs` — browsable rustdoc; `target/doc/qp/cmd/index.html` orients you per command (lifecycle + module→edge table).
+- `just docs` — browsable rustdoc built locally; `target/doc/qp/cmd/index.html` orients you per command (lifecycle + module→edge table).
 - [`skills/`](./skills) — what `install-skills` installs: `qp-wave` (plan, dispatch, critique, loop), `qp-report-render` (Markdown/HTML from `qp report --json`).
 - [`board/`](./board) — Svelte dashboard over `qp report --json`; `bun install && bun run dev`, see [`board/README.md`](./board/README.md).
 - [`CLAUDE.md`](./CLAUDE.md) — the wave workflow this repo is developed with. A convention, not a feature of the binary.

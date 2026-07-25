@@ -1,0 +1,201 @@
+name: release
+
+# Publishes `qp` binaries to a GitHub Release when a `v*` tag is pushed.
+#
+# ASSET NAMING IS A CONTRACT with `install.sh`. The installer resolves
+# https://github.com/FMazzoni/quipu/releases/latest/download/<asset>, which only
+# works because the asset names carry NO version. Renaming anything here breaks
+# every published install command with a 404 — there is no test spanning the two
+# files, so this comment is the guard rail.
+#
+#   qp-x86_64-unknown-linux-musl.tar.gz    + .sha256
+#   qp-aarch64-unknown-linux-musl.tar.gz   + .sha256
+#   qp-x86_64-apple-darwin.tar.gz          + .sha256
+#   qp-aarch64-apple-darwin.tar.gz         + .sha256
+#   qp-x86_64-pc-windows-msvc.zip          + .sha256
+#
+# CHECKSUM FILE FORMAT IS ALSO A CONTRACT. The installer reads the FIRST
+# whitespace-delimited field as the hash, so a `.sha256` must be hash-first:
+# either `<hash>  <filename>` (sha256sum style) or a bare hash. BSD/`--tag`
+# style — `SHA256 (file) = <hash>` — puts the literal `SHA256` first and makes
+# verification fail. Hence plain `shasum -a 256` on macOS (never `--tag`) and
+# `sha256sum` on Linux; the Windows step lowercases `Get-FileHash` output and
+# emits the same hash-first shape.
+#
+# Linux ships musl ONLY, deliberately: a static-pie musl binary runs on any
+# glibc or musl distro, which lets the installer skip libc detection entirely.
+# `rusqlite` uses `features = ["bundled"]`, so SQLite is compiled from C source
+# and musl needs a musl **C** toolchain — `musl-tools`, not just
+# `rustup target add`. Set only `CC_<target>` to `musl-gcc`; do NOT also set
+# `CARGO_TARGET_..._LINKER=musl-gcc`. Doing so drags in musl-gcc's link specs,
+# which stamp a `PT_INTERP` of `/lib/ld-musl-x86_64.so.1` onto an otherwise
+# static binary — it then fails with "No such file or directory" on every
+# machine without musl installed, which is the exact audience this target is
+# for. Leaving the linker alone lets rustc use its self-contained musl objects
+# and produces a true static-pie. (Verified locally on x86_64.)
+#
+# Binaries are stripped by `[profile.release] strip = true` in Cargo.toml — no
+# explicit strip step, and none should be added.
+#
+# macOS artifacts are unsigned and un-notarized by design; the Gatekeeper
+# workaround is documented in the README.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Fail fast on tag/Cargo.toml drift, before burning five build jobs.
+  verify-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: tag matches Cargo.toml version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          # First `version = "..."` in Cargo.toml is the [package] one.
+          crate=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          echo "tag=$tag cargo=$crate"
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag v$tag does not match Cargo.toml version $crate"
+            exit 1
+          fi
+
+  build:
+    needs: verify-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            asset: qp-x86_64-unknown-linux-musl.tar.gz
+          # Native ARM runner rather than a cross toolchain: bundled SQLite
+          # means cross-compiling would need an aarch64 musl *C* cross-compiler.
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            asset: qp-aarch64-unknown-linux-musl.tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-13 # Intel runner
+            asset: qp-x86_64-apple-darwin.tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-14 # Apple silicon runner
+            asset: qp-aarch64-apple-darwin.tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            asset: qp-x86_64-pc-windows-msvc.zip
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # musl-tools ships musl-gcc, which the `cc` crate needs to compile
+      # bundled SQLite against musl headers. See the header note on why the
+      # linker is deliberately NOT overridden.
+      - name: install musl C toolchain
+        if: endsWith(matrix.target, '-linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: build
+        shell: bash
+        run: cargo build --release --locked --target ${{ matrix.target }}
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+
+      # A binary that cannot open a database is not a release artifact. Runs
+      # only where the runner is the same arch as the target, which is all of
+      # them — no cross-compilation in this matrix.
+      - name: smoke test
+        shell: bash
+        run: |
+          # Not `[ ... ] && bin=...` — the shell runs with `set -e`, so a false
+          # test would exit the step non-zero on every non-Windows target.
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            bin="target/${{ matrix.target }}/release/qp.exe"
+          else
+            bin="target/${{ matrix.target }}/release/qp"
+          fi
+          "$bin" --version
+          work=$(mktemp -d)
+          QP_DB="$work/t.db" "$bin" init
+          QP_DB="$work/t.db" "$bin" add "release smoke test"
+          QP_DB="$work/t.db" "$bin" list
+
+      # Unix: tar.gz with the bare `qp` at the archive root.
+      - name: package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          asset='${{ matrix.asset }}'
+          tar -czf "$asset" -C 'target/${{ matrix.target }}/release' qp
+          # Hash-first format — see the checksum contract at the top of this
+          # file. Never add `--tag` to shasum; it emits BSD style and the
+          # installer's `cut` picks up the literal "SHA256".
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            shasum -a 256 "$asset" > "$asset.sha256"
+          else
+            sha256sum "$asset" > "$asset.sha256"
+          fi
+          cat "$asset.sha256"
+
+      # Windows: zip with the bare `qp.exe` at the archive root.
+      - name: package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $asset = '${{ matrix.asset }}'
+          Compress-Archive -Path 'target/${{ matrix.target }}/release/qp.exe' -DestinationPath $asset -Force
+          # Same hash-first contract as the unix branch. Get-FileHash returns
+          # uppercase hex; lowercase it so the file matches sha256sum output
+          # byte for byte.
+          $hash = (Get-FileHash -Algorithm SHA256 -Path $asset).Hash.ToLower()
+          Set-Content -Path "$asset.sha256" -Value "$hash  $asset" -Encoding ascii
+          Get-Content "$asset.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: list assets
+        run: ls -l dist
+
+      # `gh` is preinstalled on the runner, so no third-party action is in the
+      # path that mints the release.
+      - name: create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

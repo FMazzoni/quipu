@@ -1698,6 +1698,63 @@ fn install_skills_symlinks_into_target() {
     assert!(target.path().join("qp-wave/SKILL.md").exists());
 }
 
+/// With no usable source root the embedded snapshot is written out.
+///
+/// This is the distributed-binary case: `current_exe()` derives a `skills/`
+/// that does not exist, which used to be a hard failure for every downloaded
+/// or `cargo install`ed `qp`.
+#[test]
+fn install_skills_writes_embedded_snapshot_without_a_source_root() {
+    let target = tempfile::tempdir().unwrap();
+    // The binary must live outside the checkout, or `current_exe()` derives the
+    // repo's own skills/ and we would be testing live mode again.
+    let bin_dir = tempfile::tempdir().unwrap();
+    let bin = bin_dir.path().join("qp");
+    std::fs::copy(assert_cmd::cargo::cargo_bin("qp"), &bin).unwrap();
+
+    let out = Command::new(&bin)
+        .env_remove("QP_SKILLS_SRC")
+        .args([
+            "install-skills",
+            "--target",
+            target.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let out = String::from_utf8(out).unwrap();
+
+    assert!(out.contains("embedded"), "mode not named in output: {out}");
+    for skill in ["qp-wave", "qp-report-render"] {
+        let p = target.path().join(skill).join("SKILL.md");
+        assert!(p.is_file(), "missing {}", p.display());
+        assert!(!p.parent().unwrap().is_symlink(), "{skill} must be a copy");
+        assert!(
+            std::fs::read_to_string(&p).unwrap().contains("---"),
+            "{skill} body looks empty"
+        );
+    }
+}
+
+/// An explicit `QP_SKILLS_SRC` that points nowhere fails instead of silently
+/// falling back to the snapshot.
+#[test]
+fn install_skills_rejects_a_bogus_explicit_source_root() {
+    let target = tempfile::tempdir().unwrap();
+    Command::cargo_bin("qp")
+        .unwrap()
+        .env("QP_SKILLS_SRC", "/nonexistent-qp-skills-src")
+        .args([
+            "install-skills",
+            "--target",
+            target.path().to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+}
+
 #[test]
 fn install_skills_fails_hard_when_home_unset_and_no_target() {
     let src = tempfile::tempdir().unwrap();
