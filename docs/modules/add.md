@@ -11,6 +11,26 @@ against already-finished prerequisites emits one event saying `ready` rather tha
 two that contradict each other. `add_with_deps_starts_pending_then_unblocks`
 covers the case where the deps are genuinely open.
 
+## `--depends-on` and `--part-of` point opposite ways
+
+Both write `dep` rows and both concern the new task, but they put it on opposite
+ends of the edge:
+
+- `--depends-on X` — the new task waits for `X`. The new task is the depender,
+  and starts `pending`.
+- `--part-of X` — `X` waits for the new task, because the new task is one of the
+  pieces `X` is made of. `X` is the depender; the new task is unaffected and
+  starts `ready`.
+
+So `--part-of` can demote the task it *names*, and never the task it creates.
+Getting it backwards produces a graph that looks plausible and rolls up exactly
+wrong, which is why `add_part_of_attaches_to_a_container` pins it down.
+
+The container is the row being written, so its owner gates the write: `--as`
+must match when the container is `assigned` or `running`. Linking still cannot
+demote a `running` container — the guarded `UPDATE` matches `ready` only — so
+filing a slice never yanks work out of a live agent's hands.
+
 ## Dep resolution and cycle checking
 
 Dependency references are resolved before the transaction opens, so a typo'd id

@@ -54,6 +54,26 @@ Raw `cargo install --path .` works too; the `justfile` is just a shortcut layer.
     qp status
     qp watch
 
+## Structure: what blocks what, what is part of what
+
+Both are `dep` edges and both make the depender wait, but they say different
+things and behave differently:
+
+    qp depends QP-3 --on QP-2               # QP-2 must finish before QP-3 starts
+    qp contains QP-4 QP-1 QP-2 QP-3         # QP-1..3 are the pieces of QP-4
+    qp add "slice D" --part-of QP-4         # same, at creation time
+
+A container is not ready while anything inside it is open, so it promotes to
+`ready` exactly when its last piece lands — that is a "this is finished, wrap it
+up" signal, not new work. Containment nests in `qp tree`; blocking renders as an
+annotation.
+
+The difference that matters when scheduling: a blocker on a *container*
+propagates down and freezes everything inside it, at any depth, while a blocker
+on one piece leaves its siblings dispatchable. Where you attach the edge is the
+whole of the control. If something is `pending` with an empty `blocked_by`,
+`qp show` reports the culprit as `frozen_by`.
+
 ## Tags and relations
 
     qp tag QP-1 add kind:critique           # flat label
@@ -70,7 +90,8 @@ Raw `cargo install --path .` works too; the `justfile` is just a shortcut layer.
 ## Machine-readable output
 
 Every mutating command (`add`, `assign`, `claim`, `complete`, `cancel`, `abandon`,
-`reclaim`, `block`, `depends`, `edit`, `log`, `tag`, `relation`, `init`) accepts
+`reclaim`, `block`, `depends`, `contains`, `edit`, `log`, `tag`, `relation`, `init`)
+accepts
 `--json` and emits a bare JSON object on success (no `{"ok":true,...}` wrapper —
 success is already disjoint from error by stream and exit code) carrying the
 canonical `display_id`. `qp block --json`, for instance, returns the newly
