@@ -61,13 +61,15 @@ impl Outcome for Created {
 /// - `--depends-on X` — the new task waits for `X`. New task is the depender,
 ///   and starts `pending`.
 /// - `--part-of X` — `X` waits for the new task, because the new task is one of
-///   the things `X` is made of. `X` is the depender; the new task is unaffected
-///   and starts `ready`.
+///   the things `X` is made of. `X` is the depender.
 ///
-/// So `--part-of` can demote the task it names, and never the task it creates.
-/// Getting this backwards produces a graph that looks plausible and rolls up
-/// exactly wrong, which is why it is spelled out here and pinned by
+/// So `--part-of` puts the *named* task on the waiting end. Getting this
+/// backwards produces a graph that looks plausible and rolls up exactly wrong,
+/// which is why it is spelled out here and pinned by
 /// `add_part_of_attaches_to_a_container` in `tests/cli.rs`.
+///
+/// The new task is not always unaffected: attaching it to a container that is
+/// itself blocked puts it inside a frozen subtree, so it arrives `pending`.
 pub fn run(db_path: &std::path::Path, a: AddArgs) -> Result<()> {
     let mut conn = db::open(db_path)?;
     // Pre-resolve deps outside tx; errors early.

@@ -17,9 +17,15 @@ nothing.
 
 ## Demotion on add, promotion on rm
 
-Adding an edge can only ever *demote*, and removing one can only ever *promote*.
-That asymmetry is why the two branches look so different, and why the outcome's
-`promoted` field is always `false` on add.
+For the task named on the command line, adding an edge can only ever *demote* and
+removing one can only ever *promote*. That asymmetry is why the two branches look
+so different, and why the outcome's `promoted` field is always `false` on add.
+
+It does not extend to the rest of the graph. An add can reclassify an existing
+`contains` edge to `blocks`, which takes everything under it *out* of the frozen
+set — so an add can free work elsewhere, and both reconciliation sweeps run on
+both branches. Assuming otherwise left tasks stranded `pending` with nothing on
+the ticket to explain it, until an unrelated later command happened to sweep.
 
 The demotion is itself a guarded `UPDATE` with the unresolved-dep predicate
 inline: it matches only a `ready` task that now genuinely has an open

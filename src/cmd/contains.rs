@@ -28,24 +28,49 @@ pub struct ContainsArgs {
 #[derive(Serialize)]
 struct ContainsOutcome {
     display_id: String,
+    /// Every child named on the command line, in the order given.
     children: Vec<String>,
     op: &'static str,
-    /// Children whose edge was already in the requested shape. Reported rather
-    /// than hidden so a re-run reads as "nothing to do" instead of as new work.
+    /// The children this call actually linked or released.
+    changed: Vec<String>,
+    /// Children this call did nothing to, because the edge was already in the
+    /// requested shape or (on `--rm`) was not a containment edge at all.
+    /// Reported rather than hidden so a re-run reads as "nothing to do".
     unchanged: Vec<String>,
 }
 impl Outcome for ContainsOutcome {
     fn human(&self) -> String {
+        // Name only what changed. Printing the full argument list next to
+        // "released" claimed the release of edges that were never touched —
+        // including live `blocks` edges, which `--rm` does not remove — and the
+        // trailing "(… already)" read as "already released" rather than
+        // "untouched". A script checking the exit code saw success either way.
         let verb = if self.op == "rm" {
             "released"
         } else {
             "contains"
         };
-        let mut s = format!("{} {} {}", self.display_id, verb, self.children.join(", "));
-        if !self.unchanged.is_empty() {
-            s.push_str(&format!(" ({} already)", self.unchanged.join(", ")));
+        let mut parts = Vec::new();
+        if !self.changed.is_empty() {
+            parts.push(format!(
+                "{} {} {}",
+                self.display_id,
+                verb,
+                self.changed.join(", ")
+            ));
         }
-        s
+        if !self.unchanged.is_empty() {
+            let noun = if self.op == "rm" {
+                "no containment edge"
+            } else {
+                "already"
+            };
+            parts.push(format!("{}: {}", self.unchanged.join(", "), noun));
+        }
+        if parts.is_empty() {
+            return format!("{} unchanged", self.display_id);
+        }
+        parts.join("; ")
     }
 }
 
@@ -83,44 +108,55 @@ pub fn run(db_path: &std::path::Path, a: ContainsArgs) -> Result<()> {
         .map(|c| id::resolve_full(&conn, c))
         .collect::<Result<Vec<_>>>()?;
 
-    let unchanged = db::with_tx(&mut conn, |tx| -> Result<Vec<String>> {
-        db::require_edge_owner(tx, parent.id, &parent.display_id, a.agent.as_deref())?;
-        let mut unchanged = Vec::new();
-        for child in &children {
-            if a.rm {
-                let n = tx.execute(
-                    "DELETE FROM dep WHERE task_id = ? AND depends_on_task_id = ? AND mode = ?",
-                    rusqlite::params![parent.id, child.id, db::MODE_CONTAINS],
-                )?;
-                if n == 0 {
-                    unchanged.push(child.display_id.clone());
-                    continue;
-                }
-                db::insert_event(
+    let (changed, unchanged) =
+        db::with_tx(&mut conn, |tx| -> Result<(Vec<String>, Vec<String>)> {
+            db::require_edge_owner(tx, parent.id, &parent.display_id, a.agent.as_deref())?;
+            let mut changed = Vec::new();
+            let mut unchanged = Vec::new();
+            for child in &children {
+                if a.rm {
+                    let n = tx.execute(
+                        "DELETE FROM dep WHERE task_id = ? AND depends_on_task_id = ? AND mode = ?",
+                        rusqlite::params![parent.id, child.id, db::MODE_CONTAINS],
+                    )?;
+                    if n == 0 {
+                        unchanged.push(child.display_id.clone());
+                        continue;
+                    }
+                    changed.push(child.display_id.clone());
+                    db::insert_event(
+                        tx,
+                        Some(parent.id),
+                        "dep_removed",
+                        a.agent.as_deref(),
+                        Some(
+                            &serde_json::json!({"on": child.display_id, "mode": db::MODE_CONTAINS}),
+                        ),
+                    )?;
+                } else if db::link_dep(
                     tx,
-                    Some(parent.id),
-                    "dep_removed",
+                    parent.id,
+                    &parent.display_id,
+                    child.id,
+                    &child.display_id,
+                    db::MODE_CONTAINS,
                     a.agent.as_deref(),
-                    Some(&serde_json::json!({"on": child.display_id, "mode": db::MODE_CONTAINS})),
-                )?;
-            } else if !db::link_dep(
-                tx,
-                parent.id,
-                &parent.display_id,
-                child.id,
-                &child.display_id,
-                db::MODE_CONTAINS,
-                a.agent.as_deref(),
-            )? {
-                unchanged.push(child.display_id.clone());
+                )? {
+                    changed.push(child.display_id.clone());
+                } else {
+                    unchanged.push(child.display_id.clone());
+                }
             }
-        }
-        // Removing the last open child can make the container ready; adding one
-        // can never promote anything, and `refresh_ready` only ever promotes, so
-        // running it on both paths costs a query and keeps the paths symmetric.
-        db::refresh_ready_logged(tx, a.agent.as_deref(), "contains_rm")?;
-        Ok(unchanged)
-    })?;
+            // Removing the last open child can make the container ready; adding one
+            // can never promote anything, and `refresh_ready` only ever promotes, so
+            // running it on both paths costs a query and keeps the paths symmetric.
+            db::refresh_ready_logged(
+                tx,
+                a.agent.as_deref(),
+                if a.rm { "contains_rm" } else { "contains" },
+            )?;
+            Ok((changed, unchanged))
+        })?;
 
     emit(
         a.json,
@@ -128,6 +164,7 @@ pub fn run(db_path: &std::path::Path, a: ContainsArgs) -> Result<()> {
             display_id: parent.display_id,
             children: children.into_iter().map(|c| c.display_id).collect(),
             op: if a.rm { "rm" } else { "add" },
+            changed,
             unchanged,
         },
     )

@@ -19,12 +19,16 @@ ends of the edge:
 - `--depends-on X` — the new task waits for `X`. The new task is the depender,
   and starts `pending`.
 - `--part-of X` — `X` waits for the new task, because the new task is one of the
-  pieces `X` is made of. `X` is the depender; the new task is unaffected and
-  starts `ready`.
+  pieces `X` is made of. `X` is the depender.
 
-So `--part-of` can demote the task it *names*, and never the task it creates.
-Getting it backwards produces a graph that looks plausible and rolls up exactly
-wrong, which is why `add_part_of_attaches_to_a_container` pins it down.
+So `--part-of` puts the *named* task on the waiting end. Getting it backwards
+produces a graph that looks plausible and rolls up exactly wrong, which is why
+`add_part_of_attaches_to_a_container` pins the container's state down.
+
+The new task usually starts `ready`, but not always: if `X` is itself blocked,
+the new task is inside a frozen container and arrives `pending`. Creating a task
+can therefore land it straight into a freeze it had no part in
+(`a_slice_added_to_a_frozen_wave_arrives_frozen`).
 
 The container is the row being written, so its owner gates the write: `--as`
 must match when the container is `assigned` or `running`. Linking still cannot
