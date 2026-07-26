@@ -5190,13 +5190,23 @@ fn add_part_of_attaches_to_a_container() {
         .stdout(contains("\"state\":\"pending\""));
 }
 
-/// SPEC — UNDECIDED. Should a container's blockers gate its contents?
-/// Today they do not: a wave blocked by a bare ticket still has dispatchable
-/// slices, so the blocking edge delays only the wrap-up signal. Propagating is
-/// arguably correct but makes readiness non-local and assumes every slice needs
-/// every prerequisite. Do NOT un-ignore until that decision lands.
+/// SPEC: a container's blockers gate its contents.
+///
+/// DECIDED. Where the blocker is attached is the control:
+///   - on the wave  -> "nothing in this wave starts until X" - freezes every slice
+///   - on a slice   -> only that slice waits; siblings run (already true today)
+/// Both are wanted, and having both means neither is a compromise - if only one
+/// slice needed the prerequisite you would attach it there instead.
+///
+/// This makes `dep.mode` load-bearing for BEHAVIOUR, not just display: walking up
+/// from a slice requires knowing which of the container's edges are containment
+/// and which are blocking. With one undifferentiated edge type you would walk
+/// everything (wrong) or nothing (today). So mode ships first, propagation on top.
+///
+/// Implementation note: readiness stops being local - `refresh_ready` must also
+/// check ancestors via a recursive CTE, the same shape `would_cycle` already uses.
 #[test]
-#[ignore = "spec: UNDECIDED — blocker propagation through containment"]
+#[ignore = "spec: needs dep.mode, then propagation in refresh_ready"]
 fn slices_of_a_blocked_wave_are_not_dispatchable() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
