@@ -53,9 +53,22 @@ pub fn run(db_path: &std::path::Path, a: ShowArgs) -> Result<()> {
         .collect::<Result<_, _>>()?;
     tags.sort();
 
+    // Three lists, not one. All three are `dep` rows, and containment keeps a
+    // container out of `ready` exactly as a blocker does — but rendering a wave
+    // as "blocked by" the slices it is made of describes the graph wrongly.
+    // `blocked_by` is what stops this ticket, `contains` is what it is made of,
+    // `part_of` is what it belongs to.
     let blocked_by = store::unresolved_blockers_by_task(&conn, &[tid])?
         .remove(&tid)
         .unwrap_or_default();
+    let contains = store::contents_by_task(&conn, &[tid])?
+        .remove(&tid)
+        .unwrap_or_default();
+    let part_of = store::containers_of(&conn, tid)?;
+    // Why a `pending` task with no blockers of its own is still not workable.
+    // Without this the ticket shows `pending`, an empty `blocked_by`, and no
+    // way to find the prerequisite that is actually holding it.
+    let frozen_by = store::frozen_by(&conn, tid)?;
 
     // Every event, newest first. The query is deliberately unbounded: `--json`
     // emits all of them (see `report --ticket` for the same contract), and the
@@ -110,6 +123,11 @@ pub fn run(db_path: &std::path::Path, a: ShowArgs) -> Result<()> {
             "agent": agent,
             "tags": tags,
             "blocked_by": blocked_by,
+            "contains": contains,
+            "part_of": part_of,
+            "frozen_by": frozen_by.iter().map(|(container, blocker)| {
+                serde_json::json!({"container": container, "blocker": blocker})
+            }).collect::<Vec<_>>(),
             "last_event": last_event,
             "recent_events": recent_events,
         });
@@ -158,8 +176,17 @@ pub fn run(db_path: &std::path::Path, a: ShowArgs) -> Result<()> {
     if !tags.is_empty() {
         println!("  tags: {}", tags.join(", "));
     }
+    if !part_of.is_empty() {
+        println!("  part_of: {}", part_of.join(", "));
+    }
+    if !contains.is_empty() {
+        println!("  contains: {}", contains.join(", "));
+    }
     if !blocked_by.is_empty() {
         println!("  blocked_by: {}", blocked_by.join(", "));
+    }
+    for (container, blocker) in &frozen_by {
+        println!("  frozen_by: {} (blocking {})", blocker, container);
     }
 
     if let Some(d) = description.as_deref().filter(|s| !s.is_empty()) {

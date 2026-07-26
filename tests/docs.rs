@@ -24,9 +24,9 @@
 //! on `qp/index.html` and drifted apart in content (QP-169). Reintroducing an
 //! exemption needs a rationale that survives looking at the rendered page.
 //!
-//! Asymmetry worth knowing: rule 3 is only checkable in one direction. Two
-//! modules — `status` and `tree`, the set `POINTERLESS_MODULES` pins — are
-//! correctly one-line with no `.md` and no pointer. Nothing in the source
+//! Asymmetry worth knowing: rule 3 is only checkable in one direction. One
+//! module — `status`, the set `POINTERLESS_MODULES` pins — is correctly
+//! one-line with no `.md` and no pointer. Nothing in the source
 //! distinguishes "correctly single-line" from "detail was lost on the way
 //! here", so this test catches prose that should have moved out and never
 //! catches prose that should have existed.
@@ -279,7 +279,7 @@ fn item_docs_follow_convention() {
 ///
 /// Every other `.rs` under `src/` carries one. Kept as a list so the
 /// module-header note above cannot drift from the tree again.
-const POINTERLESS_MODULES: &[&str] = &["src/cmd/status.rs", "src/cmd/tree.rs"];
+const POINTERLESS_MODULES: &[&str] = &["src/cmd/status.rs"];
 
 /// Rule 9 — the set of pointerless modules is the one this file documents.
 ///

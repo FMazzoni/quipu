@@ -343,7 +343,12 @@ fn read_project_uuid(path: &Path) -> Result<Option<String>> {
 /// `schema.sql` without a bump reaches freshly-initialised stores only and
 /// silently never reaches anyone's real database. QP-142's partial unique index
 /// took this from "2" to "3" for exactly that reason.
-pub const SCHEMA_VERSION: &str = "3";
+///
+/// "4" adds `dep.mode`. A bump alone was still not enough there: re-running
+/// `CREATE TABLE IF NOT EXISTS dep` is a no-op on a store that already has the
+/// table, so the new column needs the explicit `ALTER` in
+/// [`add_missing_columns`].
+pub const SCHEMA_VERSION: &str = "4";
 
 /// Open the connection and set pragmas.
 ///
@@ -364,6 +369,71 @@ fn open_conn(path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "foreign_keys", true)?;
     conn.pragma_update(None, "busy_timeout", 5000)?;
     Ok(conn)
+}
+
+/// Apply the `ALTER TABLE` steps that `schema.sql` structurally cannot.
+///
+/// Every statement in `schema.sql` is `CREATE ... IF NOT EXISTS`, which is why
+/// the file is safe to re-run — and also why it can only ever *add tables and
+/// indexes*. A column added to an existing `CREATE TABLE` body reaches freshly
+/// initialized stores and nobody else, silently, because the `IF NOT EXISTS`
+/// makes the whole statement a no-op wherever the table is already there. Any
+/// column added to a table that shipped in an earlier `SCHEMA_VERSION` needs a
+/// matching entry here.
+///
+/// Runs on *every* open, not just on a version mismatch, and each step probes
+/// `pragma_table_info` rather than trusting the stamp. Gating it on the version
+/// would leave a store whose stamp is *ahead* of its schema permanently broken:
+/// nothing would ever look at it again, every command would fail on the missing
+/// column, and `qp init` — the obvious thing to try — would report success while
+/// repairing nothing. Ungated, any command heals it. The cost is one indexed
+/// pragma read per invocation, which is noise against the cold-start budget.
+///
+/// # Concurrency
+///
+/// The probe and the `ALTER` cannot be made atomic without holding the write
+/// lock across both, so this does not try. SQLite has no
+/// `ADD COLUMN IF NOT EXISTS`, and *tolerating* `duplicate column name` is the
+/// idempotent form: every racing process reads "absent", one wins the lock, and
+/// the losers observe that the column they wanted now exists. That is success,
+/// not failure.
+///
+/// Getting this wrong is not theoretical. The first version probed and then
+/// raised, so the first command run after an upgrade — which in a wave is
+/// several processes at once — failed in all but one process, as an untyped
+/// `internal` error no calling agent could retry on. Single-process testing
+/// cannot see it.
+fn add_missing_columns(conn: &Connection) -> Result<()> {
+    // (table, column, full DDL fragment). SQLite requires an ADD COLUMN default
+    // to be a constant, so `NOT NULL DEFAULT 'blocks'` is legal and backfills
+    // every existing row in place.
+    const ADDITIONS: &[(&str, &str, &str)] =
+        &[("dep", "mode", "mode TEXT NOT NULL DEFAULT 'blocks'")];
+    for (table, column, ddl) in ADDITIONS {
+        let present: bool = conn
+            .query_row(
+                "SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2",
+                rusqlite::params![table, column],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some();
+        if present {
+            continue;
+        }
+        match conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {ddl}")) {
+            Ok(()) => {}
+            // Someone else added it between the probe and here. Match on the
+            // message because SQLite reports this as a generic `SQLITE_ERROR`
+            // with no distinguishing extended code.
+            Err(e) if e.to_string().contains("duplicate column name") => {}
+            Err(e) => {
+                return Err(anyhow::Error::from(e))
+                    .with_context(|| format!("adding {table}.{column}"))
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Bring the schema up to date, keyed off the stamped `schema_version`.
@@ -427,6 +497,10 @@ fn migrate(conn: &Connection, prefix: Option<&str>) -> Result<Option<String>> {
             rusqlite::params![SCHEMA_VERSION],
         )?;
     }
+    // After the batch, so the tables exist on a fresh store — and outside the
+    // version gate, so a store whose stamp is ahead of its schema still gets
+    // healed instead of being skipped forever. See `add_missing_columns`.
+    add_missing_columns(conn)?;
     Ok(current)
 }
 
@@ -604,24 +678,185 @@ pub fn insert_event(
 /// unblocks its dependents rather than stranding them, which is the behaviour
 /// `cancel_terminates_task_unblocks_dependents` in `tests/cli.rs` pins down.
 ///
+/// A task is also held back while anything containing it is blocked, which is
+/// what [`FROZEN`] computes. Readiness is therefore no longer a local property
+/// — a slice can be individually unblocked and still not workable.
+///
 /// Set-based and idempotent by construction: it sweeps the whole table, so
 /// callers never work out *which* tasks a change might have unblocked, and
 /// calling it twice is free. It only ever promotes — nothing here demotes a
 /// task, so running it at the wrong moment costs a query, not correctness.
+/// [`demote_frozen`] is the other half.
 pub fn refresh_ready(tx: &Transaction) -> Result<()> {
     tx.execute(
-        "UPDATE task
-            SET state = 'ready'
-          WHERE state = 'pending'
-            AND NOT EXISTS (
-              SELECT 1 FROM dep d
-              JOIN task t2 ON t2.id = d.depends_on_task_id
-              WHERE d.task_id = task.id
-                AND t2.state NOT IN ('done','cancelled')
-            )",
+        &format!(
+            "{FROZEN}
+             UPDATE task
+                SET state = 'ready'
+              WHERE state = 'pending'
+                AND NOT EXISTS (
+                  SELECT 1 FROM dep d
+                  JOIN task t2 ON t2.id = d.depends_on_task_id
+                  WHERE d.task_id = task.id
+                    AND t2.state NOT IN ('done','cancelled')
+                )
+                AND id NOT IN (SELECT id FROM frozen)"
+        ),
         [],
     )?;
     Ok(())
+}
+
+/// Every task held back by a blocker on something that contains it.
+///
+/// A `WITH RECURSIVE` clause defining `frozen(id)`, meant to be prefixed to a
+/// statement that then selects from it. It is written as a standalone set
+/// rather than a correlated subquery on purpose: SQLite will not let a CTE
+/// reference the row of an enclosing `UPDATE`, and computing the whole set once
+/// keeps both callers set-based and idempotent, matching how every other
+/// transition in this module works.
+///
+/// Two rules, and the second is the entire feature:
+///
+/// 1. A task with an unresolved *blocking* dep is frozen. This is the seed, and
+///    it is redundant with the plain readiness check — the same tasks are held
+///    back either way — but it is what the recursion needs to start from.
+/// 2. Anything *contained* by a frozen task is frozen, transitively.
+///
+/// So a blocker attached to a wave freezes every slice inside it, at any depth,
+/// while a blocker attached to one slice leaves its siblings alone. Where the
+/// blocker is attached is the whole of the control, which is why there is no
+/// setting to turn this off: a project-level toggle would make the same graph
+/// mean different things in different stores, and a dashboard reading
+/// `report --json` could not interpret an edge without also knowing the toggle.
+///
+/// Only `contains` edges are followed downward. Following `blocks` edges would
+/// mean "X blocks the wave" also froze everything the wave merely waits on,
+/// which is a different and unwanted claim.
+///
+/// **A terminal container freezes nothing.** Every node entering the set is
+/// checked for `done`/`cancelled`, in both arms, so cancelling a wave releases
+/// its slices and a cancelled sub-wave stops the freeze from passing through it.
+/// Without that check, `qp cancel` on a container stranded its contents
+/// permanently — the exact opposite of the rule [`refresh_ready`] states, where
+/// cancelling a blocker unblocks its dependents rather than stranding them. The
+/// readiness side had always honoured it; containment did not, and recovery
+/// meant knowing to run `qp contains --rm` on a dead wave.
+///
+/// `UNION` rather than `UNION ALL` is load-bearing: it dedupes, so the walk
+/// terminates even on a graph that somehow violated acyclicity. `UNION ALL`
+/// would not.
+pub const FROZEN: &str = "WITH RECURSIVE frozen(id) AS (
+      SELECT d.task_id FROM dep d
+        JOIN task b ON b.id = d.depends_on_task_id
+        JOIN task c ON c.id = d.task_id
+       WHERE d.mode = 'blocks'
+         AND b.state NOT IN ('done','cancelled')
+         AND c.state NOT IN ('done','cancelled')
+      UNION
+      SELECT d.depends_on_task_id FROM dep d
+        JOIN frozen f ON f.id = d.task_id
+        JOIN task ch ON ch.id = d.depends_on_task_id
+       WHERE d.mode = 'contains'
+         AND ch.state NOT IN ('done','cancelled')
+    )";
+
+/// Demote every `ready` task that is frozen by a blocker above it.
+///
+/// The counterpart to [`refresh_ready`], and the reason propagation needs a
+/// demote at all: attaching a prerequisite to a wave has to reach slices that
+/// are already sitting in the ready pool, or the freeze only applies to work
+/// that had not been unblocked yet.
+///
+/// Matches `ready` only. `assigned` and `running` are deliberately out of
+/// scope — a task already in an agent's hands is never yanked back, so a
+/// freeze applied mid-wave stops the *next* slice from being dispatched rather
+/// than interrupting one in flight. That is the same rule the single-edge
+/// demote in [`link_dep`] follows, and it is why the ownership gate can be on
+/// the container alone: no slice's owner can lose work to it.
+///
+/// Returns the ids it actually demoted — the rows whose guarded `UPDATE` matched
+/// — not the candidates it considered. Inside the `IMMEDIATE` transaction the
+/// two are the same set, but a caller reading the return value is asking what
+/// changed, and the guard is what answers that.
+pub fn demote_frozen(tx: &Transaction, agent: Option<&str>, via: &str) -> Result<Vec<i64>> {
+    let candidates: Vec<i64> = {
+        let mut stmt = tx.prepare(&format!(
+            "{FROZEN} SELECT id FROM task WHERE state = 'ready' AND id IN (SELECT id FROM frozen)"
+        ))?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    let mut demoted = Vec::new();
+    for id in &candidates {
+        // Guarded per row rather than one blanket UPDATE: the guard is what
+        // makes this safe to call after any edge mutation, and `changes() == 1`
+        // is the invariant the rest of this module holds to.
+        let n = tx.execute(
+            "UPDATE task SET state = ?1 WHERE id = ?2 AND state = ?3",
+            rusqlite::params![State::Pending, id, State::Ready],
+        )?;
+        if n == 1 {
+            demoted.push(*id);
+            insert_event(
+                tx,
+                Some(*id),
+                "state_change",
+                agent,
+                Some(&serde_json::json!({"to": "pending", "via": via})),
+            )?;
+        }
+    }
+    Ok(demoted)
+}
+
+/// [`refresh_ready`], plus a `state_change` event for each task it promoted.
+///
+/// `refresh_ready` is a set-based sweep with no idea which rows it touched, so
+/// the promotions it performs are invisible to `qp timeline`. Commands that
+/// unblock work — anything removing an edge — owe the audit log an entry, and
+/// this is how they get one: snapshot the candidates first, sweep, then diff.
+///
+/// The snapshot is the set of `pending` tasks with no unresolved deps *before*
+/// the sweep — a superset of what actually gets promoted, since the sweep also
+/// excludes anything frozen by a blocker on a container above it. Reading state
+/// back afterwards rather than trusting the snapshot is what keeps the event log
+/// honest across that gap, and the gap is why the read-back is not optional.
+///
+/// Returns the ids promoted, so a caller that cares whether one *particular*
+/// task came back (`qp depends --rm` reports this) can check without a third
+/// query.
+pub fn refresh_ready_logged(tx: &Transaction, agent: Option<&str>, via: &str) -> Result<Vec<i64>> {
+    let candidates: Vec<i64> = {
+        let mut stmt = tx.prepare(
+            "SELECT t.id FROM task t WHERE t.state = 'pending' \
+               AND NOT EXISTS (SELECT 1 FROM dep d JOIN task t2 ON t2.id = d.depends_on_task_id \
+                                WHERE d.task_id = t.id AND t2.state NOT IN ('done','cancelled'))",
+        )?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    refresh_ready(tx)?;
+    let mut promoted = Vec::new();
+    for tid in candidates {
+        let now: String =
+            tx.query_row("SELECT state FROM task WHERE id = ?", [tid], |r| r.get(0))?;
+        if now == "ready" {
+            promoted.push(tid);
+            insert_event(
+                tx,
+                Some(tid),
+                "state_change",
+                agent,
+                Some(&serde_json::json!({"to": "ready", "via": via})),
+            )?;
+        }
+    }
+    Ok(promoted)
 }
 
 /// The single open assignment for a task, if any.
@@ -687,6 +922,143 @@ pub fn would_cycle(tx: &Transaction, from: i64, to: i64) -> Result<bool> {
         |r| r.get(0),
     )?;
     Ok(n > 0)
+}
+
+/// A dep edge that says "this must finish before that can start".
+///
+/// Written by `qp depends`, and the mode every row predating `dep.mode` carries.
+pub const MODE_BLOCKS: &str = "blocks";
+/// A dep edge that says "that is part of this".
+///
+/// Written by `qp contains` and `qp add --part-of`. Waits exactly like
+/// [`MODE_BLOCKS`] — a container is not ready while its contents are open —
+/// but additionally propagates the container's blockers down to its contents.
+pub const MODE_CONTAINS: &str = "contains";
+
+/// Gate a dep-edge mutation on ownership of the task being mutated.
+///
+/// The gate is on the downstream task — the one *gaining or losing* the edge —
+/// because that is the row this writes to; the upstream task is untouched, so
+/// its owner has no say. The practical consequence: you may point an edge *at*
+/// another agent's in-flight work, but you may not reach into that work and
+/// hang a new blocker on it.
+pub fn require_edge_owner(
+    tx: &Transaction,
+    task_id: i64,
+    display_id: &str,
+    agent: Option<&str>,
+) -> Result<()> {
+    let state: String = tx.query_row("SELECT state FROM task WHERE id = ?", [task_id], |r| {
+        r.get(0)
+    })?;
+    if !matches!(state.as_str(), "assigned" | "running") {
+        return Ok(());
+    }
+    let assignee: Option<String> = current_assignment(tx, task_id)?.map(|o| o.agent_id);
+    match (agent, assignee.as_deref()) {
+        (Some(want), Some(have)) if want == have => Ok(()),
+        _ => Err(not_owner(
+            format!("{display_id} is {state}; --as must match latest assignee"),
+            Some(display_id.to_string()),
+            assignee,
+        )),
+    }
+}
+
+/// Add one dep edge in `mode`, demoting the depender if the edge blocks it.
+///
+/// Shared by `qp depends` and `qp contains`, which differ only in argument
+/// order and the mode they pass — the cycle check, the demote and the audit
+/// event are identical, and must stay that way: a containment edge that skipped
+/// the cycle check would strand every task in the loop as permanently
+/// `pending`.
+///
+/// Re-linking an existing pair in a different mode reclassifies it in place
+/// rather than erroring, which is how a store that expressed containment as
+/// plain deps converts: re-run `qp contains` over the edges that meant
+/// containment all along. Reclassifying is *not* state-neutral: it cannot change
+/// whether the depender itself is blocked, since both modes wait, but it moves
+/// tasks in and out of the frozen set below. Converting a wave that already has
+/// a blocker demotes every ready slice on the spot.
+///
+/// Returns `false` when the edge already existed in this mode, i.e. the call did
+/// not alter the graph. Callers report that as success; asking for an edge that
+/// is already there is not an error.
+///
+/// Reconciliation runs either way. Gating it on `changed` looks right and is
+/// not: re-running the identical command is the obvious way to repair a store
+/// whose frozen set drifted, and skipping the sweep made that repair a silent
+/// no-op — the freeze could only be fixed by writing some *other* edge.
+pub fn link_dep(
+    tx: &Transaction,
+    task_id: i64,
+    task_display: &str,
+    on_id: i64,
+    on_display: &str,
+    mode: &str,
+    agent: Option<&str>,
+) -> Result<bool> {
+    if would_cycle(tx, task_id, on_id)? {
+        return Err(invariant(
+            "dependency_cycle",
+            format!(
+                "cycle: {task_display} depends on {on_display} which (transitively) depends on {task_display}"
+            ),
+        ));
+    }
+    // The DO UPDATE's WHERE suppresses the write when the mode already matches,
+    // so `changes()` is exactly "did this call alter the graph".
+    let changed = tx.execute(
+        "INSERT INTO dep(task_id, depends_on_task_id, mode) VALUES (?1, ?2, ?3)
+           ON CONFLICT(task_id, depends_on_task_id)
+           DO UPDATE SET mode = excluded.mode WHERE dep.mode <> excluded.mode",
+        rusqlite::params![task_id, on_id, mode],
+    )?;
+    // Guarded demote: matches only a `ready` task that now has an unresolved
+    // dep. `assigned`/`running` are deliberately excluded — a task already in an
+    // agent's hands is never yanked back, and the ownership gate above is what
+    // makes that safe rather than merely lucky.
+    let demoted = tx.execute(
+        "UPDATE task SET state = ?1
+          WHERE id = ?2 AND state = ?3
+            AND EXISTS (SELECT 1 FROM dep d JOIN task t2 ON t2.id = d.depends_on_task_id
+                         WHERE d.task_id = ?2 AND t2.state NOT IN ('done','cancelled'))",
+        rusqlite::params![State::Pending, task_id, State::Ready],
+    )?;
+    if demoted == 1 {
+        insert_event(
+            tx,
+            Some(task_id),
+            "state_change",
+            agent,
+            Some(&serde_json::json!({"to": "pending", "via": mode})),
+        )?;
+    }
+    // The new edge can also freeze work *below* `task_id`: a blocker hung on a
+    // container reaches every slice inside it, and a slice newly attached to an
+    // already-blocked container inherits the freeze. Both arrive here, so this
+    // is the single place either needs handling.
+    //
+    // Reclassifying can also *thaw* — dropping a `contains` edge to `blocks`
+    // takes everything under it out of the frozen set — so both directions run,
+    // and both run even when `changed` is 0 so that re-running a command is a
+    // real repair rather than a no-op.
+    demote_frozen(tx, agent, mode)?;
+    refresh_ready(tx)?;
+    if changed == 0 {
+        return Ok(false);
+    }
+    // One event kind for both modes, with `mode` in the payload. A separate
+    // `contains_added` kind would mean a consumer filtering on `dep_added`
+    // silently missed half the graph mutations.
+    insert_event(
+        tx,
+        Some(task_id),
+        "dep_added",
+        agent,
+        Some(&serde_json::json!({"on": on_display, "mode": mode})),
+    )?;
+    Ok(true)
 }
 
 #[cfg(test)]

@@ -98,6 +98,8 @@ enum Cmd {
     InstallSkills(cmd::install_skills::InstallSkillsArgs),
     /// Add or remove a dep edge between tasks
     Depends(cmd::depends::DependsArgs),
+    /// Declare that a task is made up of others (containment edges)
+    Contains(cmd::contains::ContainsArgs),
     /// Mutate task fields (title, tier, description)
     Edit(cmd::edit::EditArgs),
     /// Emit a structured JSON snapshot of the store
@@ -161,6 +163,7 @@ fn wants_json(cmd: &Cmd) -> bool {
         Cmd::Log(a) => a.json,
         Cmd::Tag(a) => a.json,
         Cmd::Depends(a) => a.json,
+        Cmd::Contains(a) => a.json,
         Cmd::Edit(a) => a.json,
         Cmd::Show(a) => a.json,
         Cmd::Report(a) => a.json,
@@ -341,6 +344,7 @@ fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
         Cmd::Watch(a) => cmd::watch::run(&db_path, a),
         Cmd::InstallSkills(a) => cmd::install_skills::run(a),
         Cmd::Depends(a) => cmd::depends::run(&db_path, a),
+        Cmd::Contains(a) => cmd::contains::run(&db_path, a),
         Cmd::Edit(a) => cmd::edit::run(&db_path, a),
         Cmd::Report(a) => cmd::report::run(&db_path, a),
         Cmd::Show(a) => cmd::show::run(&db_path, a),

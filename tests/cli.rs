@@ -1,6 +1,15 @@
 use assert_cmd::Command;
 use predicates::str::contains;
 
+/// Mirror of `db::SCHEMA_VERSION`, duplicated because `qp` is a bin-only crate
+/// with nothing for an integration test to import.
+///
+/// The tests using it assert that a store lands on the *current* version after
+/// migrating, not on any particular number, so a version bump belongs here and
+/// nowhere else in this file. If a bump makes some other test fail, that test
+/// found a real migration bug — do not chase it back to a literal.
+const CURRENT_SCHEMA_VERSION: &str = "4";
+
 #[test]
 fn cancel_terminates_task_unblocks_dependents() {
     let tmp = tempfile::tempdir().unwrap();
@@ -3519,7 +3528,10 @@ fn schema_migrates_v1_to_current() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(v, "3", "schema_version should be migrated to 3");
+    assert_eq!(
+        v, CURRENT_SCHEMA_VERSION,
+        "schema_version should be migrated forward"
+    );
     let has_default_tag: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='default_tag'",
@@ -3566,8 +3578,8 @@ fn read_command_self_heals_stale_schema_without_init() {
         )
         .unwrap();
     assert_eq!(
-        v, "3",
-        "schema_version should self-heal to 3 on a read command"
+        v, CURRENT_SCHEMA_VERSION,
+        "schema_version should self-heal on a read command"
     );
     let has_default_tag: i64 = conn
         .query_row(
@@ -3986,9 +3998,13 @@ fn json_init_emits_bare_object() {
     let v = json_stdout(&assert);
     assert!(v["db_path"].is_string());
     assert_eq!(v["prefix"], "QP");
-    // `InitOutcome.schema_version` is a `String`, not a number — pinning "3"
-    // as a JSON string is intentional, matching the reference output.
-    assert_eq!(v["schema_version"], serde_json::Value::String("3".into()));
+    // `InitOutcome.schema_version` is a `String`, not a number — asserting
+    // against a JSON string is the point of this line, matching the reference
+    // output. The value itself is checked, but the type is what would regress.
+    assert_eq!(
+        v["schema_version"],
+        serde_json::Value::String(CURRENT_SCHEMA_VERSION.into())
+    );
 }
 
 #[test]
@@ -4974,4 +4990,1412 @@ fn read_only_commands_still_print_prose_errors_without_json() {
             "`qp {cmd}` (no --json) emitted JSON on stderr: {err}"
         );
     }
+}
+
+// ── Containment spec ────────────────────────────────────────────────────────
+//
+// A "wave" ticket that reverse-depends on its slices gets rollup for free: it
+// stays `pending` while any slice is open and `refresh_ready` promotes it once
+// the last one lands. That worked before containment was nameable, and these
+// first tests lock it so the new edge mode cannot regress it.
+//
+// The tests below were written as an `#[ignore]`d specification before the
+// behaviour existed, and un-ignored as each slice landed. Nothing here is
+// ignored any more; a failure is a real failure.
+
+/// A container is pending while any of its contents is open.
+#[test]
+fn wave_is_pending_while_a_slice_is_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "slice a"]).assert().success();
+    qp(&db).args(["add", "slice b"]).assert().success();
+    qp(&db)
+        .args([
+            "add",
+            "Wave",
+            "--depends-on",
+            "QP-1",
+            "--depends-on",
+            "QP-2",
+        ])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["show", "QP-3", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"pending\""));
+}
+
+/// The rollup: completing the last slice promotes the container to `ready`.
+#[test]
+fn wave_becomes_ready_when_its_last_slice_completes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "slice a"]).assert().success();
+    qp(&db)
+        .args(["add", "Wave", "--depends-on", "QP-1"])
+        .assert()
+        .success();
+    for step in [
+        ["assign", "QP-1", "--to", "a"],
+        ["claim", "QP-1", "--as", "a"],
+    ] {
+        qp(&db).args(step).assert().success();
+    }
+    qp(&db)
+        .args(["complete", "QP-1", "--as", "a"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["show", "QP-2", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"ready\""));
+}
+
+/// Rollup cascades: nesting works to arbitrary depth with no extra machinery.
+#[test]
+fn nested_waves_roll_up_one_level_at_a_time() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "slice"]).assert().success();
+    qp(&db)
+        .args(["add", "Wave: inner", "--depends-on", "QP-1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["add", "Wave: outer", "--depends-on", "QP-2"])
+        .assert()
+        .success();
+    for step in [
+        ["assign", "QP-1", "--to", "a"],
+        ["claim", "QP-1", "--as", "a"],
+    ] {
+        qp(&db).args(step).assert().success();
+    }
+    qp(&db)
+        .args(["complete", "QP-1", "--as", "a"])
+        .assert()
+        .success();
+    // inner is ready (its work is done); outer still waits on inner itself.
+    qp(&db)
+        .args(["show", "QP-2", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"ready\""));
+    qp(&db)
+        .args(["show", "QP-3", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"pending\""));
+}
+
+/// A containment cycle is rejected by the same guard that catches dep cycles.
+#[test]
+fn containment_cycle_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "inner"]).assert().success();
+    qp(&db)
+        .args(["add", "outer", "--depends-on", "QP-1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-2"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(contains("cycle"));
+}
+
+/// Attaching contents to an already-`ready` container demotes it.
+#[test]
+fn attaching_a_slice_demotes_a_ready_wave() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db).args(["add", "slice"]).assert().success();
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["show", "QP-1", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"pending\""));
+}
+
+/// A *running* container is never demoted — work is not yanked from a live agent.
+#[test]
+fn attaching_a_slice_does_not_demote_a_running_wave() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    for step in [
+        ["assign", "QP-1", "--to", "a"],
+        ["claim", "QP-1", "--as", "a"],
+    ] {
+        qp(&db).args(step).assert().success();
+    }
+    qp(&db).args(["add", "slice"]).assert().success();
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-2", "--as", "a"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["show", "QP-1", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"running\""));
+}
+
+// ── Not yet built: the specification ────────────────────────────────────────
+
+/// SPEC: containment and blocking must be distinguishable per edge.
+/// Encodes the `dep.mode` decision. A node-level marker cannot substitute:
+/// a container with both slices and a bare prerequisite has all edges leaving
+/// one node.
+#[test]
+fn contains_and_blocks_are_distinguishable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "slice"]).assert().success();
+    qp(&db).args(["add", "prerequisite"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["contains", "QP-3", "QP-1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["depends", "QP-3", "--on", "QP-2"])
+        .assert()
+        .success();
+    let out = qp(&db).args(["show", "QP-3", "--json"]).assert().success();
+    let v = json_stdout(&out);
+    assert_eq!(v["contains"], serde_json::json!(["QP-1"]));
+    assert_eq!(v["blocked_by"], serde_json::json!(["QP-2"]));
+}
+
+/// SPEC: `--part-of` attaches at create time, keeping parent-first order cheap.
+#[test]
+fn add_part_of_attaches_to_a_container() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["show", "QP-1", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"pending\""));
+}
+
+/// SPEC: a container's blockers gate its contents.
+///
+/// DECIDED. Where the blocker is attached is the control:
+/// - on the wave — "nothing in this wave starts until X", freezing every slice
+/// - on a slice — only that slice waits; siblings run (already true today)
+///
+/// Both are wanted, and having both means neither is a compromise: if only one
+/// slice needed the prerequisite you would attach it there instead.
+///
+/// This makes `dep.mode` load-bearing for BEHAVIOUR, not just display: walking up
+/// from a slice requires knowing which of the container's edges are containment
+/// and which are blocking. With one undifferentiated edge type you would walk
+/// everything (wrong) or nothing (today). So mode ships first, propagation on top.
+///
+/// Implementation note: readiness stops being local - `refresh_ready` must also
+/// check ancestors via a recursive CTE, the same shape `would_cycle` already uses.
+#[test]
+fn slices_of_a_blocked_wave_are_not_dispatchable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "slice"]).assert().success();
+    qp(&db).args(["add", "prerequisite"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["contains", "QP-3", "QP-1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["depends", "QP-3", "--on", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["show", "QP-1", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"pending\""));
+}
+
+/// A pre-`dep.mode` store gains the column, with every existing edge read as
+/// blocking.
+///
+/// The trap this guards: every statement in `schema.sql` is
+/// `CREATE ... IF NOT EXISTS`, so adding a column to a `CREATE TABLE` body
+/// reaches freshly-initialized stores and nobody else — the statement is a
+/// no-op wherever the table already exists. A fresh-`init` test passes whether
+/// or not the `ALTER` in `db::add_missing_columns` is there, and so proves
+/// nothing. This one builds the *old* table shape by hand.
+#[test]
+fn dep_mode_reaches_a_store_that_predates_the_column() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "slice"]).assert().success();
+    qp(&db)
+        .args(["add", "wave", "--depends-on", "QP-1"])
+        .assert()
+        .success();
+
+    // Rewind to the pre-mode schema: drop the column and un-stamp the version,
+    // leaving the edge in place.
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE dep DROP COLUMN mode;
+             UPDATE meta SET value = '3' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+        let cols: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('dep') WHERE name = 'mode'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cols, 0, "setup failed: mode column should be gone");
+    }
+
+    // Any read command must self-heal the schema — a user who upgrades the
+    // binary and runs `qp list` before ever running `qp init` depends on this.
+    qp(&db).args(["list", "--json"]).assert().success();
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let version: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    // The surviving edge is backfilled to `blocks`, which is what makes the
+    // migration inert: an old store has no containment edges until someone
+    // runs `qp contains`.
+    let modes: Vec<String> = {
+        let mut s = conn.prepare("SELECT mode FROM dep").unwrap();
+        let rows = s
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        rows
+    };
+    assert_eq!(modes, vec!["blocks".to_string()]);
+}
+
+/// `qp contains` reclassifies an edge that already exists as a plain dep.
+///
+/// This is the conversion path for stores that expressed containment as reverse
+/// dependencies before the mode existed, so re-linking must not error, must not
+/// duplicate the row, and must not disturb the container's state — both modes
+/// wait, so nothing about blockedness changes.
+#[test]
+fn contains_reclassifies_an_existing_dep_edge_in_place() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "slice"]).assert().success();
+    qp(&db)
+        .args(["add", "wave", "--depends-on", "QP-1"])
+        .assert()
+        .success();
+    let before = qp(&db).args(["show", "QP-2", "--json"]).assert().success();
+    assert_eq!(
+        json_stdout(&before)["blocked_by"],
+        serde_json::json!(["QP-1"])
+    );
+
+    qp(&db)
+        .args(["contains", "QP-2", "QP-1"])
+        .assert()
+        .success();
+
+    let after = qp(&db).args(["show", "QP-2", "--json"]).assert().success();
+    let v = json_stdout(&after);
+    assert_eq!(v["blocked_by"], serde_json::json!([]));
+    assert_eq!(v["contains"], serde_json::json!(["QP-1"]));
+    assert_eq!(v["state"], "pending", "reclassifying must not change state");
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM dep", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        n, 1,
+        "reclassify must update in place, not insert a second row"
+    );
+}
+
+/// The container is the row gaining an edge, so its owner gates both verbs.
+#[test]
+fn attaching_to_a_running_container_requires_its_agent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    for step in [
+        ["assign", "QP-1", "--to", "a"],
+        ["claim", "QP-1", "--as", "a"],
+    ] {
+        qp(&db).args(step).assert().success();
+    }
+    qp(&db).args(["add", "slice"]).assert().success();
+
+    qp(&db)
+        .args(["contains", "QP-1", "QP-2"])
+        .assert()
+        .failure();
+    qp(&db)
+        .args(["add", "another slice", "--part-of", "QP-1"])
+        .assert()
+        .failure();
+    qp(&db)
+        .args(["contains", "QP-1", "QP-2", "--as", "a"])
+        .assert()
+        .success();
+    // Still running: linking never demotes a task already in an agent's hands.
+    qp(&db)
+        .args(["show", "QP-1", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"running\""));
+}
+
+/// A cycle anywhere in a batch rejects the whole batch.
+///
+/// Partial application would leave the caller with edges they cannot see and did
+/// not ask for, and no way to tell which of the children landed.
+#[test]
+fn contains_batch_is_all_or_nothing_on_a_cycle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "outer"]).assert().success();
+    qp(&db).args(["add", "ok child"]).assert().success();
+    // QP-3 already contains QP-1, so making QP-1 contain QP-3 closes a loop.
+    qp(&db)
+        .args(["add", "inner", "--part-of", "QP-1"])
+        .assert()
+        .success();
+
+    qp(&db)
+        .args(["contains", "QP-1", "QP-2", "QP-1"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(contains("cycle"));
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM dep", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1, "the good child must be rolled back with the bad one");
+}
+
+/// `qp wave` keeps containers in its pending group.
+///
+/// The group's filter asks "is this genuinely waiting on something", which is a
+/// different question from "what blocks this". A container waiting on its own
+/// contents has no blockers, so a blockers-only filter silently drops every wave
+/// parent from the one view whose whole job is showing the wave.
+#[test]
+fn wave_pending_group_includes_a_container_waiting_on_its_contents() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-1"])
+        .assert()
+        .success();
+
+    let out = qp(&db).args(["wave", "--json"]).assert().success();
+    let v = json_stdout(&out);
+    let pending: Vec<&str> = v["pending"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["display_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(pending, vec!["QP-1"]);
+}
+
+// ── Blocker propagation through containment ─────────────────────────────────
+
+/// Freezing a wave reaches slices that are *already* in the ready pool.
+///
+/// The promote-side check alone would only hold back work that had not been
+/// unblocked yet, so attaching a prerequisite mid-wave would freeze nothing.
+#[test]
+fn blocking_a_wave_demotes_its_ready_slices() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["show", "QP-3", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"ready\""));
+
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    qp(&db)
+        .args(["show", "QP-3", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"pending\""));
+}
+
+/// A frozen slice is not yanked out of an agent's hands mid-flight.
+///
+/// Freezing stops the *next* slice being dispatched; it does not interrupt one
+/// already running. This is what lets the ownership gate sit on the container
+/// alone — no slice owner can lose work to someone else's `qp depends`.
+#[test]
+fn freezing_a_wave_leaves_a_running_slice_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    for step in [
+        ["assign", "QP-3", "--to", "a"],
+        ["claim", "QP-3", "--as", "a"],
+    ] {
+        qp(&db).args(step).assert().success();
+    }
+
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    qp(&db)
+        .args(["show", "QP-3", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"running\""));
+}
+
+/// Completing the prerequisite thaws the wave's contents.
+#[test]
+fn completing_a_waves_blocker_thaws_its_slices() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    for step in [
+        ["assign", "QP-1", "--to", "p"],
+        ["claim", "QP-1", "--as", "p"],
+        ["complete", "QP-1", "--as", "p"],
+    ] {
+        qp(&db).args(step).assert().success();
+    }
+
+    qp(&db)
+        .args(["show", "QP-3", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"ready\""));
+}
+
+/// Where the blocker is attached is the entire control.
+///
+/// On the wave it freezes everything inside; on one slice it affects only that
+/// slice. Both are wanted, which is why neither is a compromise — if only one
+/// slice needed the prerequisite, you attach it there.
+#[test]
+fn blocking_one_slice_leaves_its_siblings_dispatchable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice a", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["add", "slice b", "--part-of", "QP-2"])
+        .assert()
+        .success();
+
+    qp(&db)
+        .args(["depends", "QP-3", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    qp(&db)
+        .args(["show", "QP-3", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"pending\""));
+    qp(&db)
+        .args(["show", "QP-4", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"ready\""));
+}
+
+/// The freeze follows containment to any depth, and only containment.
+///
+/// Following `blocks` edges downward too would mean "X blocks the wave" also
+/// froze everything the wave merely waits on — a different and unwanted claim.
+#[test]
+fn freezing_propagates_through_nested_containment_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Outer"]).assert().success();
+    qp(&db)
+        .args(["add", "Inner", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["add", "deep slice", "--part-of", "QP-3"])
+        .assert()
+        .success();
+    // A plain blocking edge from the outer wave to an unrelated task. Nothing
+    // hangs off it, so nothing downstream of it may be frozen.
+    qp(&db).args(["add", "bystander"]).assert().success();
+    qp(&db)
+        .args(["depends", "QP-5", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    // Two levels down from the blocked container: frozen.
+    qp(&db)
+        .args(["show", "QP-4", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"pending\""));
+    // Reached only through `blocks` edges: untouched by the freeze, though it
+    // is pending on its own blocker.
+    let out = qp(&db).args(["show", "QP-5", "--json"]).assert().success();
+    let v = json_stdout(&out);
+    assert_eq!(v["state"], "pending");
+    assert_eq!(
+        v["frozen_by"],
+        serde_json::json!([]),
+        "a `blocks` edge must not propagate a freeze"
+    );
+}
+
+/// A frozen ticket says why. Nothing else on it would.
+///
+/// It has no unresolved dependency of its own — the blocker sits on a container
+/// above it — so `blocked_by` is empty and the bare `pending` is unexplained.
+#[test]
+fn a_frozen_slice_names_its_blocker_and_the_container_holding_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "Inner", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["add", "deep slice", "--part-of", "QP-3"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    let out = qp(&db).args(["show", "QP-4", "--json"]).assert().success();
+    let v = json_stdout(&out);
+    assert_eq!(v["blocked_by"], serde_json::json!([]));
+    assert_eq!(
+        v["frozen_by"],
+        serde_json::json!([{"container": "QP-2", "blocker": "QP-1"}]),
+        "must name the blocker and which container carries it, at any depth"
+    );
+
+    qp(&db)
+        .args(["show", "QP-4"])
+        .assert()
+        .success()
+        .stdout(contains("frozen_by: QP-1 (blocking QP-2)"));
+}
+
+/// `qp wave` keeps frozen slices visible.
+///
+/// A frozen slice has no unresolved dep of its own, so the pending group's
+/// filter would drop it — and it is not in any other group either, so it would
+/// vanish from the view entirely.
+#[test]
+fn wave_pending_group_includes_frozen_slices() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    let out = qp(&db).args(["wave", "--json"]).assert().success();
+    let v = json_stdout(&out);
+    let pending: Vec<&str> = v["pending"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["display_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(pending, vec!["QP-2", "QP-3"]);
+}
+
+/// Attaching a slice to an already-frozen wave freezes the slice on arrival.
+///
+/// The same code path as freezing an existing slice, reached from the other
+/// direction: here the edge is new and the blocker is old.
+#[test]
+fn a_slice_added_to_a_frozen_wave_arrives_frozen() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    qp(&db)
+        .args(["add", "late slice", "--part-of", "QP-2"])
+        .assert()
+        .success();
+
+    qp(&db)
+        .args(["show", "QP-3", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"pending\""));
+}
+
+// ── Display distinguishes the two edge modes ────────────────────────────────
+
+/// `qp tree` nests containment and annotates blocking.
+///
+/// Both used to render as the same flat `<- [...]` list, so a wave read as
+/// blocked by the slices it is made of.
+#[test]
+fn tree_nests_containment_and_annotates_blocking() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice a", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["add", "slice b", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["depends", "QP-4", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    let out = qp(&db).args(["tree"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let line = |did: &str| {
+        s.lines()
+            .find(|l| l.trim_start().starts_with(did))
+            .unwrap_or_else(|| panic!("no row for {did}:\n{s}"))
+            .to_string()
+    };
+
+    // The wave is not annotated with its own contents.
+    assert!(
+        !line("QP-2").contains("<-"),
+        "a container must not render as blocked by its contents:\n{s}"
+    );
+    // A genuine blocker still annotates.
+    assert!(
+        line("QP-4").contains("<- [QP-1]"),
+        "blocking edge lost its annotation:\n{s}"
+    );
+    // Slices are indented under the wave. Titles start at a fixed column, so a
+    // deeper title offset is exactly the nesting.
+    let wave_title = s
+        .lines()
+        .find(|l| l.contains("Wave"))
+        .unwrap()
+        .find("Wave")
+        .unwrap();
+    let slice_title = s
+        .lines()
+        .find(|l| l.contains("slice a"))
+        .unwrap()
+        .find("slice a")
+        .unwrap();
+    assert!(
+        slice_title > wave_title,
+        "slice should be indented under its wave:\n{s}"
+    );
+}
+
+/// A slice whose container is filtered out still prints, at the top level.
+///
+/// Nesting must not become a way for rows to disappear: the filter picks which
+/// tasks are shown, and the tree only decides how they are arranged.
+#[test]
+fn tree_still_prints_a_slice_whose_container_is_filtered_out() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db)
+        .args(["add", "Wave", "--tier", "big"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-1", "--tier", "small"])
+        .assert()
+        .success();
+
+    let out = qp(&db).args(["tree", "--tier", "small"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("QP-2"), "orphaned slice vanished:\n{s}");
+    assert!(!s.contains("QP-1"), "filter leaked the container:\n{s}");
+}
+
+/// `tree --json` splits the modes while leaving `depends_on` alone.
+#[test]
+fn tree_json_splits_the_modes_without_breaking_depends_on() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    let out = qp(&db).args(["tree", "--json"]).assert().success();
+    let v = json_stdout(&out);
+    let wave = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["display_id"] == "QP-2")
+        .unwrap();
+    assert_eq!(wave["contains"], serde_json::json!(["QP-3"]));
+    assert_eq!(wave["blocked_by"], serde_json::json!(["QP-1"]));
+    // Unchanged meaning: every dep edge, both modes.
+    assert_eq!(wave["depends_on"].as_array().unwrap().len(), 2);
+
+    let slice = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["display_id"] == "QP-3")
+        .unwrap();
+    assert_eq!(slice["part_of"], serde_json::json!(["QP-2"]));
+}
+
+/// `report --json` carries `mode` on every edge.
+///
+/// Without it a board cannot draw hierarchy and blocking differently, and has
+/// to treat a wave as blocked by its own slices.
+#[test]
+fn report_json_carries_edge_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    let out = qp(&db).args(["report", "--json"]).assert().success();
+    let v = json_stdout(&out);
+    let mut edges: Vec<(String, String, String)> = v["deps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| {
+            (
+                d["from"].as_str().unwrap().to_string(),
+                d["to"].as_str().unwrap().to_string(),
+                d["mode"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    edges.sort();
+    assert_eq!(
+        edges,
+        vec![
+            ("QP-2".into(), "QP-1".into(), "blocks".into()),
+            ("QP-2".into(), "QP-3".into(), "contains".into()),
+        ]
+    );
+}
+
+/// `report --ticket` carries `mode` on each parent/child edge too.
+#[test]
+fn report_ticket_detail_carries_edge_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    let out = qp(&db)
+        .args(["report", "--ticket", "QP-2", "--json"])
+        .assert()
+        .success();
+    let v = json_stdout(&out);
+    let modes: Vec<(&str, &str)> = v["parents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["display_id"].as_str().unwrap(),
+                p["mode"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert!(modes.contains(&("QP-1", "blocks")), "got {modes:?}");
+    assert!(modes.contains(&("QP-3", "contains")), "got {modes:?}");
+}
+
+// ── Review fixes ────────────────────────────────────────────────────────────
+
+/// `qp block` on a container freezes its contents.
+///
+/// It writes its dep edge directly rather than through `db::link_dep`, and so
+/// was the one blocking verb whose freeze `qp show` reported but nothing
+/// applied — `qp list --state ready` kept handing the frozen slice out. It is
+/// also the primary way an agent raises a blocker mid-wave, i.e. the main path
+/// the feature exists to serve.
+#[test]
+fn block_on_a_container_freezes_its_contents() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db).args(["add", "slice"]).assert().success();
+    for step in [
+        ["assign", "QP-1", "--to", "bob"],
+        ["claim", "QP-1", "--as", "bob"],
+    ] {
+        qp(&db).args(step).assert().success();
+    }
+    qp(&db)
+        .args(["contains", "QP-1", "QP-2", "--as", "bob"])
+        .assert()
+        .success();
+
+    qp(&db)
+        .args(["block", "QP-1", "--as", "bob", "--new", "need infra"])
+        .assert()
+        .success();
+
+    qp(&db)
+        .args(["show", "QP-2", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"pending\""));
+    // And it must not be dispatchable.
+    qp(&db)
+        .args(["assign", "QP-2", "--to", "carol"])
+        .assert()
+        .failure();
+}
+
+/// Cancelling a container releases its contents.
+///
+/// `refresh_ready`'s rule is that cancelling a blocker unblocks its dependents
+/// rather than stranding them. Containment did not honour it: the frozen set
+/// checked the blocker's state but never the container's, so a dead wave went
+/// on freezing its slices with no hint that `qp contains --rm` was the cure.
+#[test]
+fn cancelling_a_container_releases_its_contents() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-1"])
+        .assert()
+        .success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-3"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["show", "QP-2", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"pending\""));
+
+    qp(&db)
+        .args(["cancel", "QP-1", "--reason", "wave dropped"])
+        .assert()
+        .success();
+
+    let out = qp(&db).args(["show", "QP-2", "--json"]).assert().success();
+    let v = json_stdout(&out);
+    assert_eq!(v["state"], "ready", "a cancelled wave must free its slices");
+    assert_eq!(
+        v["frozen_by"],
+        serde_json::json!([]),
+        "and must stop being reported as the reason"
+    );
+}
+
+/// A `done` container likewise stops freezing.
+#[test]
+fn a_completed_container_stops_freezing_its_contents() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-2"])
+        .assert()
+        .success();
+    // Resolve the blocker so the wave can run to completion, then re-block it.
+    for step in [
+        ["assign", "QP-2", "--to", "p"],
+        ["claim", "QP-2", "--as", "p"],
+        ["complete", "QP-2", "--as", "p"],
+        ["assign", "QP-1", "--to", "w"],
+        ["claim", "QP-1", "--as", "w"],
+        ["complete", "QP-1", "--as", "w"],
+    ] {
+        qp(&db).args(step).assert().success();
+    }
+    qp(&db).args(["add", "late blocker"]).assert().success();
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-3"])
+        .assert()
+        .success();
+
+    qp(&db)
+        .args(["add", "new slice", "--part-of", "QP-1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["show", "QP-4", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"ready\""));
+}
+
+/// Reclassifying `contains` → `blocks` thaws what the edge used to freeze.
+///
+/// `qp depends`' add path used to skip promotion on the reasoning that adding an
+/// edge can only demote. True before edge modes; false once an add can
+/// reclassify. The victim was left `pending` with an empty `blocked_by` *and* an
+/// empty `frozen_by` — a ticket explaining nothing — until some unrelated later
+/// command happened to sweep.
+#[test]
+fn reclassifying_containment_to_blocking_thaws_the_subtree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "Inner", "--part-of", "QP-1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["add", "deep slice", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-4"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["show", "QP-3", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"pending\""));
+
+    // QP-1 no longer *contains* QP-2; it merely waits on it.
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-2"])
+        .assert()
+        .success();
+
+    qp(&db)
+        .args(["show", "QP-3", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"ready\""));
+}
+
+/// Re-running an identical link reconciles rather than short-circuiting.
+///
+/// Repairing a store whose frozen set drifted means re-running the command that
+/// should have set it. Returning early on an unchanged edge made that repair a
+/// silent no-op, so the only fix was to write some *unrelated* edge.
+#[test]
+fn re_running_an_unchanged_link_still_reconciles() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-1"])
+        .assert()
+        .success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+
+    // Plant a blocking edge behind the CLI's back, so the frozen set is stale.
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO dep(task_id, depends_on_task_id, mode) VALUES (1, 3, 'blocks')",
+            [],
+        )
+        .unwrap();
+    }
+    qp(&db)
+        .args(["show", "QP-2", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"ready\""));
+
+    // The identical command a user would reach for. It changes no edge.
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-3"])
+        .assert()
+        .success();
+
+    qp(&db)
+        .args(["show", "QP-2", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"pending\""));
+}
+
+/// A store whose stamp is ahead of its schema heals on any command.
+///
+/// The migration used to run only behind the version check, so a stamp that had
+/// somehow advanced past the schema meant nothing ever looked again: every
+/// command failed on the missing column, and `qp init` — the obvious repair —
+/// reported success while fixing nothing.
+#[test]
+fn a_store_whose_stamp_outran_its_schema_self_heals() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE dep DROP COLUMN mode;
+             UPDATE meta SET value = '4' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+    }
+
+    qp(&db).args(["list", "--json"]).assert().success();
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('dep') WHERE name = 'mode'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 1, "the column should have been restored");
+}
+
+/// `qp contains --rm` names only what it actually released.
+///
+/// Printing the whole argument list after "released" claimed the release of
+/// edges it never touched — including live `blocks` edges, which `--rm` does not
+/// remove — while the trailing note read as "already released" rather than
+/// "untouched".
+#[test]
+fn contains_rm_does_not_claim_to_release_an_untouched_edge() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db).args(["add", "b"]).assert().success();
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-2"])
+        .assert()
+        .success();
+
+    let out = qp(&db)
+        .args(["contains", "QP-1", "QP-2", "--rm"])
+        .assert()
+        .success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        !s.contains("released"),
+        "must not claim a release that did not happen: {s:?}"
+    );
+
+    // The blocking edge is untouched.
+    qp(&db)
+        .args(["show", "QP-1", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"blocked_by\":[\"QP-2\"]"));
+}
+
+/// `qp tree` agrees with `show` and `list` about what "blocked by" means.
+///
+/// `tree` built its own edge map straight from `dep` with no state filter. That
+/// was survivable while the annotation was an untyped `<- [...]`, and stopped
+/// being survivable once `--json` named the field `blocked_by`.
+#[test]
+fn tree_blocked_by_excludes_resolved_blockers_like_show_does() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db)
+        .args(["add", "work", "--depends-on", "QP-1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["cancel", "QP-1", "--reason", "not needed"])
+        .assert()
+        .success();
+
+    let out = qp(&db).args(["tree", "--json"]).assert().success();
+    let v = json_stdout(&out);
+    let work = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["display_id"] == "QP-2")
+        .unwrap();
+    assert_eq!(
+        work["blocked_by"],
+        serde_json::json!([]),
+        "a cancelled blocker is resolved; show and list both agree"
+    );
+
+    let out = qp(&db).args(["tree"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(!s.contains("<- [QP-1]"), "stale annotation survived:\n{s}");
+}
+
+/// `report --ticket` offers edge lists named from the ticket's point of view.
+///
+/// `parents`/`children` name the dep direction, which reads exactly backwards
+/// for containment: a container's *contents* are its "parents". Both are kept
+/// for compatibility, so the fix is to also publish unambiguous lists.
+#[test]
+fn report_ticket_names_containment_from_the_tickets_point_of_view() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-1"])
+        .assert()
+        .success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-3"])
+        .assert()
+        .success();
+
+    let out = qp(&db)
+        .args(["report", "--ticket", "QP-1", "--json"])
+        .assert()
+        .success();
+    let v = json_stdout(&out);
+    let ids = |k: &str| -> Vec<String> {
+        v[k].as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["display_id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(ids("contains"), vec!["QP-2"]);
+    assert_eq!(ids("blocked_by"), vec!["QP-3"]);
+
+    let out = qp(&db)
+        .args(["report", "--ticket", "QP-2", "--json"])
+        .assert()
+        .success();
+    let v = json_stdout(&out);
+    let part_of: Vec<String> = v["part_of"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["display_id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(part_of, vec!["QP-1"]);
+}
+
+/// `qp depends --rm` records which kind of edge it removed.
+///
+/// The removal is deliberately mode-blind, so the audit log is the only place
+/// that can say what actually vanished from the graph.
+#[test]
+fn depends_rm_records_the_mode_it_removed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-1"])
+        .assert()
+        .success();
+
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-2", "--rm"])
+        .assert()
+        .success();
+
+    let out = qp(&db)
+        .args(["timeline", "QP-1", "--json"])
+        .assert()
+        .success();
+    let v = json_stdout(&out);
+    let removed = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "dep_removed")
+        .expect("no dep_removed event");
+    assert_eq!(removed["payload"]["mode"], "contains");
+}
+
+/// A task in two containers prints once, and says where else it lives.
+///
+/// The `seen` guard keeps the walk finite, but silently picking one container
+/// made the other render as empty — so the global tree disagreed with
+/// `qp tree <that container>`. Nothing forbids multiple containment, so the
+/// renderer has to say so rather than choose a winner in silence.
+#[test]
+fn tree_notes_a_tasks_other_containers_instead_of_hiding_them() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "Wave A"]).assert().success();
+    qp(&db).args(["add", "shared slice"]).assert().success();
+    qp(&db).args(["add", "Wave B"]).assert().success();
+    qp(&db)
+        .args(["contains", "QP-1", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["contains", "QP-3", "QP-2"])
+        .assert()
+        .success();
+
+    let out = qp(&db).args(["tree"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert_eq!(
+        s.lines().filter(|l| l.contains("shared slice")).count(),
+        1,
+        "should print once:\n{s}"
+    );
+    assert!(
+        s.contains("(also in QP-3)"),
+        "Wave B renders as empty with no hint:\n{s}"
+    );
+
+    // Scoped to the other container, there is nothing else in view to note.
+    let out = qp(&db).args(["tree", "QP-3"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("shared slice"), "scoped view lost it:\n{s}");
+    assert!(
+        !s.contains("also in"),
+        "noted an out-of-scope container:\n{s}"
+    );
 }

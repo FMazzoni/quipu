@@ -80,11 +80,24 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
             )?;
         }
 
-        // (2) Insert dep edge orig → blocker. No cycle possible (blocker is brand-new).
+        // (2) Insert dep edge orig → blocker. No cycle possible (blocker is
+        // brand-new), so the edge goes in directly rather than through
+        // `db::link_dep` — its cycle check and its guarded `ready` demote are
+        // both dead weight here, since step (3) below demotes from
+        // `assigned`/`running` instead.
+        //
+        // The propagation half is NOT dead weight. If the blocked task is a
+        // container, this blocker freezes everything inside it, and skipping
+        // that left `qp block` as the one blocking verb whose freeze was
+        // reported by `qp show` but never applied — `qp list --state ready`
+        // would keep handing the frozen slices out. `qp block` is how an agent
+        // raises a blocker mid-wave, so that was the main path the feature
+        // exists to serve.
         tx.execute(
-            "INSERT INTO dep(task_id, depends_on_task_id) VALUES (?,?)",
-            rusqlite::params![task_id, blocker_id],
+            "INSERT INTO dep(task_id, depends_on_task_id, mode) VALUES (?,?,?)",
+            rusqlite::params![task_id, blocker_id, db::MODE_BLOCKS],
         )?;
+        db::demote_frozen(tx, Some(&a.agent), "block")?;
 
         // (3) Guarded UPDATE: demote orig to pending.
         let n = tx.execute(

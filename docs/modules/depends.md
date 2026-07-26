@@ -3,11 +3,29 @@ One invocation moves exactly one edge: `qp depends <TASK> --on <ON>` adds it,
 the insert, and both directions re-derive readiness, because either can change
 what is workable.
 
+This is the *blocking* verb — it writes `dep` rows with `mode = 'blocks'`,
+meaning "`ON` must finish before `TASK` starts". `qp contains` is the same
+machinery with `mode = 'contains'`, meaning "`ON` is part of `TASK`". Both hold
+the depender back; see [`contains`](contains.md) for how they differ.
+
+An edge added here can also freeze work *below* `TASK`: a blocker on a container
+propagates down to everything the container holds, at any depth. That is handled
+in `db::link_dep`, which both verbs share, so neither needs to know about it.
+The `--rm` path is mode-blind on purpose — an edge is unlinked by its endpoints,
+and making the caller name the mode of a row they can already see would buy
+nothing.
+
 ## Demotion on add, promotion on rm
 
-Adding an edge can only ever *demote*, and removing one can only ever *promote*.
-That asymmetry is why the two branches look so different, and why the outcome's
-`promoted` field is always `false` on add.
+For the task named on the command line, adding an edge can only ever *demote* and
+removing one can only ever *promote*. That asymmetry is why the two branches look
+so different, and why the outcome's `promoted` field is always `false` on add.
+
+It does not extend to the rest of the graph. An add can reclassify an existing
+`contains` edge to `blocks`, which takes everything under it *out* of the frozen
+set — so an add can free work elsewhere, and both reconciliation sweeps run on
+both branches. Assuming otherwise left tasks stranded `pending` with nothing on
+the ticket to explain it, until an unrelated later command happened to sweep.
 
 The demotion is itself a guarded `UPDATE` with the unresolved-dep predicate
 inline: it matches only a `ready` task that now genuinely has an open
@@ -41,8 +59,10 @@ previous assignee keep authority it no longer holds.
 ## Boundaries
 
 Adding an edge that already exists is an idempotent success, not an error — the
-`INSERT OR IGNORE` matches nothing and the command returns early without an
-event, so replaying a setup script does not fill the log with noise. Removing one
+upsert suppresses its own write when the mode already matches, so replaying a
+setup script does not fill the log with noise. Re-adding a pair that exists in
+the *other* mode reclassifies it rather than erroring; that is the conversion
+path described in [`contains`](contains.md). Removing one
 that does not exist *is* an error (`not_found`), because it means the caller's
 model of the graph is wrong.
 
