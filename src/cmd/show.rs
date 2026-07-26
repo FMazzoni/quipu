@@ -65,6 +65,10 @@ pub fn run(db_path: &std::path::Path, a: ShowArgs) -> Result<()> {
         .remove(&tid)
         .unwrap_or_default();
     let part_of = store::containers_of(&conn, tid)?;
+    // Why a `pending` task with no blockers of its own is still not workable.
+    // Without this the ticket shows `pending`, an empty `blocked_by`, and no
+    // way to find the prerequisite that is actually holding it.
+    let frozen_by = store::frozen_by(&conn, tid)?;
 
     // Every event, newest first. The query is deliberately unbounded: `--json`
     // emits all of them (see `report --ticket` for the same contract), and the
@@ -121,6 +125,9 @@ pub fn run(db_path: &std::path::Path, a: ShowArgs) -> Result<()> {
             "blocked_by": blocked_by,
             "contains": contains,
             "part_of": part_of,
+            "frozen_by": frozen_by.iter().map(|(container, blocker)| {
+                serde_json::json!({"container": container, "blocker": blocker})
+            }).collect::<Vec<_>>(),
             "last_event": last_event,
             "recent_events": recent_events,
         });
@@ -177,6 +184,9 @@ pub fn run(db_path: &std::path::Path, a: ShowArgs) -> Result<()> {
     }
     if !blocked_by.is_empty() {
         println!("  blocked_by: {}", blocked_by.join(", "));
+    }
+    for (container, blocker) in &frozen_by {
+        println!("  frozen_by: {} (blocking {})", blocker, container);
     }
 
     if let Some(d) = description.as_deref().filter(|s| !s.is_empty()) {

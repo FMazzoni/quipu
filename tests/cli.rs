@@ -5221,7 +5221,6 @@ fn add_part_of_attaches_to_a_container() {
 /// Implementation note: readiness stops being local - `refresh_ready` must also
 /// check ancestors via a recursive CTE, the same shape `would_cycle` already uses.
 #[test]
-#[ignore = "spec: needs dep.mode, then propagation in refresh_ready"]
 fn slices_of_a_blocked_wave_are_not_dispatchable() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
@@ -5446,4 +5445,294 @@ fn wave_pending_group_includes_a_container_waiting_on_its_contents() {
         .map(|t| t["display_id"].as_str().unwrap())
         .collect();
     assert_eq!(pending, vec!["QP-1"]);
+}
+
+// ── Blocker propagation through containment ─────────────────────────────────
+
+/// Freezing a wave reaches slices that are *already* in the ready pool.
+///
+/// The promote-side check alone would only hold back work that had not been
+/// unblocked yet, so attaching a prerequisite mid-wave would freeze nothing.
+#[test]
+fn blocking_a_wave_demotes_its_ready_slices() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["show", "QP-3", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"ready\""));
+
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    qp(&db)
+        .args(["show", "QP-3", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"pending\""));
+}
+
+/// A frozen slice is not yanked out of an agent's hands mid-flight.
+///
+/// Freezing stops the *next* slice being dispatched; it does not interrupt one
+/// already running. This is what lets the ownership gate sit on the container
+/// alone — no slice owner can lose work to someone else's `qp depends`.
+#[test]
+fn freezing_a_wave_leaves_a_running_slice_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    for step in [
+        ["assign", "QP-3", "--to", "a"],
+        ["claim", "QP-3", "--as", "a"],
+    ] {
+        qp(&db).args(step).assert().success();
+    }
+
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    qp(&db)
+        .args(["show", "QP-3", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"running\""));
+}
+
+/// Completing the prerequisite thaws the wave's contents.
+#[test]
+fn completing_a_waves_blocker_thaws_its_slices() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    for step in [
+        ["assign", "QP-1", "--to", "p"],
+        ["claim", "QP-1", "--as", "p"],
+        ["complete", "QP-1", "--as", "p"],
+    ] {
+        qp(&db).args(step).assert().success();
+    }
+
+    qp(&db)
+        .args(["show", "QP-3", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"ready\""));
+}
+
+/// Where the blocker is attached is the entire control.
+///
+/// On the wave it freezes everything inside; on one slice it affects only that
+/// slice. Both are wanted, which is why neither is a compromise — if only one
+/// slice needed the prerequisite, you attach it there.
+#[test]
+fn blocking_one_slice_leaves_its_siblings_dispatchable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice a", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["add", "slice b", "--part-of", "QP-2"])
+        .assert()
+        .success();
+
+    qp(&db)
+        .args(["depends", "QP-3", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    qp(&db)
+        .args(["show", "QP-3", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"pending\""));
+    qp(&db)
+        .args(["show", "QP-4", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"ready\""));
+}
+
+/// The freeze follows containment to any depth, and only containment.
+///
+/// Following `blocks` edges downward too would mean "X blocks the wave" also
+/// froze everything the wave merely waits on — a different and unwanted claim.
+#[test]
+fn freezing_propagates_through_nested_containment_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Outer"]).assert().success();
+    qp(&db)
+        .args(["add", "Inner", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["add", "deep slice", "--part-of", "QP-3"])
+        .assert()
+        .success();
+    // A plain blocking edge from the outer wave to an unrelated task. Nothing
+    // hangs off it, so nothing downstream of it may be frozen.
+    qp(&db).args(["add", "bystander"]).assert().success();
+    qp(&db)
+        .args(["depends", "QP-5", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    // Two levels down from the blocked container: frozen.
+    qp(&db)
+        .args(["show", "QP-4", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"pending\""));
+    // Reached only through `blocks` edges: untouched by the freeze, though it
+    // is pending on its own blocker.
+    let out = qp(&db).args(["show", "QP-5", "--json"]).assert().success();
+    let v = json_stdout(&out);
+    assert_eq!(v["state"], "pending");
+    assert_eq!(
+        v["frozen_by"],
+        serde_json::json!([]),
+        "a `blocks` edge must not propagate a freeze"
+    );
+}
+
+/// A frozen ticket says why. Nothing else on it would.
+///
+/// It has no unresolved dependency of its own — the blocker sits on a container
+/// above it — so `blocked_by` is empty and the bare `pending` is unexplained.
+#[test]
+fn a_frozen_slice_names_its_blocker_and_the_container_holding_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "Inner", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["add", "deep slice", "--part-of", "QP-3"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    let out = qp(&db).args(["show", "QP-4", "--json"]).assert().success();
+    let v = json_stdout(&out);
+    assert_eq!(v["blocked_by"], serde_json::json!([]));
+    assert_eq!(
+        v["frozen_by"],
+        serde_json::json!([{"container": "QP-2", "blocker": "QP-1"}]),
+        "must name the blocker and which container carries it, at any depth"
+    );
+
+    qp(&db)
+        .args(["show", "QP-4"])
+        .assert()
+        .success()
+        .stdout(contains("frozen_by: QP-1 (blocking QP-2)"));
+}
+
+/// `qp wave` keeps frozen slices visible.
+///
+/// A frozen slice has no unresolved dep of its own, so the pending group's
+/// filter would drop it — and it is not in any other group either, so it would
+/// vanish from the view entirely.
+#[test]
+fn wave_pending_group_includes_frozen_slices() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    let out = qp(&db).args(["wave", "--json"]).assert().success();
+    let v = json_stdout(&out);
+    let pending: Vec<&str> = v["pending"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["display_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(pending, vec!["QP-2", "QP-3"]);
+}
+
+/// Attaching a slice to an already-frozen wave freezes the slice on arrival.
+///
+/// The same code path as freezing an existing slice, reached from the other
+/// direction: here the edge is new and the blocker is old.
+#[test]
+fn a_slice_added_to_a_frozen_wave_arrives_frozen() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    qp(&db)
+        .args(["add", "late slice", "--part-of", "QP-2"])
+        .assert()
+        .success();
+
+    qp(&db)
+        .args(["show", "QP-3", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"pending\""));
 }
