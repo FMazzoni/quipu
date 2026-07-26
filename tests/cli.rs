@@ -5736,3 +5736,212 @@ fn a_slice_added_to_a_frozen_wave_arrives_frozen() {
         .success()
         .stdout(contains("\"state\":\"pending\""));
 }
+
+// ── Display distinguishes the two edge modes ────────────────────────────────
+
+/// `qp tree` nests containment and annotates blocking.
+///
+/// Both used to render as the same flat `<- [...]` list, so a wave read as
+/// blocked by the slices it is made of.
+#[test]
+fn tree_nests_containment_and_annotates_blocking() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice a", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["add", "slice b", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["depends", "QP-4", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    let out = qp(&db).args(["tree"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let line = |did: &str| {
+        s.lines()
+            .find(|l| l.trim_start().starts_with(did))
+            .unwrap_or_else(|| panic!("no row for {did}:\n{s}"))
+            .to_string()
+    };
+
+    // The wave is not annotated with its own contents.
+    assert!(
+        !line("QP-2").contains("<-"),
+        "a container must not render as blocked by its contents:\n{s}"
+    );
+    // A genuine blocker still annotates.
+    assert!(
+        line("QP-4").contains("<- [QP-1]"),
+        "blocking edge lost its annotation:\n{s}"
+    );
+    // Slices are indented under the wave. Titles start at a fixed column, so a
+    // deeper title offset is exactly the nesting.
+    let wave_title = s
+        .lines()
+        .find(|l| l.contains("Wave"))
+        .unwrap()
+        .find("Wave")
+        .unwrap();
+    let slice_title = s
+        .lines()
+        .find(|l| l.contains("slice a"))
+        .unwrap()
+        .find("slice a")
+        .unwrap();
+    assert!(
+        slice_title > wave_title,
+        "slice should be indented under its wave:\n{s}"
+    );
+}
+
+/// A slice whose container is filtered out still prints, at the top level.
+///
+/// Nesting must not become a way for rows to disappear: the filter picks which
+/// tasks are shown, and the tree only decides how they are arranged.
+#[test]
+fn tree_still_prints_a_slice_whose_container_is_filtered_out() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db)
+        .args(["add", "Wave", "--tier", "big"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-1", "--tier", "small"])
+        .assert()
+        .success();
+
+    let out = qp(&db).args(["tree", "--tier", "small"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(s.contains("QP-2"), "orphaned slice vanished:\n{s}");
+    assert!(!s.contains("QP-1"), "filter leaked the container:\n{s}");
+}
+
+/// `tree --json` splits the modes while leaving `depends_on` alone.
+#[test]
+fn tree_json_splits_the_modes_without_breaking_depends_on() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    let out = qp(&db).args(["tree", "--json"]).assert().success();
+    let v = json_stdout(&out);
+    let wave = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["display_id"] == "QP-2")
+        .unwrap();
+    assert_eq!(wave["contains"], serde_json::json!(["QP-3"]));
+    assert_eq!(wave["blocked_by"], serde_json::json!(["QP-1"]));
+    // Unchanged meaning: every dep edge, both modes.
+    assert_eq!(wave["depends_on"].as_array().unwrap().len(), 2);
+
+    let slice = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["display_id"] == "QP-3")
+        .unwrap();
+    assert_eq!(slice["part_of"], serde_json::json!(["QP-2"]));
+}
+
+/// `report --json` carries `mode` on every edge.
+///
+/// Without it a board cannot draw hierarchy and blocking differently, and has
+/// to treat a wave as blocked by its own slices.
+#[test]
+fn report_json_carries_edge_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    let out = qp(&db).args(["report", "--json"]).assert().success();
+    let v = json_stdout(&out);
+    let mut edges: Vec<(String, String, String)> = v["deps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| {
+            (
+                d["from"].as_str().unwrap().to_string(),
+                d["to"].as_str().unwrap().to_string(),
+                d["mode"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    edges.sort();
+    assert_eq!(
+        edges,
+        vec![
+            ("QP-2".into(), "QP-1".into(), "blocks".into()),
+            ("QP-2".into(), "QP-3".into(), "contains".into()),
+        ]
+    );
+}
+
+/// `report --ticket` carries `mode` on each parent/child edge too.
+#[test]
+fn report_ticket_detail_carries_edge_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1"])
+        .assert()
+        .success();
+
+    let out = qp(&db)
+        .args(["report", "--ticket", "QP-2", "--json"])
+        .assert()
+        .success();
+    let v = json_stdout(&out);
+    let modes: Vec<(&str, &str)> = v["parents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["display_id"].as_str().unwrap(),
+                p["mode"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert!(modes.contains(&("QP-1", "blocks")), "got {modes:?}");
+    assert!(modes.contains(&("QP-3", "contains")), "got {modes:?}");
+}

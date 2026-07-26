@@ -94,24 +94,26 @@ struct TicketDetail {
     description: Option<String>,
     created_at: Option<String>,
     tags: Vec<String>,
-    parents: Vec<(String, String, String)>, // display_id, title, state — this depends on
-    children: Vec<(String, String, String)>, // display_id, title, state — depend on this
-    events: Vec<store::EventRow>,           // chronological asc, uncapped
+    parents: Vec<(String, String, String, String)>, // display_id, title, state, mode — this depends on
+    children: Vec<(String, String, String, String)>, // display_id, title, state, mode — depend on this
+    events: Vec<store::EventRow>,                    // chronological asc, uncapped
 }
 
 fn ticket_detail_json(t: &TicketDetail) -> Value {
+    // `mode` on each edge, so "what is this made of" and "what is stopping it"
+    // are answerable from the ticket detail without a second query.
     let parents: Vec<Value> = t
         .parents
         .iter()
-        .map(|(did, title, state)| {
-            serde_json::json!({"display_id": did, "title": title, "state": state})
+        .map(|(did, title, state, mode)| {
+            serde_json::json!({"display_id": did, "title": title, "state": state, "mode": mode})
         })
         .collect();
     let children: Vec<Value> = t
         .children
         .iter()
-        .map(|(did, title, state)| {
-            serde_json::json!({"display_id": did, "title": title, "state": state})
+        .map(|(did, title, state, mode)| {
+            serde_json::json!({"display_id": did, "title": title, "state": state, "mode": mode})
         })
         .collect();
     let events: Vec<Value> = t
@@ -170,27 +172,29 @@ fn collect_ticket(conn: &rusqlite::Connection, tid: i64) -> Result<TicketDetail>
     tags.sort();
 
     let mut p_stmt = conn.prepare(
-        "SELECT t.display_id, t.title, t.state FROM dep d JOIN task t ON t.id = d.depends_on_task_id
+        "SELECT t.display_id, t.title, t.state, d.mode FROM dep d JOIN task t ON t.id = d.depends_on_task_id
           WHERE d.task_id = ?1 ORDER BY t.id")?;
-    let parents: Vec<(String, String, String)> = p_stmt
+    let parents: Vec<(String, String, String, String)> = p_stmt
         .query_map([tid], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
             ))
         })?
         .collect::<Result<_, _>>()?;
     let mut c_stmt = conn.prepare(
-        "SELECT t.display_id, t.title, t.state FROM dep d JOIN task t ON t.id = d.task_id
+        "SELECT t.display_id, t.title, t.state, d.mode FROM dep d JOIN task t ON t.id = d.task_id
           WHERE d.depends_on_task_id = ?1 ORDER BY t.id",
     )?;
-    let children: Vec<(String, String, String)> = c_stmt
+    let children: Vec<(String, String, String, String)> = c_stmt
         .query_map([tid], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
             ))
         })?
         .collect::<Result<_, _>>()?;
@@ -325,15 +329,25 @@ fn collect_json(
     }
 
     // Deps: all dep edges in scope (both tasks must be in subtree if scoped).
+    //
+    // `mode` rides along on every edge so a board can draw hierarchy and
+    // blocking differently without re-querying or guessing. Omitting it is what
+    // forced consumers to treat a wave as blocked by its own slices.
     let mut dep_stmt = conn.prepare(
-        "SELECT tf.display_id, tt.display_id
+        "SELECT tf.display_id, tt.display_id, d.mode
            FROM dep d
            JOIN task tf ON tf.id = d.task_id
            JOIN task tt ON tt.id = d.depends_on_task_id
           ORDER BY d.task_id ASC",
     )?;
-    let deps_raw: Vec<(String, String)> = dep_stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+    let deps_raw: Vec<(String, String, String)> = dep_stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
         .collect::<Result<_, _>>()?;
 
     let task_dids: std::collections::HashSet<&str> = tasks
@@ -343,8 +357,10 @@ fn collect_json(
 
     let deps: Vec<Value> = deps_raw
         .into_iter()
-        .filter(|(from, to)| task_dids.contains(from.as_str()) && task_dids.contains(to.as_str()))
-        .map(|(from, to)| serde_json::json!({"from": from, "to": to}))
+        .filter(|(from, to, _)| {
+            task_dids.contains(from.as_str()) && task_dids.contains(to.as_str())
+        })
+        .map(|(from, to, mode)| serde_json::json!({"from": from, "to": to, "mode": mode}))
         .collect();
 
     Ok(serde_json::json!({
