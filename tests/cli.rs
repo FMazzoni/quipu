@@ -1,6 +1,15 @@
 use assert_cmd::Command;
 use predicates::str::contains;
 
+/// Mirror of `db::SCHEMA_VERSION`, duplicated because `qp` is a bin-only crate
+/// with nothing for an integration test to import.
+///
+/// The tests using it assert that a store lands on the *current* version after
+/// migrating, not on any particular number, so a version bump belongs here and
+/// nowhere else in this file. If a bump makes some other test fail, that test
+/// found a real migration bug — do not chase it back to a literal.
+const CURRENT_SCHEMA_VERSION: &str = "4";
+
 #[test]
 fn cancel_terminates_task_unblocks_dependents() {
     let tmp = tempfile::tempdir().unwrap();
@@ -3519,7 +3528,10 @@ fn schema_migrates_v1_to_current() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(v, "3", "schema_version should be migrated to 3");
+    assert_eq!(
+        v, CURRENT_SCHEMA_VERSION,
+        "schema_version should be migrated forward"
+    );
     let has_default_tag: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='default_tag'",
@@ -3566,8 +3578,8 @@ fn read_command_self_heals_stale_schema_without_init() {
         )
         .unwrap();
     assert_eq!(
-        v, "3",
-        "schema_version should self-heal to 3 on a read command"
+        v, CURRENT_SCHEMA_VERSION,
+        "schema_version should self-heal on a read command"
     );
     let has_default_tag: i64 = conn
         .query_row(
@@ -3986,9 +3998,13 @@ fn json_init_emits_bare_object() {
     let v = json_stdout(&assert);
     assert!(v["db_path"].is_string());
     assert_eq!(v["prefix"], "QP");
-    // `InitOutcome.schema_version` is a `String`, not a number — pinning "3"
-    // as a JSON string is intentional, matching the reference output.
-    assert_eq!(v["schema_version"], serde_json::Value::String("3".into()));
+    // `InitOutcome.schema_version` is a `String`, not a number — asserting
+    // against a JSON string is the point of this line, matching the reference
+    // output. The value itself is checked, but the type is what would regress.
+    assert_eq!(
+        v["schema_version"],
+        serde_json::Value::String(CURRENT_SCHEMA_VERSION.into())
+    );
 }
 
 #[test]
@@ -5149,7 +5165,6 @@ fn attaching_a_slice_does_not_demote_a_running_wave() {
 /// a container with both slices and a bare prerequisite has all edges leaving
 /// one node.
 #[test]
-#[ignore = "spec: needs dep.mode + qp contains"]
 fn contains_and_blocks_are_distinguishable() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
@@ -5173,7 +5188,6 @@ fn contains_and_blocks_are_distinguishable() {
 
 /// SPEC: `--part-of` attaches at create time, keeping parent-first order cheap.
 #[test]
-#[ignore = "spec: needs add --part-of"]
 fn add_part_of_attaches_to_a_container() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
@@ -5193,9 +5207,10 @@ fn add_part_of_attaches_to_a_container() {
 /// SPEC: a container's blockers gate its contents.
 ///
 /// DECIDED. Where the blocker is attached is the control:
-///   - on the wave  -> "nothing in this wave starts until X" - freezes every slice
-///   - on a slice   -> only that slice waits; siblings run (already true today)
-/// Both are wanted, and having both means neither is a compromise - if only one
+/// - on the wave — "nothing in this wave starts until X", freezing every slice
+/// - on a slice — only that slice waits; siblings run (already true today)
+///
+/// Both are wanted, and having both means neither is a compromise: if only one
 /// slice needed the prerequisite you would attach it there instead.
 ///
 /// This makes `dep.mode` load-bearing for BEHAVIOUR, not just display: walking up
@@ -5227,4 +5242,208 @@ fn slices_of_a_blocked_wave_are_not_dispatchable() {
         .assert()
         .success()
         .stdout(contains("\"state\":\"pending\""));
+}
+
+/// A pre-`dep.mode` store gains the column, with every existing edge read as
+/// blocking.
+///
+/// The trap this guards: every statement in `schema.sql` is
+/// `CREATE ... IF NOT EXISTS`, so adding a column to a `CREATE TABLE` body
+/// reaches freshly-initialized stores and nobody else — the statement is a
+/// no-op wherever the table already exists. A fresh-`init` test passes whether
+/// or not the `ALTER` in `db::add_missing_columns` is there, and so proves
+/// nothing. This one builds the *old* table shape by hand.
+#[test]
+fn dep_mode_reaches_a_store_that_predates_the_column() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "slice"]).assert().success();
+    qp(&db)
+        .args(["add", "wave", "--depends-on", "QP-1"])
+        .assert()
+        .success();
+
+    // Rewind to the pre-mode schema: drop the column and un-stamp the version,
+    // leaving the edge in place.
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE dep DROP COLUMN mode;
+             UPDATE meta SET value = '3' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+        let cols: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('dep') WHERE name = 'mode'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cols, 0, "setup failed: mode column should be gone");
+    }
+
+    // Any read command must self-heal the schema — a user who upgrades the
+    // binary and runs `qp list` before ever running `qp init` depends on this.
+    qp(&db).args(["list", "--json"]).assert().success();
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let version: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    // The surviving edge is backfilled to `blocks`, which is what makes the
+    // migration inert: an old store has no containment edges until someone
+    // runs `qp contains`.
+    let modes: Vec<String> = {
+        let mut s = conn.prepare("SELECT mode FROM dep").unwrap();
+        let rows = s
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        rows
+    };
+    assert_eq!(modes, vec!["blocks".to_string()]);
+}
+
+/// `qp contains` reclassifies an edge that already exists as a plain dep.
+///
+/// This is the conversion path for stores that expressed containment as reverse
+/// dependencies before the mode existed, so re-linking must not error, must not
+/// duplicate the row, and must not disturb the container's state — both modes
+/// wait, so nothing about blockedness changes.
+#[test]
+fn contains_reclassifies_an_existing_dep_edge_in_place() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "slice"]).assert().success();
+    qp(&db)
+        .args(["add", "wave", "--depends-on", "QP-1"])
+        .assert()
+        .success();
+    let before = qp(&db).args(["show", "QP-2", "--json"]).assert().success();
+    assert_eq!(
+        json_stdout(&before)["blocked_by"],
+        serde_json::json!(["QP-1"])
+    );
+
+    qp(&db)
+        .args(["contains", "QP-2", "QP-1"])
+        .assert()
+        .success();
+
+    let after = qp(&db).args(["show", "QP-2", "--json"]).assert().success();
+    let v = json_stdout(&after);
+    assert_eq!(v["blocked_by"], serde_json::json!([]));
+    assert_eq!(v["contains"], serde_json::json!(["QP-1"]));
+    assert_eq!(v["state"], "pending", "reclassifying must not change state");
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM dep", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        n, 1,
+        "reclassify must update in place, not insert a second row"
+    );
+}
+
+/// The container is the row gaining an edge, so its owner gates both verbs.
+#[test]
+fn attaching_to_a_running_container_requires_its_agent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    for step in [
+        ["assign", "QP-1", "--to", "a"],
+        ["claim", "QP-1", "--as", "a"],
+    ] {
+        qp(&db).args(step).assert().success();
+    }
+    qp(&db).args(["add", "slice"]).assert().success();
+
+    qp(&db)
+        .args(["contains", "QP-1", "QP-2"])
+        .assert()
+        .failure();
+    qp(&db)
+        .args(["add", "another slice", "--part-of", "QP-1"])
+        .assert()
+        .failure();
+    qp(&db)
+        .args(["contains", "QP-1", "QP-2", "--as", "a"])
+        .assert()
+        .success();
+    // Still running: linking never demotes a task already in an agent's hands.
+    qp(&db)
+        .args(["show", "QP-1", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"running\""));
+}
+
+/// A cycle anywhere in a batch rejects the whole batch.
+///
+/// Partial application would leave the caller with edges they cannot see and did
+/// not ask for, and no way to tell which of the children landed.
+#[test]
+fn contains_batch_is_all_or_nothing_on_a_cycle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "outer"]).assert().success();
+    qp(&db).args(["add", "ok child"]).assert().success();
+    // QP-3 already contains QP-1, so making QP-1 contain QP-3 closes a loop.
+    qp(&db)
+        .args(["add", "inner", "--part-of", "QP-1"])
+        .assert()
+        .success();
+
+    qp(&db)
+        .args(["contains", "QP-1", "QP-2", "QP-1"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(contains("cycle"));
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM dep", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1, "the good child must be rolled back with the bad one");
+}
+
+/// `qp wave` keeps containers in its pending group.
+///
+/// The group's filter asks "is this genuinely waiting on something", which is a
+/// different question from "what blocks this". A container waiting on its own
+/// contents has no blockers, so a blockers-only filter silently drops every wave
+/// parent from the one view whose whole job is showing the wave.
+#[test]
+fn wave_pending_group_includes_a_container_waiting_on_its_contents() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-1"])
+        .assert()
+        .success();
+
+    let out = qp(&db).args(["wave", "--json"]).assert().success();
+    let v = json_stdout(&out);
+    let pending: Vec<&str> = v["pending"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["display_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(pending, vec!["QP-1"]);
 }
