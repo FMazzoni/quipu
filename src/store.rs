@@ -286,15 +286,90 @@ pub fn tags_by_task(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, Vec<S
     Ok(out)
 }
 
-/// Unresolved dependency display-ids for each of `ids`, bulk-fetched.
+/// Unresolved *blocking* dependencies for each of `ids`, bulk-fetched.
 ///
 /// Unresolved means not `done` and not `cancelled`. This is the read-side form
 /// of the unresolved-dep predicate that also appears (as a guarded-transition
 /// UPDATE/EXISTS check, out of scope here) in `db::refresh_ready` and
 /// `depends.rs`.
+///
+/// Containment edges are excluded. They hold a container `pending` exactly like
+/// a blocker does, so those write-side predicates deliberately count both — but
+/// rendering "Wave: containment" as *blocked by* the four slices it is made of
+/// describes the graph wrongly. What a container is waiting on is reported by
+/// [`contents_by_task`] instead.
 pub fn unresolved_blockers_by_task(
     conn: &Connection,
     ids: &[i64],
+) -> Result<HashMap<i64, Vec<String>>> {
+    dep_targets_by_task(
+        conn,
+        ids,
+        Some(crate::db::MODE_BLOCKS),
+        "AND t2.state NOT IN ('done','cancelled')",
+    )
+}
+
+/// Every unresolved dependency of each of `ids`, both modes together.
+///
+/// The read-side twin of the predicate in `db::refresh_ready`: this is exactly
+/// the set of things keeping a task out of `ready`, which is *not* the same
+/// question as [`unresolved_blockers_by_task`] answers. A container waiting on
+/// its own contents has no blockers and is still not workable, so a caller
+/// asking "why is this pending" wants this one, and a caller rendering "blocked
+/// by" wants that one. `qp wave` picked the wrong one and silently dropped
+/// containers out of its pending group.
+pub fn unresolved_deps_by_task(
+    conn: &Connection,
+    ids: &[i64],
+) -> Result<HashMap<i64, Vec<String>>> {
+    dep_targets_by_task(conn, ids, None, "AND t2.state NOT IN ('done','cancelled')")
+}
+
+/// Contents of each container in `ids`, bulk-fetched.
+///
+/// The other side of [`unresolved_blockers_by_task`].
+///
+/// Unlike blockers this is *not* filtered by state — a container's manifest is
+/// the whole of what it is made of, and dropping the finished parts would make
+/// a wave look emptier the closer it got to done.
+pub fn contents_by_task(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, Vec<String>>> {
+    dep_targets_by_task(conn, ids, Some(crate::db::MODE_CONTAINS), "")
+}
+
+/// The containers a task belongs to — [`contents_by_task`] walked backwards.
+///
+/// Single-task rather than bulk because it reads the `dep` table against the
+/// grain: `idx_dep_back` covers `depends_on_task_id`, so this is an index hit
+/// per call, but nothing yet needs it for a whole list at once. Promote it to a
+/// bulk form if `list` or `tree` ever grows a "part of" column.
+///
+/// A task can sit in more than one container. Nothing forbids it, and a slice
+/// that is genuinely part of two waves is better modelled honestly than by
+/// picking one.
+pub fn containers_of(conn: &Connection, id: i64) -> Result<Vec<String>> {
+    let mut s = conn.prepare(
+        "SELECT t.display_id FROM dep d JOIN task t ON t.id = d.task_id
+          WHERE d.depends_on_task_id = ?1 AND d.mode = ?2 ORDER BY t.id",
+    )?;
+    let rows = s
+        .query_map(rusqlite::params![id, crate::db::MODE_CONTAINS], |r| {
+            r.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Shared body: depended-on display-ids per task, optionally filtered by mode.
+///
+/// `mode` of `None` means every edge regardless of mode. `extra` is appended raw
+/// to the WHERE clause and so must never carry caller input — the call sites
+/// above pass compile-time literals.
+fn dep_targets_by_task(
+    conn: &Connection,
+    ids: &[i64],
+    mode: Option<&str>,
+    extra: &str,
 ) -> Result<HashMap<i64, Vec<String>>> {
     let mut out: HashMap<i64, Vec<String>> = HashMap::new();
     for chunk in ids.chunks(SQL_VAR_CHUNK) {
@@ -304,12 +379,17 @@ pub fn unresolved_blockers_by_task(
         let q = format!(
             "SELECT d.task_id, t2.display_id
                FROM dep d JOIN task t2 ON t2.id = d.depends_on_task_id
-              WHERE d.task_id IN ({}) AND t2.state NOT IN ('done','cancelled')
+              WHERE d.task_id IN ({}) {} {}
               ORDER BY t2.id",
-            placeholders(chunk.len())
+            placeholders(chunk.len()),
+            if mode.is_some() { "AND d.mode = ?" } else { "" },
+            extra
         );
         let mut s = conn.prepare(&q)?;
-        let pref: Vec<&dyn ToSql> = chunk.iter().map(|i| i as &dyn ToSql).collect();
+        let mut pref: Vec<&dyn ToSql> = chunk.iter().map(|i| i as &dyn ToSql).collect();
+        if let Some(m) = mode.as_ref() {
+            pref.push(m);
+        }
         for r in s.query_map(pref.as_slice(), |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
         })? {

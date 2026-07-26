@@ -343,7 +343,11 @@ fn read_project_uuid(path: &Path) -> Result<Option<String>> {
 /// `schema.sql` without a bump reaches freshly-initialised stores only and
 /// silently never reaches anyone's real database. QP-142's partial unique index
 /// took this from "2" to "3" for exactly that reason.
-pub const SCHEMA_VERSION: &str = "3";
+///
+/// "4" adds `dep.mode`. A bump alone was still not enough there: re-running
+/// `CREATE TABLE IF NOT EXISTS dep` is a no-op on a store that already has the
+/// table, so the new column needs the explicit `ALTER` in `migrate`.
+pub const SCHEMA_VERSION: &str = "4";
 
 /// Open the connection and set pragmas.
 ///
@@ -364,6 +368,45 @@ fn open_conn(path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "foreign_keys", true)?;
     conn.pragma_update(None, "busy_timeout", 5000)?;
     Ok(conn)
+}
+
+/// Apply the `ALTER TABLE` steps that `schema.sql` structurally cannot.
+///
+/// Every statement in `schema.sql` is `CREATE ... IF NOT EXISTS`, which is why
+/// the file is safe to re-run — and also why it can only ever *add tables and
+/// indexes*. A column added to an existing `CREATE TABLE` body reaches freshly
+/// initialized stores and nobody else, silently, because the `IF NOT EXISTS`
+/// makes the whole statement a no-op wherever the table is already there. Any
+/// column added to a table that shipped in an earlier `SCHEMA_VERSION` needs a
+/// matching entry here.
+///
+/// Runs only on a version mismatch (from `migrate`), and each step re-checks
+/// `pragma_table_info` rather than trusting the stamp, so it is idempotent even
+/// if the stamp is wrong — a store hand-migrated, restored from a backup, or
+/// half-way through a previous upgrade converges to the same schema. That also
+/// makes it a no-op on a fresh store, where `schema.sql` already created the
+/// column.
+fn add_missing_columns(conn: &Connection) -> Result<()> {
+    // (table, column, full DDL fragment). SQLite requires an ADD COLUMN default
+    // to be a constant, so `NOT NULL DEFAULT 'blocks'` is legal and backfills
+    // every existing row in place.
+    const ADDITIONS: &[(&str, &str, &str)] =
+        &[("dep", "mode", "mode TEXT NOT NULL DEFAULT 'blocks'")];
+    for (table, column, ddl) in ADDITIONS {
+        let present: bool = conn
+            .query_row(
+                "SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2",
+                rusqlite::params![table, column],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some();
+        if !present {
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {ddl}"))
+                .with_context(|| format!("adding {table}.{column}"))?;
+        }
+    }
+    Ok(())
 }
 
 /// Bring the schema up to date, keyed off the stamped `schema_version`.
@@ -409,6 +452,7 @@ fn migrate(conn: &Connection, prefix: Option<&str>) -> Result<Option<String>> {
     };
     if current.as_deref() != Some(SCHEMA_VERSION) {
         conn.execute_batch(SCHEMA).context("applying schema")?;
+        add_missing_columns(conn)?;
         // Stamp project_uuid + schema_version + display_prefix on first init only.
         // Subsequent init calls are idempotent — prefix is never mutated post-init
         // (INSERT OR IGNORE swallows the duplicate key).
@@ -624,6 +668,52 @@ pub fn refresh_ready(tx: &Transaction) -> Result<()> {
     Ok(())
 }
 
+/// [`refresh_ready`], plus a `state_change` event for each task it promoted.
+///
+/// `refresh_ready` is a set-based sweep with no idea which rows it touched, so
+/// the promotions it performs are invisible to `qp timeline`. Commands that
+/// unblock work — anything removing an edge — owe the audit log an entry, and
+/// this is how they get one: snapshot the candidates first, sweep, then diff.
+///
+/// The snapshot is the set of `pending` tasks with no unresolved deps *before*
+/// the sweep, which is exactly the set the sweep will promote. Reading state
+/// back afterwards rather than trusting that equivalence keeps the event log
+/// honest if the two ever drift.
+///
+/// Returns the ids promoted, so a caller that cares whether one *particular*
+/// task came back (`qp depends --rm` reports this) can check without a third
+/// query.
+pub fn refresh_ready_logged(tx: &Transaction, agent: Option<&str>, via: &str) -> Result<Vec<i64>> {
+    let candidates: Vec<i64> = {
+        let mut stmt = tx.prepare(
+            "SELECT t.id FROM task t WHERE t.state = 'pending' \
+               AND NOT EXISTS (SELECT 1 FROM dep d JOIN task t2 ON t2.id = d.depends_on_task_id \
+                                WHERE d.task_id = t.id AND t2.state NOT IN ('done','cancelled'))",
+        )?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    refresh_ready(tx)?;
+    let mut promoted = Vec::new();
+    for tid in candidates {
+        let now: String =
+            tx.query_row("SELECT state FROM task WHERE id = ?", [tid], |r| r.get(0))?;
+        if now == "ready" {
+            promoted.push(tid);
+            insert_event(
+                tx,
+                Some(tid),
+                "state_change",
+                agent,
+                Some(&serde_json::json!({"to": "ready", "via": via})),
+            )?;
+        }
+    }
+    Ok(promoted)
+}
+
 /// The single open assignment for a task, if any.
 ///
 /// TODO(QP-68): migrates to store.rs in a later wave.
@@ -687,6 +777,125 @@ pub fn would_cycle(tx: &Transaction, from: i64, to: i64) -> Result<bool> {
         |r| r.get(0),
     )?;
     Ok(n > 0)
+}
+
+/// A dep edge that says "this must finish before that can start".
+///
+/// Written by `qp depends`, and the mode every row predating `dep.mode` carries.
+pub const MODE_BLOCKS: &str = "blocks";
+/// A dep edge that says "that is part of this".
+///
+/// Written by `qp contains` and `qp add --part-of`. Waits exactly like
+/// [`MODE_BLOCKS`] — a container is not ready while its contents are open —
+/// but additionally propagates the container's blockers down to its contents.
+pub const MODE_CONTAINS: &str = "contains";
+
+/// Gate a dep-edge mutation on ownership of the task being mutated.
+///
+/// The gate is on the downstream task — the one *gaining or losing* the edge —
+/// because that is the row this writes to; the upstream task is untouched, so
+/// its owner has no say. The practical consequence: you may point an edge *at*
+/// another agent's in-flight work, but you may not reach into that work and
+/// hang a new blocker on it.
+pub fn require_edge_owner(
+    tx: &Transaction,
+    task_id: i64,
+    display_id: &str,
+    agent: Option<&str>,
+) -> Result<()> {
+    let state: String = tx.query_row("SELECT state FROM task WHERE id = ?", [task_id], |r| {
+        r.get(0)
+    })?;
+    if !matches!(state.as_str(), "assigned" | "running") {
+        return Ok(());
+    }
+    let assignee: Option<String> = current_assignment(tx, task_id)?.map(|o| o.agent_id);
+    match (agent, assignee.as_deref()) {
+        (Some(want), Some(have)) if want == have => Ok(()),
+        _ => Err(not_owner(
+            format!("{display_id} is {state}; --as must match latest assignee"),
+            Some(display_id.to_string()),
+            assignee,
+        )),
+    }
+}
+
+/// Add one dep edge in `mode`, demoting the depender if the edge blocks it.
+///
+/// Shared by `qp depends` and `qp contains`, which differ only in argument
+/// order and the mode they pass — the cycle check, the demote and the audit
+/// event are identical, and must stay that way: a containment edge that skipped
+/// the cycle check would strand every task in the loop as permanently
+/// `pending`.
+///
+/// Re-linking an existing pair in a different mode reclassifies it in place
+/// rather than erroring, which is how a store that expressed containment as
+/// plain deps converts: re-run `qp contains` over the edges that meant
+/// containment all along. It cannot change whether the depender is blocked —
+/// both modes wait — so no state transition is needed on that path.
+///
+/// Returns `false` when the edge already existed in this mode, i.e. the call
+/// was a no-op. Callers report that as success; asking for an edge that is
+/// already there is not an error.
+pub fn link_dep(
+    tx: &Transaction,
+    task_id: i64,
+    task_display: &str,
+    on_id: i64,
+    on_display: &str,
+    mode: &str,
+    agent: Option<&str>,
+) -> Result<bool> {
+    if would_cycle(tx, task_id, on_id)? {
+        return Err(invariant(
+            "dependency_cycle",
+            format!(
+                "cycle: {task_display} depends on {on_display} which (transitively) depends on {task_display}"
+            ),
+        ));
+    }
+    // The DO UPDATE's WHERE suppresses the write when the mode already matches,
+    // so `changes()` is exactly "did this call alter the graph".
+    let changed = tx.execute(
+        "INSERT INTO dep(task_id, depends_on_task_id, mode) VALUES (?1, ?2, ?3)
+           ON CONFLICT(task_id, depends_on_task_id)
+           DO UPDATE SET mode = excluded.mode WHERE dep.mode <> excluded.mode",
+        rusqlite::params![task_id, on_id, mode],
+    )?;
+    if changed == 0 {
+        return Ok(false);
+    }
+    // Guarded demote: matches only a `ready` task that now has an unresolved
+    // dep. `assigned`/`running` are deliberately excluded — a task already in an
+    // agent's hands is never yanked back, and the ownership gate above is what
+    // makes that safe rather than merely lucky.
+    let demoted = tx.execute(
+        "UPDATE task SET state = ?1
+          WHERE id = ?2 AND state = ?3
+            AND EXISTS (SELECT 1 FROM dep d JOIN task t2 ON t2.id = d.depends_on_task_id
+                         WHERE d.task_id = ?2 AND t2.state NOT IN ('done','cancelled'))",
+        rusqlite::params![State::Pending, task_id, State::Ready],
+    )?;
+    if demoted == 1 {
+        insert_event(
+            tx,
+            Some(task_id),
+            "state_change",
+            agent,
+            Some(&serde_json::json!({"to": "pending", "via": mode})),
+        )?;
+    }
+    // One event kind for both modes, with `mode` in the payload. A separate
+    // `contains_added` kind would mean a consumer filtering on `dep_added`
+    // silently missed half the graph mutations.
+    insert_event(
+        tx,
+        Some(task_id),
+        "dep_added",
+        agent,
+        Some(&serde_json::json!({"on": on_display, "mode": mode})),
+    )?;
+    Ok(true)
 }
 
 #[cfg(test)]

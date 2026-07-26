@@ -9,6 +9,7 @@ pub mod block;
 pub mod cancel;
 pub mod claim;
 pub mod complete;
+pub mod contains;
 pub mod decisions;
 pub mod depends;
 pub mod edit;
