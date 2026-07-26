@@ -29,8 +29,18 @@ pub fn run(db_path: &std::path::Path, a: WaveArgs) -> Result<()> {
 
         if label == "pending" {
             let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
-            let blockers = store::unresolved_blockers_by_task(&conn, &ids)?;
-            rows.retain(|r| blockers.get(&r.id).is_some_and(|v| !v.is_empty()));
+            // Mode-agnostic on purpose: the question here is "is this genuinely
+            // waiting on something", and a container waiting on its own contents
+            // qualifies even though it has no *blockers*. Using the blockers-only
+            // query drops every wave parent out of this group.
+            let waiting = store::unresolved_deps_by_task(&conn, &ids)?;
+            // A frozen slice has no unresolved dep of its own — the blocker is
+            // on a container above it — so it satisfies neither half of this
+            // filter on its own and would disappear from every view.
+            let frozen = store::frozen_ids(&conn)?;
+            rows.retain(|r| {
+                waiting.get(&r.id).is_some_and(|v| !v.is_empty()) || frozen.contains(&r.id)
+            });
         }
 
         let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();

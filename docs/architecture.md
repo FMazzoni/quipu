@@ -113,6 +113,28 @@ it to `ready` when they do. One rule, one place.
 The `dep` table. A task is `ready` when no dependency is left in a non-terminal
 state.
 
+Every edge carries a `mode`, and the two modes make different claims:
+
+| mode | written by | means |
+|---|---|---|
+| `blocks` | `qp depends` | the other task must finish before this one starts |
+| `contains` | `qp contains`, `qp add --part-of` | the other task is *part of* this one |
+
+Both make the depender wait, so a container is not `ready` while anything
+inside it is open — that is where a wave's rollup comes from, with no second
+rule and no bookkeeping. The difference is that a blocker on a container
+propagates *down*: attaching a prerequisite to a wave freezes every slice
+inside it, at any depth, while attaching the same prerequisite to one slice
+leaves its siblings dispatchable. Where the edge is attached is the whole of
+the control, which is why there is no setting to turn it off — a per-project
+toggle would make the same graph mean different things in different stores.
+
+The consequence to hold onto: **readiness is not a local property**. A task with
+every one of its own dependencies resolved can still be held back by a blocker
+several containment levels above it. `qp show` reports that as `frozen_by`,
+naming both the blocker and the container carrying it, because nothing else on
+such a ticket would explain its `pending`.
+
 Promotion has exactly one implementation: `refresh_ready` in
 [`db.rs`](https://github.com/FMazzoni/quipu/blob/main/src/db.rs), which any command that might resolve a dependency
 calls. The reverse edge is separate — adding an unresolved dependency to a
@@ -121,7 +143,16 @@ calls. The reverse edge is separate — adding an unresolved dependency to a
 itself is therefore written in more than one place; `store.rs` documents the
 read-side copy. Adding a terminal state means updating each of them.
 
-Cycle prevention lives in `would_cycle`, a recursive CTE in the same file.
+The downward half is `db::FROZEN`, a `WITH RECURSIVE` clause shared by the
+promote path, the demote path and the read path so the three cannot disagree
+about what "frozen" means. It is a standalone set rather than a correlated
+subquery because SQLite will not let a CTE reference the row of an enclosing
+`UPDATE` — which turned out to be the better shape anyway, since computing it
+once keeps both transitions set-based and idempotent like everything else here.
+
+Cycle prevention lives in `would_cycle`, a recursive CTE in the same file, and
+applies to both modes: a containment loop would strand every task in it as
+permanently `pending` with nothing to explain why.
 
 ### 3. An append-only event log
 
@@ -335,7 +366,8 @@ explanation.
 
 | symptom | diagnose with | cause |
 |---|---|---|
-| stuck in `pending` | `qp tree <id>` | an upstream dep is not `done`. `refresh_ready` in [`db.rs`](https://github.com/FMazzoni/quipu/blob/main/src/db.rs) owns `pending`→`ready`, but readiness is **not single-homed**: [`depends.rs`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/depends.rs) also demotes `ready`→`pending` when a new edge lands, so a task can leave `ready` without anything having acted on it directly |
+| stuck in `pending` | `qp show <id>` | an upstream dep is not `done`. `refresh_ready` in [`db.rs`](https://github.com/FMazzoni/quipu/blob/main/src/db.rs) owns `pending`→`ready`, but readiness is **not single-homed**: [`depends.rs`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/depends.rs) also demotes `ready`→`pending` when a new edge lands, so a task can leave `ready` without anything having acted on it directly |
+| `pending` with an empty `blocked_by` | `qp show <id>` | read `frozen_by`. A blocker attached to something that *contains* this task holds it back too, and that blocker is not among its own dependencies. Detach it from the container, or finish it |
 | exit 2, code `already_claimed` | `qp timeline <id>` | someone claimed it first. **This is the expected outcome of losing a race, not a failure** — the timeline names the winner. Do not treat it as an error path |
 | exit 2, kind `not_owner` | `qp show <id>` | a different agent holds the open assignment; the envelope's `owner` field names them. Do not retry — escalate, or `qp reclaim` |
 | exit 2, code `not_ready` | `qp show <id>` | `assign` requires state `ready`; the task is `pending`, `assigned`, `running`, or terminal |
@@ -364,7 +396,8 @@ The error-envelope shape per `kind` — which fields are actually present, and w
 |---|---|
 | what state is this in, and who holds it | `qp show <id>` |
 | what happened to it, in order | `qp timeline <id>` |
-| why is it not ready | `qp tree <id>` |
+| why is it not ready | `qp show <id>` — `blocked_by` for its own prerequisites, `frozen_by` for a blocker on something containing it |
+| how does this decompose | `qp tree <id>` — containment nests, blocking annotates |
 | what have agents decided, project-wide | `qp decisions` |
 | what is in flight right now | `qp wave` |
 | aggregate counts by state | `qp status` |

@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 -- stamped on init: meta(key='project_uuid', value=<uuid v4>)
--- stamped on init: meta(key='schema_version', value='3')
+-- stamped on init: meta(key='schema_version', value=db::SCHEMA_VERSION)
 -- stamped on init: meta(key='display_prefix', value='QP' or user-supplied)
 
 CREATE TABLE IF NOT EXISTS default_tag (
@@ -29,8 +29,22 @@ CREATE TABLE IF NOT EXISTS task (
 CREATE TABLE IF NOT EXISTS dep (
     task_id            INTEGER NOT NULL REFERENCES task(id),
     depends_on_task_id INTEGER NOT NULL REFERENCES task(id),
+    mode               TEXT NOT NULL DEFAULT 'blocks',
     PRIMARY KEY (task_id, depends_on_task_id)
 );
+-- mode ∈ blocks | contains. Both make `task_id` wait for `depends_on_task_id`;
+-- they differ in what that waiting means, and only `contains` propagates a
+-- container's blockers down to its contents. Values match the CLI verbs
+-- (`qp depends`, `qp contains`) so an edge is traceable to the command that
+-- wrote it. `mode` is an attribute of the pair, not part of its identity, so
+-- the PRIMARY KEY is unchanged: a pair has exactly one edge, in one mode.
+--
+-- Existing rows default to 'blocks', which is what makes adopting this inert:
+-- a store predating the column has no containment edges, nothing to propagate
+-- through, and identical behaviour until someone runs `qp contains`.
+--
+-- Adding this column to schema.sql was NOT enough to get it onto an existing
+-- store; see the explicit ALTER in `db::add_missing_columns`.
 
 CREATE TABLE IF NOT EXISTS assignment (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
