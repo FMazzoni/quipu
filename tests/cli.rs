@@ -4975,3 +4975,246 @@ fn read_only_commands_still_print_prose_errors_without_json() {
         );
     }
 }
+
+// ── Containment spec ────────────────────────────────────────────────────────
+//
+// A "wave" ticket that reverse-depends on its slices gets rollup for free:
+// it stays `pending` while any slice is open and `refresh_ready` promotes it
+// once the last one lands. tex-agent's agent found this unaided and used it 17
+// times, so these first tests LOCK behaviour that already works.
+//
+// The `#[ignore]`d tests below are the specification for work not yet built.
+// Run them with `cargo test --test cli -- --ignored`. Each names the decision
+// it encodes; do not un-ignore one without landing the decision first.
+
+/// A container is pending while any of its contents is open.
+#[test]
+fn wave_is_pending_while_a_slice_is_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "slice a"]).assert().success();
+    qp(&db).args(["add", "slice b"]).assert().success();
+    qp(&db)
+        .args([
+            "add",
+            "Wave",
+            "--depends-on",
+            "QP-1",
+            "--depends-on",
+            "QP-2",
+        ])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["show", "QP-3", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"pending\""));
+}
+
+/// The rollup: completing the last slice promotes the container to `ready`.
+#[test]
+fn wave_becomes_ready_when_its_last_slice_completes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "slice a"]).assert().success();
+    qp(&db)
+        .args(["add", "Wave", "--depends-on", "QP-1"])
+        .assert()
+        .success();
+    for step in [
+        ["assign", "QP-1", "--to", "a"],
+        ["claim", "QP-1", "--as", "a"],
+    ] {
+        qp(&db).args(step).assert().success();
+    }
+    qp(&db)
+        .args(["complete", "QP-1", "--as", "a"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["show", "QP-2", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"ready\""));
+}
+
+/// Rollup cascades: nesting works to arbitrary depth with no extra machinery.
+#[test]
+fn nested_waves_roll_up_one_level_at_a_time() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "slice"]).assert().success();
+    qp(&db)
+        .args(["add", "Wave: inner", "--depends-on", "QP-1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["add", "Wave: outer", "--depends-on", "QP-2"])
+        .assert()
+        .success();
+    for step in [
+        ["assign", "QP-1", "--to", "a"],
+        ["claim", "QP-1", "--as", "a"],
+    ] {
+        qp(&db).args(step).assert().success();
+    }
+    qp(&db)
+        .args(["complete", "QP-1", "--as", "a"])
+        .assert()
+        .success();
+    // inner is ready (its work is done); outer still waits on inner itself.
+    qp(&db)
+        .args(["show", "QP-2", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"ready\""));
+    qp(&db)
+        .args(["show", "QP-3", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"pending\""));
+}
+
+/// A containment cycle is rejected by the same guard that catches dep cycles.
+#[test]
+fn containment_cycle_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "inner"]).assert().success();
+    qp(&db)
+        .args(["add", "outer", "--depends-on", "QP-1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-2"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(contains("cycle"));
+}
+
+/// Attaching contents to an already-`ready` container demotes it.
+#[test]
+fn attaching_a_slice_demotes_a_ready_wave() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db).args(["add", "slice"]).assert().success();
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["show", "QP-1", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"pending\""));
+}
+
+/// A *running* container is never demoted — work is not yanked from a live agent.
+#[test]
+fn attaching_a_slice_does_not_demote_a_running_wave() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    for step in [
+        ["assign", "QP-1", "--to", "a"],
+        ["claim", "QP-1", "--as", "a"],
+    ] {
+        qp(&db).args(step).assert().success();
+    }
+    qp(&db).args(["add", "slice"]).assert().success();
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-2", "--as", "a"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["show", "QP-1", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"running\""));
+}
+
+// ── Not yet built: the specification ────────────────────────────────────────
+
+/// SPEC: containment and blocking must be distinguishable per edge.
+/// Encodes the `dep.mode` decision. A node-level marker cannot substitute:
+/// a container with both slices and a bare prerequisite has all edges leaving
+/// one node.
+#[test]
+#[ignore = "spec: needs dep.mode + qp contains"]
+fn contains_and_blocks_are_distinguishable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "slice"]).assert().success();
+    qp(&db).args(["add", "prerequisite"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["contains", "QP-3", "QP-1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["depends", "QP-3", "--on", "QP-2"])
+        .assert()
+        .success();
+    let out = qp(&db).args(["show", "QP-3", "--json"]).assert().success();
+    let v = json_stdout(&out);
+    assert_eq!(v["contains"], serde_json::json!(["QP-1"]));
+    assert_eq!(v["blocked_by"], serde_json::json!(["QP-2"]));
+}
+
+/// SPEC: `--part-of` attaches at create time, keeping parent-first order cheap.
+#[test]
+#[ignore = "spec: needs add --part-of"]
+fn add_part_of_attaches_to_a_container() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["show", "QP-1", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"pending\""));
+}
+
+/// SPEC — UNDECIDED. Should a container's blockers gate its contents?
+/// Today they do not: a wave blocked by a bare ticket still has dispatchable
+/// slices, so the blocking edge delays only the wrap-up signal. Propagating is
+/// arguably correct but makes readiness non-local and assumes every slice needs
+/// every prerequisite. Do NOT un-ignore until that decision lands.
+#[test]
+#[ignore = "spec: UNDECIDED — blocker propagation through containment"]
+fn slices_of_a_blocked_wave_are_not_dispatchable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "slice"]).assert().success();
+    qp(&db).args(["add", "prerequisite"]).assert().success();
+    qp(&db).args(["add", "Wave"]).assert().success();
+    qp(&db)
+        .args(["contains", "QP-3", "QP-1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["depends", "QP-3", "--on", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["show", "QP-1", "--json"])
+        .assert()
+        .success()
+        .stdout(contains("\"state\":\"pending\""));
+}
