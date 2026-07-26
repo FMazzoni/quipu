@@ -146,15 +146,27 @@ For multi-subagent waves: open a wave ticket and child impl tickets so `qp tree`
 
 ```bash
 ./target/release/qp add "Wave: <feature>" --tag kind:wave
-./target/release/qp add "<Slice A title>" --tag kind:impl
-./target/release/qp add "<Slice B title>" --tag kind:impl
+# `--part-of` attaches at creation, so file the wave first and the slices land
+# inside it. Note the direction: the *named* task is the one that ends up
+# waiting, the opposite of `--depends-on`.
+./target/release/qp add "<Slice A title>" --tag kind:impl --part-of QP-<wave>
+./target/release/qp add "<Slice B title>" --tag kind:impl --part-of QP-<wave>
 
-# One edge per call — `qp depends` takes a single --on, not a list.
-./target/release/qp depends QP-<wave> --on QP-<a>
-./target/release/qp depends QP-<wave> --on QP-<b>
+# Ordering *between* slices is a different edge. One per call — `qp depends`
+# takes a single --on, not a list.
+./target/release/qp depends QP-<b> --on QP-<a>    # B lands after A
 ```
 
-The wave ticket depends on its slices, so it sits `pending` until they all complete and then auto-promotes to `ready`. Use the same one-edge-per-call form to express ordering *between* slices (`qp depends QP-<b> --on QP-<a>` when B must land after A) — the DAG then enforces the sequence instead of you remembering it.
+The wave ticket contains its slices, so it sits `pending` until they all complete and then auto-promotes to `ready` — that promotion is the wave's "wrap it up" signal, not a slice becoming workable.
+
+**Containment and blocking are different edges, and the difference is load-bearing.** Use `--part-of` (or `qp contains QP-<wave> QP-<a> QP-<b>`, which takes several children at once) for *this is one of the pieces*, and `qp depends` for *this must happen first*. Both hold the wave back, but only containment nests in `qp tree`, and only containment propagates:
+
+- A blocker on **the wave** freezes every slice inside it — "nothing in this wave starts until X lands". Reach for it when a prerequisite genuinely gates the whole batch.
+- A blocker on **one slice** leaves its siblings dispatchable, which is what you want when only that slice needs the prerequisite.
+
+Where you attach it is the whole of the control, so attaching it in the wrong place is a real scheduling bug rather than a cosmetic one. If a slice is sitting `pending` with an empty `blocked_by`, `qp show` reports the culprit as `frozen_by`, naming both the blocker and the container carrying it.
+
+If you already filed slices with `--depends-on` pointing at the wave, `qp contains QP-<wave> QP-<a> QP-<b>` reclassifies those edges in place — no need to unlink and re-link.
 
 **Skip ticketing** for single-subagent waves — open the impl ticket directly, no wave wrapper.
 
