@@ -100,22 +100,26 @@ struct TicketDetail {
 }
 
 fn ticket_detail_json(t: &TicketDetail) -> Value {
-    // `mode` on each edge, so "what is this made of" and "what is stopping it"
-    // are answerable from the ticket detail without a second query.
-    let parents: Vec<Value> = t
-        .parents
-        .iter()
-        .map(|(did, title, state, mode)| {
-            serde_json::json!({"display_id": did, "title": title, "state": state, "mode": mode})
-        })
-        .collect();
-    let children: Vec<Value> = t
-        .children
-        .iter()
-        .map(|(did, title, state, mode)| {
-            serde_json::json!({"display_id": did, "title": title, "state": state, "mode": mode})
-        })
-        .collect();
+    // `parents`/`children` name the *dep* direction: a "parent" is something
+    // this ticket depends on. That reads fine for blocking and exactly backwards
+    // for containment, where the things a container depends on are its contents
+    // — so a consumer rendering `mode: contains` under a "parents" heading
+    // inverts the hierarchy. The two names are kept for compatibility and
+    // `mode` is carried on each entry, but the unambiguous lists below are what
+    // a renderer should reach for.
+    let edge = |(did, title, state, mode): &(String, String, String, String)| serde_json::json!({"display_id": did, "title": title, "state": state, "mode": mode});
+    let parents: Vec<Value> = t.parents.iter().map(edge).collect();
+    let children: Vec<Value> = t.children.iter().map(edge).collect();
+    let pick = |v: &Vec<(String, String, String, String)>, want: &str| -> Vec<Value> {
+        v.iter()
+            .filter(|(_, _, _, m)| m == want)
+            .map(edge)
+            .collect()
+    };
+    let contains = pick(&t.parents, crate::db::MODE_CONTAINS);
+    let blocked_by = pick(&t.parents, crate::db::MODE_BLOCKS);
+    let part_of = pick(&t.children, crate::db::MODE_CONTAINS);
+    let blocks = pick(&t.children, crate::db::MODE_BLOCKS);
     let events: Vec<Value> = t
         .events
         .iter()
@@ -139,6 +143,12 @@ fn ticket_detail_json(t: &TicketDetail) -> Value {
         "tags": t.tags,
         "parents": parents,
         "children": children,
+        // Named from this ticket's point of view, so no reader has to know
+        // which way a dep edge points to render the graph correctly.
+        "contains": contains,
+        "part_of": part_of,
+        "blocked_by": blocked_by,
+        "blocks": blocks,
         "events": events,
     })
 }

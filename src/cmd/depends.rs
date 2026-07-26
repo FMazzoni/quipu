@@ -6,6 +6,7 @@ use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 
 #[derive(Args, Debug)]
@@ -64,6 +65,17 @@ pub fn run(db_path: &std::path::Path, a: DependsArgs) -> Result<()> {
         db::require_edge_owner(tx, task_id, &task_resolved.display_id, a.agent.as_deref())?;
 
         if a.rm {
+            // Read the mode before deleting so the audit event can name it.
+            // `--rm` is deliberately mode-blind — an edge is identified by its
+            // endpoints — but a log entry that does not say which kind of edge
+            // vanished cannot be replayed against the graph.
+            let removed_mode: Option<String> = tx
+                .query_row(
+                    "SELECT mode FROM dep WHERE task_id = ? AND depends_on_task_id = ?",
+                    rusqlite::params![task_id, on_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
             let n = tx.execute(
                 "DELETE FROM dep WHERE task_id = ? AND depends_on_task_id = ?",
                 rusqlite::params![task_id, on_id],
@@ -79,7 +91,10 @@ pub fn run(db_path: &std::path::Path, a: DependsArgs) -> Result<()> {
                 Some(task_id),
                 "dep_removed",
                 a.agent.as_deref(),
-                Some(&serde_json::json!({"on": a.on})),
+                Some(&serde_json::json!({
+                    "on": on_resolved.display_id,
+                    "mode": removed_mode.as_deref().unwrap_or(db::MODE_BLOCKS),
+                })),
             )?;
             let promoted = db::refresh_ready_logged(tx, a.agent.as_deref(), "depends_rm")?;
             Ok(promoted.contains(&task_id))
@@ -93,7 +108,11 @@ pub fn run(db_path: &std::path::Path, a: DependsArgs) -> Result<()> {
                 db::MODE_BLOCKS,
                 a.agent.as_deref(),
             )?;
-            // Adding an edge can only demote; `promoted` is a `--rm`-only signal.
+            // Not "adding can only demote" any more. Reclassifying an edge
+            // from `contains` to `blocks` takes everything under it out of the
+            // frozen set, so an add can free work. `link_dep` runs both
+            // reconciliation sweeps; `promoted` stays a `--rm`-only signal
+            // because it reports on *this* task, which an add never promotes.
             Ok(false)
         }
     })?;

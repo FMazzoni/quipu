@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 -- stamped on init: meta(key='project_uuid', value=<uuid v4>)
--- stamped on init: meta(key='schema_version', value='3')
+-- stamped on init: meta(key='schema_version', value=db::SCHEMA_VERSION)
 -- stamped on init: meta(key='display_prefix', value='QP' or user-supplied)
 
 CREATE TABLE IF NOT EXISTS default_tag (
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS dep (
 -- through, and identical behaviour until someone runs `qp contains`.
 --
 -- Adding this column to schema.sql was NOT enough to get it onto an existing
--- store; see the explicit ALTER in `db::migrate`.
+-- store; see the explicit ALTER in `db::add_missing_columns`.
 
 CREATE TABLE IF NOT EXISTS assignment (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,

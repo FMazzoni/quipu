@@ -350,13 +350,21 @@ pub fn frozen_by(conn: &Connection, id: i64) -> Result<Vec<(String, String)>> {
     // Ancestors first — the containers above `id`, transitively — then their
     // unresolved blocking edges. Deliberately *not* db::FROZEN, which answers
     // the yes/no question and so loses the path.
+    // Terminal containers are excluded in both arms, mirroring `db::FROZEN`.
+    // A cancelled wave freezes nothing, so it must not be reported as the
+    // reason either — the explanation and the behaviour have to agree, or the
+    // ticket sends the reader after a blocker that is not actually holding it.
     let mut s = conn.prepare(
         "WITH RECURSIVE anc(id) AS (
-             SELECT d.task_id FROM dep d
+             SELECT d.task_id FROM dep d JOIN task p ON p.id = d.task_id
               WHERE d.depends_on_task_id = ?1 AND d.mode = 'contains'
+                AND p.state NOT IN ('done','cancelled')
              UNION
-             SELECT d.task_id FROM dep d JOIN anc a ON a.id = d.depends_on_task_id
+             SELECT d.task_id FROM dep d
+               JOIN anc a ON a.id = d.depends_on_task_id
+               JOIN task p ON p.id = d.task_id
               WHERE d.mode = 'contains'
+                AND p.state NOT IN ('done','cancelled')
          )
          SELECT c.display_id, b.display_id
            FROM anc

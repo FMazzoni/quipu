@@ -37,24 +37,41 @@ semantics arrive only when someone runs this command.
 Re-linking a pair that already exists in the other mode changes it in place
 rather than erroring. That is the migration path for a store that expressed
 containment as plain deps: re-run `qp contains` over the edges that meant
-containment all along. It cannot change whether the container is blocked — both
-modes wait — so no state transition happens on that path.
+containment all along.
+
+Reclassifying is not state-neutral, and on a blocked container it is the
+opposite of quiet. It cannot change whether the *container* is blocked — both
+modes wait — but it moves everything below the edge into or out of the frozen
+set. Converting a wave that already carries a blocker demotes every `ready`
+slice inside it on the spot; converting the other way promotes them back.
 
 Asking for an edge that is already in the requested mode is an idempotent
-success, reported in the outcome's `unchanged` list so a re-run reads as
-"nothing to do" rather than as new work. Removing an edge that is not there is
-also reported as unchanged rather than raised as an error, which is where this
-deliberately differs from `qp depends --rm`: that command moves one named edge
-and a miss means the caller's model is wrong, while this one moves a batch and
-partial overlap with the existing graph is normal.
+success. Removing one that is not there — or that exists as a `blocks` edge,
+which `--rm` will not touch — is likewise reported rather than raised, which is
+where this deliberately differs from `qp depends --rm`: that command moves one
+named edge and a miss means the caller's model is wrong, while this one moves a
+batch and partial overlap with the existing graph is normal.
+
+The outcome splits the children into `changed` and `unchanged`, and the human
+line names only what moved. It has to: saying `released QP-1, QP-2` when one of
+them still carries a live `blocks` edge is a false claim about the graph, and
+the exit code is 0 either way, so a teardown script would believe it.
+
+Re-running an identical link is not a no-op internally. It skips the write and
+still re-derives the frozen set, so re-issuing the command is a real repair for
+a store whose readiness drifted.
 
 ## Ownership
 
 Checked once, on the container, before any child is linked — the container is
 the row being written, so `--as` must match its assignee when it is `assigned`
-or `running`. The children are not mutated. Linking cannot demote a `running`
-container either; the guarded `UPDATE` in `db::link_dep` matches `ready` only,
-so attaching a slice never yanks work out of a live agent's hands.
+or `running`.
+
+The children have no say, which is only defensible because of what a link can do
+to them. It can move a child from `ready` to `pending`, but never out of
+`assigned` or `running`: every demotion here is guarded on `ready`. So a link
+can stop the next slice being dispatched and can never take work out of a live
+agent's hands, and that is why one check on the container is enough.
 
 ## Boundaries
 

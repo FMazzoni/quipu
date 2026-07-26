@@ -166,7 +166,7 @@ The wave ticket contains its slices, so it sits `pending` until they all complet
 
 Where you attach it is the whole of the control, so attaching it in the wrong place is a real scheduling bug rather than a cosmetic one. If a slice is sitting `pending` with an empty `blocked_by`, `qp show` reports the culprit as `frozen_by`, naming both the blocker and the container carrying it.
 
-If you already filed slices with `--depends-on` pointing at the wave, `qp contains QP-<wave> QP-<a> QP-<b>` reclassifies those edges in place — no need to unlink and re-link.
+If you already filed slices with `--depends-on` pointing at the wave, `qp contains QP-<wave> QP-<a> QP-<b>` reclassifies those edges in place — no need to unlink and re-link. Do it before adding blockers, not after: on a wave that already carries one, reclassifying demotes every `ready` slice inside it immediately, which is correct but startling mid-wave.
 
 **Skip ticketing** for single-subagent waves — open the impl ticket directly, no wave wrapper.
 
