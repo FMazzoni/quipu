@@ -337,6 +337,56 @@ pub fn contents_by_task(conn: &Connection, ids: &[i64]) -> Result<HashMap<i64, V
     dep_targets_by_task(conn, ids, Some(crate::db::MODE_CONTAINS), "")
 }
 
+/// Why a task is frozen: the blockers above it, and which container holds each.
+///
+/// A frozen task has no unresolved dependency of its own, so `blocked_by` is
+/// empty and nothing else on the ticket explains why it will not go `ready`.
+/// This is that explanation. Empty for the overwhelming majority of tasks.
+///
+/// Returns `(container, blocker)` pairs, both display-ids, so a reader can act:
+/// the blocker is what must finish, the container is where to detach it from if
+/// the freeze was not what was wanted.
+pub fn frozen_by(conn: &Connection, id: i64) -> Result<Vec<(String, String)>> {
+    // Ancestors first — the containers above `id`, transitively — then their
+    // unresolved blocking edges. Deliberately *not* db::FROZEN, which answers
+    // the yes/no question and so loses the path.
+    let mut s = conn.prepare(
+        "WITH RECURSIVE anc(id) AS (
+             SELECT d.task_id FROM dep d
+              WHERE d.depends_on_task_id = ?1 AND d.mode = 'contains'
+             UNION
+             SELECT d.task_id FROM dep d JOIN anc a ON a.id = d.depends_on_task_id
+              WHERE d.mode = 'contains'
+         )
+         SELECT c.display_id, b.display_id
+           FROM anc
+           JOIN task c ON c.id = anc.id
+           JOIN dep d2 ON d2.task_id = anc.id AND d2.mode = 'blocks'
+           JOIN task b ON b.id = d2.depends_on_task_id
+          WHERE b.state NOT IN ('done','cancelled')
+          ORDER BY c.id, b.id",
+    )?;
+    let rows = s
+        .query_map([id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Every task currently frozen by a blocker on something that contains it.
+///
+/// Store-wide and set-based, for callers deciding what to *show* rather than
+/// what to transition. Shares `db::FROZEN` with the write path so the two can
+/// never disagree about what "frozen" means.
+pub fn frozen_ids(conn: &Connection) -> Result<HashSet<i64>> {
+    let mut s = conn.prepare(&format!("{} SELECT id FROM frozen", crate::db::FROZEN))?;
+    let rows = s
+        .query_map([], |r| r.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<HashSet<_>>>()?;
+    Ok(rows)
+}
+
 /// The containers a task belongs to — [`contents_by_task`] walked backwards.
 ///
 /// Single-task rather than bulk because it reads the `dep` table against the

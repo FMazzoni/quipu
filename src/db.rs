@@ -648,24 +648,113 @@ pub fn insert_event(
 /// unblocks its dependents rather than stranding them, which is the behaviour
 /// `cancel_terminates_task_unblocks_dependents` in `tests/cli.rs` pins down.
 ///
+/// A task is also held back while anything containing it is blocked, which is
+/// what [`FROZEN`] computes. Readiness is therefore no longer a local property
+/// — a slice can be individually unblocked and still not workable.
+///
 /// Set-based and idempotent by construction: it sweeps the whole table, so
 /// callers never work out *which* tasks a change might have unblocked, and
 /// calling it twice is free. It only ever promotes — nothing here demotes a
 /// task, so running it at the wrong moment costs a query, not correctness.
+/// [`demote_frozen`] is the other half.
 pub fn refresh_ready(tx: &Transaction) -> Result<()> {
     tx.execute(
-        "UPDATE task
-            SET state = 'ready'
-          WHERE state = 'pending'
-            AND NOT EXISTS (
-              SELECT 1 FROM dep d
-              JOIN task t2 ON t2.id = d.depends_on_task_id
-              WHERE d.task_id = task.id
-                AND t2.state NOT IN ('done','cancelled')
-            )",
+        &format!(
+            "{FROZEN}
+             UPDATE task
+                SET state = 'ready'
+              WHERE state = 'pending'
+                AND NOT EXISTS (
+                  SELECT 1 FROM dep d
+                  JOIN task t2 ON t2.id = d.depends_on_task_id
+                  WHERE d.task_id = task.id
+                    AND t2.state NOT IN ('done','cancelled')
+                )
+                AND id NOT IN (SELECT id FROM frozen)"
+        ),
         [],
     )?;
     Ok(())
+}
+
+/// Every task held back by a blocker on something that contains it.
+///
+/// A `WITH RECURSIVE` clause defining `frozen(id)`, meant to be prefixed to a
+/// statement that then selects from it. It is written as a standalone set
+/// rather than a correlated subquery on purpose: SQLite will not let a CTE
+/// reference the row of an enclosing `UPDATE`, and computing the whole set once
+/// keeps both callers set-based and idempotent, matching how every other
+/// transition in this module works.
+///
+/// Two rules, and the second is the entire feature:
+///
+/// 1. A task with an unresolved *blocking* dep is frozen. This is the seed, and
+///    it is redundant with the plain readiness check — the same tasks are held
+///    back either way — but it is what the recursion needs to start from.
+/// 2. Anything *contained* by a frozen task is frozen, transitively.
+///
+/// So a blocker attached to a wave freezes every slice inside it, at any depth,
+/// while a blocker attached to one slice leaves its siblings alone. Where the
+/// blocker is attached is the whole of the control, which is why there is no
+/// setting to turn this off: a project-level toggle would make the same graph
+/// mean different things in different stores, and a dashboard reading
+/// `report --json` could not interpret an edge without also knowing the toggle.
+///
+/// Only `contains` edges are followed downward. Following `blocks` edges would
+/// mean "X blocks the wave" also froze everything the wave merely waits on,
+/// which is a different and unwanted claim.
+pub const FROZEN: &str = "WITH RECURSIVE frozen(id) AS (
+      SELECT d.task_id FROM dep d JOIN task t ON t.id = d.depends_on_task_id
+       WHERE d.mode = 'blocks' AND t.state NOT IN ('done','cancelled')
+      UNION
+      SELECT d.depends_on_task_id FROM dep d JOIN frozen f ON f.id = d.task_id
+       WHERE d.mode = 'contains'
+    )";
+
+/// Demote every `ready` task that is frozen by a blocker above it.
+///
+/// The counterpart to [`refresh_ready`], and the reason propagation needs a
+/// demote at all: attaching a prerequisite to a wave has to reach slices that
+/// are already sitting in the ready pool, or the freeze only applies to work
+/// that had not been unblocked yet.
+///
+/// Matches `ready` only. `assigned` and `running` are deliberately out of
+/// scope — a task already in an agent's hands is never yanked back, so a
+/// freeze applied mid-wave stops the *next* slice from being dispatched rather
+/// than interrupting one in flight. That is the same rule the single-edge
+/// demote in [`link_dep`] follows, and it is why the ownership gate can be on
+/// the container alone: no slice's owner can lose work to it.
+///
+/// Returns the demoted ids, with a `state_change` event logged for each.
+pub fn demote_frozen(tx: &Transaction, agent: Option<&str>, via: &str) -> Result<Vec<i64>> {
+    let ids: Vec<i64> = {
+        let mut stmt = tx.prepare(&format!(
+            "{FROZEN} SELECT id FROM task WHERE state = 'ready' AND id IN (SELECT id FROM frozen)"
+        ))?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    for id in &ids {
+        // Guarded per row rather than one blanket UPDATE: the guard is what
+        // makes this safe to call after any edge mutation, and `changes() == 1`
+        // is the invariant the rest of this module holds to.
+        let n = tx.execute(
+            "UPDATE task SET state = ?1 WHERE id = ?2 AND state = ?3",
+            rusqlite::params![State::Pending, id, State::Ready],
+        )?;
+        if n == 1 {
+            insert_event(
+                tx,
+                Some(*id),
+                "state_change",
+                agent,
+                Some(&serde_json::json!({"to": "pending", "via": via})),
+            )?;
+        }
+    }
+    Ok(ids)
 }
 
 /// [`refresh_ready`], plus a `state_change` event for each task it promoted.
@@ -885,6 +974,11 @@ pub fn link_dep(
             Some(&serde_json::json!({"to": "pending", "via": mode})),
         )?;
     }
+    // The new edge can also freeze work *below* `task_id`: a blocker hung on a
+    // container reaches every slice inside it, and a slice newly attached to an
+    // already-blocked container inherits the freeze. Both arrive here, so this
+    // is the single place either needs handling.
+    demote_frozen(tx, agent, mode)?;
     // One event kind for both modes, with `mode` in the payload. A separate
     // `contains_added` kind would mean a consumer filtering on `dep_added`
     // silently missed half the graph mutations.
