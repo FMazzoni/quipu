@@ -131,14 +131,24 @@ In human mode both stay prose.
 
 ## Store discovery
 
-`qp` resolves which SQLite store to operate on in three tiers:
+`qp` resolves which SQLite store to operate on in four tiers:
 
 1. `--db <path>` or the `QP_DB` env var, if set — wins outright.
-2. Otherwise, the nearest `.quipu/db.sqlite` walking up from the current directory.
+2. Otherwise, the nearest `.quipu/db.sqlite` walking up from the current
+   directory, stopping at the root of the checkout you are in.
 3. Otherwise, `.quipu/db.sqlite` beside the repo root reported by
    `git rev-parse --git-common-dir`. This is what lets a command run from a
-   `wt`-managed worktree — a *sibling* of the main checkout, not a child — find
-   the main repo's store without anyone setting `QP_DB`.
+   worktree — a *sibling* of the main checkout, not a child — find the main
+   repo's store without anyone setting `QP_DB`.
+4. Otherwise, the nearest `.quipu/db.sqlite` *above* the checkout root, for a
+   repo that has no store of its own but sits under a directory that does.
+
+The boundary in tier 2 is what keeps tier 3 reachable. An unbounded walk climbs
+straight out of a worktree, so any `.quipu/` in some unrelated parent directory
+would outrank the repository you are actually working in — and because the wrong
+store is still a valid store, reads and writes would both succeed, in the wrong
+project. Stopping at the checkout root leaves a deliberately nested store (one
+inside the worktree) winning, while an outsider no longer jumps the queue.
 
 Each store stamps a `project_uuid` at `qp init`. Setting `--db`/`QP_DB` explicitly
 while the working directory would have resolved to a *different* store triggers the

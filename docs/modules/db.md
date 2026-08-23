@@ -66,14 +66,32 @@ violations before adding one.
 
 ## Path resolution
 
-Three tiers, and the third is the surprising one: an explicit `--db`/`QP_DB`
-wins; otherwise the nearest `.quipu/` walking up from the cwd; otherwise the one
-beside the repo root from `git rev-parse --git-common-dir`. That last tier exists
-for worktrees, which are *siblings* of the main checkout rather than children, so
-walking up ancestors never reaches the store. It is what lets a subagent in a
-worktree run bare `qp` with no environment set up
+Four tiers, and the third is the surprising one: an explicit `--db`/`QP_DB`
+wins; otherwise the nearest `.quipu/` walking up from the cwd *and stopping at
+the checkout root*; otherwise the one beside the repo root from `git rev-parse
+--git-common-dir`; otherwise the nearest `.quipu/` above the checkout root. The
+git tier exists for worktrees, which are *siblings* of the main checkout rather
+than children, so walking up ancestors never reaches the store. It is what lets a
+subagent in a worktree run bare `qp` with no environment set up
 (`resolve_path_finds_store_from_worktree`); removing it would push every worktree
 agent into creating its own empty database.
+
+The boundary on the walk is load-bearing, not decoration. Without it the walk
+runs past the worktree to the filesystem root, so a `.quipu/` in any parent
+directory wins and the git tier never gets a turn — and since that store is
+valid, the wrong project is read and written with no error to notice
+(`worktree_prefers_its_repo_store_over_an_ancestor_store`). Bounding rather than
+simply putting git first is what keeps a store nested inside the worktree ahead
+of the main repo's (`nested_store_inside_a_worktree_still_wins`). git is only
+spawned when the checkout has no store of its own, so the ordinary case pays no
+subprocess.
+
+The mismatch warning compares against `resolve_path` itself rather than a second
+private walk, so it describes the store a bare `qp` would really have used and
+fires only on a real difference. The duplicated walk it replaced disagreed with
+resolution inside a worktree and warned on *every* command for a consistent
+`QP_DB` — and a warning that is always on for a legitimate setup is one people
+learn to filter away rather than read.
 
 The project-uuid mismatch warning fires only under an explicit path — that is,
 only in automation — which is why it respects `--json`. Under `--json`, stderr is

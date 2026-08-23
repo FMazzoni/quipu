@@ -318,18 +318,24 @@ incrementally, and `cmd/*.rs` files still contain SQL that has not migrated yet.
 ## Storage
 
 One SQLite file, default `.quipu/db.sqlite`. `resolve_path` in
-[`db.rs`](https://github.com/FMazzoni/quipu/blob/main/src/db.rs) picks it in three tiers:
+[`db.rs`](https://github.com/FMazzoni/quipu/blob/main/src/db.rs) picks it in four tiers:
 
 1. An explicit `--db` / `QP_DB`, which wins outright.
-2. Otherwise the nearest `.quipu/db.sqlite` walking up from the cwd.
+2. Otherwise the nearest `.quipu/db.sqlite` walking up from the cwd, bounded at
+   the root of the checkout the cwd is in.
 3. Otherwise the one beside the repo root from `git rev-parse --git-common-dir`.
+4. Otherwise the nearest `.quipu/db.sqlite` above that checkout root.
 
-Tier 3 exists for worktrees: a `wt`-managed worktree is a *sibling* of the main
-checkout, not a child, so walking up ancestors never reaches its `.quipu/`. This
-is what lets a subagent run bare `qp` with no environment set up.
+Tier 3 exists for worktrees: a worktree is a *sibling* of the main checkout, not
+a child, so walking up ancestors never reaches its `.quipu/`. This is what lets a
+subagent run bare `qp` with no environment set up. Tier 2's boundary is what
+lets tier 3 run at all — an unbounded walk leaves the checkout and hands the
+decision to whatever directory happens to sit above it, which is a silent
+wrong-project write rather than an error. Bounding it also preserves a
+deliberately nested store, which reordering the tiers alone would not.
 
 Each store stamps a `project_uuid` at `qp init`. Passing `--db`/`QP_DB`
-explicitly while the cwd would have resolved to a *different* store emits a
+explicitly while a bare `qp` would have resolved to a *different* store emits a
 mismatch warning — the guard against filing into the wrong project. Because that
 only fires under an explicit path, its audience is automation, which is why under
 `--json` it is emitted as JSON rather than prose (stderr is JSON Lines: warnings,
