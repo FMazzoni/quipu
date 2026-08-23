@@ -231,10 +231,52 @@ holds it to rebuilding `task`, `dep`, `tag`, `assignment` and `relation` exactly
 and `tests/export_roundtrip.rs` restores an exported ledger into an empty store
 and asserts the two projections are identical.
 
-Reading a ledger back is not a command yet — `qp export` is one direction, and
-it makes no assumption about where the directory lives or what transports it.
 Keep the destination somewhere you control: an export contains every ticket
 title, description, tag and event in the store.
+
+## Reading a ledger back
+
+    qp import --from /path/to/ledger/<project_uuid> --restore
+    qp import --from /path/to/ledger --merge
+
+**`--restore`** rebuilds an *empty* store as the one the ledger came from,
+identity included, so the result **is** the original rather than a new store
+holding the same tickets. It refuses to run over live data.
+
+**`--merge`** folds other stores' batches into a populated store. It is
+idempotent — re-reading a ledger with nothing new in it changes nothing — and it
+rebuilds the projection from the union of every event it knows, ordered by
+`(timestamp, origin store, event id)`. That order is a function of the set
+rather than of the delivery schedule, so two machines that have seen the same
+batches agree whatever sequence each of them saw first.
+
+The mode is never inferred. The two do opposite things to identity, and a store
+that is empty because someone ran `qp init` in the wrong directory looks exactly
+like one that is empty because a disk died.
+
+**A ledger holding history from before the event log was authoritative cannot be
+fully restored, and that is permanent.** In that era tag, dependency and
+description writes emitted no event at all, so they are not in the ledger and
+nothing can enumerate what is missing — an event never written leaves no trace.
+A restore of such a ledger warns loudly and says that the task count can look
+right while the store is materially incomplete. Where a task has no creation
+event at all, import refuses by default and names it; `--force` is genuinely
+best effort and rebuilds everything else.
+
+**A merge never deletes what the log does not mention.** It distinguishes a row
+the log recorded removing from one it never knew about, so pre-fix tags, edges
+and descriptions survive a sync while a logged removal still removes. That is
+the default, not a flag.
+
+Two things a merge will not do quietly. Every replayed transition is re-checked
+against the state replay actually reached, and a log that implies an impossible
+move aborts the import instead of writing a projection nothing can justify
+(`--force` overrides, and still reports). And where two machines edited the same
+field starting from the same value — concurrent by definition, since both claim
+the same prior state — **both** values are kept, the field is left where the two
+sides last agreed, and the ticket is tagged `needs-resolution`. Picking a winner
+by timestamp would silently discard a real edit, because the two clocks are not
+comparable.
 
 ## Install skills into Claude Code
 
@@ -253,10 +295,18 @@ title, description, tag and event in the store.
 ## Known MVP limitations
 
 - No liveness detection (no PID/heartbeat). Orchestrator runs `qp reclaim` on detected failures.
-- Single SQLite, single machine. `qp remote` records where a claim authority and
-  a ledger live, but nothing reads those urls yet: the claim-over-git path and
-  `qp sync` are still to come, and `qp export` writes the interchange format
-  that nothing reads back.
+- Single SQLite, single machine. `qp export` and `qp import` are the interchange
+  format and its reader, and `qp remote` records where a claim authority and a
+  ledger live — but nothing reads those urls yet: nothing fetches or publishes a
+  ledger for you, the claim-over-git path is still to come, and there is no
+  command yet to settle a marked conflict.
+- A ledger containing pre-fidelity history (any store written before the event
+  log recorded every write) cannot be fully restored — permanently, not pending
+  a fix, and the shortfall cannot even be enumerated. `qp import` warns on every
+  such ledger; merging into a live store is still non-destructive.
+- `qp timeline` shows locally written history only. Events merged in from a peer
+  are held apart from the local log so they are never re-exported under this
+  store's name, and the read commands do not union the two yet.
 - Display ID prefix is fixed at `qp init` and cannot be changed afterwards (`qp init --prefix ACME`; default `QP`). Re-running `init` with a different prefix warns and keeps the original.
 - Exit codes: `0` success, `1` invalid input, including argument-parse failures (and uncategorized internal failures), `2` conflict/not-owner/not-found/invariant, `3` wait timeout, `4` `wait --cohort-done` matched an empty cohort.
 

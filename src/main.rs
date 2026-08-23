@@ -109,6 +109,8 @@ enum Cmd {
     Report(cmd::report::ReportArgs),
     /// Serialise the event log to append-only JSONL batches on disk
     Export(cmd::export::ExportArgs),
+    /// Restore or merge a store from exported JSONL batches
+    Import(cmd::import::ImportArgs),
     /// Show a single-ticket detail view (human or JSON)
     Show(cmd::show::ShowArgs),
 }
@@ -173,6 +175,7 @@ fn wants_json(cmd: &Cmd) -> bool {
         Cmd::Show(a) => a.json,
         Cmd::Report(a) => a.json,
         Cmd::Export(a) => a.json,
+        Cmd::Import(a) => a.json,
         Cmd::Relation(a) => a.json(),
         Cmd::Remote(a) => a.json(),
         Cmd::Tree(a) => a.json,
@@ -356,6 +359,7 @@ fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
         Cmd::Edit(a) => cmd::edit::run(&db_path, a),
         Cmd::Report(a) => cmd::report::run(&db_path, a),
         Cmd::Export(a) => cmd::export::run(&db_path, a),
+        Cmd::Import(a) => cmd::import::run(&db_path, a),
         Cmd::Show(a) => cmd::show::run(&db_path, a),
         #[allow(unreachable_patterns)]
         _ => {

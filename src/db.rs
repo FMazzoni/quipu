@@ -396,7 +396,13 @@ fn read_project_uuid(path: &Path) -> Result<Option<String>> {
 /// `CREATE TABLE IF NOT EXISTS dep` is a no-op on a store that already has the
 /// table, so the new column needs the explicit `ALTER` in
 /// [`add_missing_columns`].
-pub const SCHEMA_VERSION: &str = "4";
+///
+/// "5" adds the three tables `qp import` writes — `task_origin`,
+/// `foreign_event` and `conflict`. New tables, not new columns, so
+/// `execute_batch(SCHEMA)` is enough once the stamp moves; without the bump
+/// they would reach freshly-initialised stores only, and the first real store
+/// anyone tried to merge into would fail on `no such table`.
+pub const SCHEMA_VERSION: &str = "5";
 
 /// Open the connection and set pragmas.
 ///

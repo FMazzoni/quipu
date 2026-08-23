@@ -17,14 +17,20 @@
 //! `common`, so this test and the replay property hold the same line and cannot
 //! drift apart into two different definitions of "identical".
 //!
-//! # The reader lives here, deliberately
+//! # The reader is `qp import --restore`
 //!
-//! Reading a ledger back is not a command yet. Writing the reader as test code
-//! keeps that boundary honest — the export has to be complete enough for an
-//! *outside* party to restore from, with no privileged access to the binary
-//! that wrote it, which is the property a backup format actually needs. It also
-//! means the file layout is pinned by something that fails when it changes,
-//! before a real importer is built on top of it.
+//! It used to live in this file, because reading a ledger back was not a
+//! command. Now that it is, the test drives the binary instead of carrying a
+//! second reader beside it: two readers drift, and the copy that drifts is the
+//! one whose property then proves nothing — the same argument that put the
+//! replayer in `common` rather than in two test files.
+//!
+//! What the test still owns is the *bar*. It exports a store, restores into one
+//! that shares nothing with it — not its `project_uuid`, not its display prefix
+//! — and holds the result to `common`'s projection diff. The export has to be
+//! complete enough to rebuild from with no access to the source store, which is
+//! the property a backup format actually needs, and the file layout is still
+//! pinned by assertions that fail when it changes.
 //!
 //! # What the round trip does not carry
 //!
@@ -63,18 +69,9 @@ fn a_store_round_trips_through_the_exported_ledger() {
     init_foreign_store(&dst);
     assert_empty_projection(&dst);
 
-    let batches = read_ledger(&ledger, &project_uuid(&src));
-    let anomalies = import(&dst, &batches);
-    let diffs = diff_projections(&src, &dst);
+    restore(&dst, &ledger.join(project_uuid(&src)));
+    let report = diff_projections(&src, &dst);
 
-    let mut report = String::new();
-    if !anomalies.is_empty() {
-        report.push_str("the restored store could not apply some events:\n");
-        for a in &anomalies {
-            report.push_str(&format!("  {a}\n"));
-        }
-    }
-    report.push_str(&diffs);
     assert!(
         report.is_empty(),
         "the exported ledger does not restore the store.\n\
@@ -99,7 +96,7 @@ fn every_event_survives_byte_for_byte() {
     run_mutation_script(&src);
     export(&src, &ledger);
     init_foreign_store(&dst);
-    import(&dst, &read_ledger(&ledger, &project_uuid(&src)));
+    restore(&dst, &ledger.join(project_uuid(&src)));
 
     const SQL: &str = "SELECT id || '|' || COALESCE(task_id,'') || '|' || ts || '|' ||
                               kind || '|' || COALESCE(agent_id,'') || '|' ||
@@ -161,7 +158,7 @@ fn the_envelope_carries_identity_and_the_schema_version() {
     }
     assert_eq!(header["schema_version"], meta(&s, "schema_version"));
 
-    import(&dst, &batches);
+    restore(&dst, &ledger.join(&uuid));
     for key in ["project_uuid", "display_prefix", "schema_version"] {
         assert_eq!(
             meta(&s, key),
@@ -290,8 +287,14 @@ fn two_stores_share_a_ledger_root_without_colliding() {
 ///
 /// Without this, a reader that silently restored nothing and a diff that
 /// compared nothing would both report success.
+///
+/// The loss is a whole batch file, which is the shape the failure actually
+/// takes: batches are immutable and written through a rename, so a *partial*
+/// one cannot exist under a trusted name, but a missing one can — the exporter
+/// derives its high-water mark from the filenames precisely so that deleting a
+/// batch is a recoverable state rather than a corrupt one.
 #[test]
-fn a_truncated_ledger_is_reported_as_a_difference() {
+fn a_ledger_missing_its_last_batch_is_reported_as_a_difference() {
     let tmp = tempfile::tempdir().unwrap();
     let src = tmp.path().join("source.sqlite");
     let dst = tmp.path().join("restored.sqlite");
@@ -300,19 +303,21 @@ fn a_truncated_ledger_is_reported_as_a_difference() {
     init_store(&src);
     run_mutation_script(&src);
     export(&src, &ledger);
+    // A second batch, so the ledger has a tail to lose.
+    ok(&src, &["add", "written after the first batch"]);
+    export(&src, &ledger);
 
-    // Lose the ledger's only batch's tail: the last file on a multi-batch
-    // ledger, simulated here by dropping every event past the first handful.
-    let uuid = project_uuid(&src);
-    let mut batches = read_ledger(&ledger, &uuid);
-    batches[0].events.truncate(6);
+    let dir = ledger.join(project_uuid(&src));
+    let batches = batch_files(&dir);
+    assert_eq!(batches.len(), 2, "expected two batches: {batches:?}");
+    std::fs::remove_file(&batches[1]).unwrap();
 
     init_foreign_store(&dst);
-    import(&dst, &batches);
+    restore(&dst, &dir);
     let diffs = diff_projections(&src, &dst);
     assert!(
         diffs.contains("projection `task`") && diffs.contains("missing from replay"),
-        "a truncated ledger must be reported as missing rows. got:\n{diffs}"
+        "a ledger missing a batch must be reported as missing rows. got:\n{diffs}"
     );
 }
 
@@ -377,63 +382,23 @@ fn read_ledger(root: &Path, project_uuid: &str) -> Vec<Batch> {
     out
 }
 
-/// Restores a ledger into an empty store: envelope first, then the log.
-///
-/// The envelope has to land before the events do — the projector reads the
-/// display prefix out of `meta` to mint display ids, so a restore that applied
-/// the log first would name every task after the wrong store.
-fn import(dst: &Path, batches: &[Batch]) -> Vec<String> {
-    let header = &batches[0].header;
-    {
-        let conn = Connection::open(dst).unwrap();
-        for key in ["project_uuid", "display_prefix", "schema_version"] {
-            conn.execute(
-                "INSERT INTO meta(key, value) VALUES (?1, ?2)
-                   ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                rusqlite::params![key, header[key].as_str().unwrap()],
-            )
-            .unwrap();
-        }
-        for t in header["default_tags"].as_array().unwrap() {
-            conn.execute(
-                "INSERT OR IGNORE INTO default_tag(name) VALUES (?)",
-                [t.as_str().unwrap()],
-            )
-            .unwrap();
-        }
-    }
-
-    let events: Vec<Ev> = batches
-        .iter()
-        .flat_map(|b| b.events.iter().cloned())
-        .collect();
-    let anomalies = project(dst, &events, |_| true);
-
-    // The log itself, verbatim. Written after the projection so the `task_id`
-    // foreign key has something to point at.
-    let mut conn = Connection::open(dst).unwrap();
-    let tx = conn.transaction().unwrap();
-    for e in &events {
-        let payload = match &e.payload {
-            serde_json::Value::Null => None,
-            v => Some(v.to_string()),
-        };
-        tx.execute(
-            "INSERT INTO event(id, task_id, ts, kind, agent_id, payload) VALUES (?,?,?,?,?,?)",
-            rusqlite::params![e.id, e.task_id, e.ts, e.kind, e.agent_id, payload],
-        )
-        .unwrap();
-    }
-    tx.commit().unwrap();
-    anomalies
-}
-
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
 fn export(db: &Path, out: &Path) {
     ok(db, &["export", "--out", out.to_str().unwrap()]);
+}
+
+/// Rebuilds `db` from one store's batch directory, through the real command.
+///
+/// `--restore` is spelled out because the mode is never inferred: it adopts the
+/// ledger's identity, which is the opposite of what `--merge` does to a store.
+fn restore(db: &Path, batch_dir: &Path) {
+    ok(
+        db,
+        &["import", "--from", batch_dir.to_str().unwrap(), "--restore"],
+    );
 }
 
 /// A destination store that shares nothing with the source it will restore.

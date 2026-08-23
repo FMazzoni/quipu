@@ -54,10 +54,17 @@ own with no index, catalog or sibling file:
 
 ```text
 {"record":"header","format":"quipu-export","format_version":1,
- "schema_version":"4","project_uuid":"...","display_prefix":"QP",
- "default_tags":[...],"first_event_id":1,"last_event_id":128,
- "event_count":128,"exported_at":"..."}
+ "schema_version":"5","project_uuid":"...","display_prefix":"QP",
+ "default_tags":[...],"task_origins":[...],"first_event_id":1,
+ "last_event_id":128,"event_count":128,"exported_at":"..."}
 ```
+
+`task_origins` is present only in a store that has imported: it names the tasks
+whose canonical identity is not the one their rowid implies, because another
+store minted them. The events in the batch carry rowids as they are *here*, so a
+peer needs this to recognise a ticket it already knows under a different number
+— without it, one ticket merges as two. Its absence is unambiguous rather than
+unknown: a store that never imported created every task it holds.
 
 `format_version` versions this file layout; `schema_version` versions the store
 that produced it. Both are present because they can move independently, and a
@@ -77,6 +84,12 @@ trusts.
 
 ## What this command does not do
 
-Reading a ledger back is deliberately not here. `qp export` is one direction,
-and it makes no assumption about where the directory is kept or what transports
-it.
+Reading a ledger back is `qp import` — `--restore` into an empty store, or
+`--merge` into a populated one. `qp export` stays one direction and makes no
+assumption about where the directory is kept or what transports it.
+
+It also exports only what THIS store wrote. Events merged in from a peer live in
+`foreign_event` and are never re-emitted here: re-exporting them under our uuid
+and a fresh id would give one event two names and break the dedupe every reader
+depends on. Each machine exports what it wrote, and the union of the batches is
+the whole log.
