@@ -165,6 +165,68 @@ Events are only ever inserted inside the same transaction as the mutation they
 describe. Because writers serialize (see below), `event.id` is gap-free — which
 is what makes `watch` correct.
 
+#### `state_change` names both ends
+
+A `state_change` payload carries `from` as well as `to`, written by
+`db::insert_state_change`. Naming only the destination makes a log that cannot
+be checked against its own state machine: a transition cannot be shown to be
+legal without also reading the task table, and a demotion back to `pending` is
+indistinguishable from a task arriving there for the first time — which is
+exactly what containment propagation does when a blocker lands on a container.
+
+The key has three states, and they mean different things:
+
+| `from` | meaning |
+| --- | --- |
+| absent | the event predates origin recording |
+| `null` | there was no origin — this is a task's creation event |
+| a state name | a real transition, checkable on its own |
+
+Where the guarded `UPDATE` names one state (`WHERE state = 'running'`) the origin
+is a literal. Where it names a set (`WHERE state IN ('assigned','running')`) the
+writer reads the row first, purely for the payload. That read is not a
+read-then-write: the `UPDATE` stays conditional and `changes() == 1` is still the
+only thing that decides whether the transition happened.
+
+#### `last_event` is edge- or tag-terminated after a create
+
+`store::last_event_by_task` is `MAX(id)`, surfaced as `last_event` in `wave`,
+`list`, `show` and `report --json`. A create now writes its `state_change`
+*first* and its `dep_added` / `tag_added` events after it, so a freshly added
+task's last event is an edge or a tag rather than the `state_change` it used to
+be — `qp wave` prints `QP-1 · dep_added wave` where it once printed
+`state_change`.
+
+That is a deliberate consequence of ordering the log causally, and it is
+deterministic rather than racy. It is called out here because it is an observable
+change in existing output that nothing in the CLI surface hints at: `last_event`
+is "the most recent thing that happened", and on a create the most recent thing
+that happens is no longer the state change.
+
+#### The gap before it, which is permanent
+
+Events written before this existed have no `from`, and it cannot be recovered.
+The origin was never stored, and nothing else in the store implies it — a task's
+current state says where it ended up, and the log's own ordering only constrains
+the origin when the preceding event happens to be another `state_change` for the
+same task, which for the promotions the silent readiness sweep performed is
+precisely the event that was never written. A backfill would be interpolation
+presented as history, in the one table whose whole value is that it is not.
+
+So the gap stays, and this paragraph is the documentation of it. A consumer that
+reconstructs or validates state must treat *absent* as "unknown" — never as a
+state, and never as interchangeable with `null`, which is a positive claim that
+there was no origin. Collapsing the two turns "we did not record it" into "there
+was nothing to record", which is the one inference this section exists to
+prevent.
+
+That rule binds interpretation, not presentation. `cmd::render::summarize_payload`
+renders both as the bare `→ state`, because neither has an origin to *name* and a
+placeholder would be the renderer asserting something the log does not say. It is
+not deciding they mean the same thing; it has nothing to print either way. Any
+consumer that needs the distinction reads the payload, which `--json` passes
+through verbatim.
+
 ## The invariant that repeats everywhere
 
 This is the heart of the system. Read it once and ~13 files become the same file.

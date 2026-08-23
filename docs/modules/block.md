@@ -29,9 +29,19 @@ performed — a sibling of `state_change` and `dep_added` — and
 payload. It is substrate vocabulary, so it stays fixed; only the tag was ever the
 pattern.
 
-The command writes two events: the `blocker` event carrying `blocker_id` and
-`title`, and a `state_change` event so `timeline` and `watch` reflect the
-demotion.
+The command writes five events in the default case, and four of them are recent.
+Against the blocked task: the `blocker` event carrying `blocker_id` and `title`,
+a `dep_added` for the edge to the new blocker, and a `state_change` so `timeline`
+and `watch` reflect the demotion. Against the blocker itself: its own
+`state_change` recording that it came into existence `ready`, and a `tag_added`
+for the taxonomy tag. Five is the count for the default single tag; the tag
+events are one per tag that lands, so `--tag` naming several raises it.
+
+That last one is the load-bearing addition. Every event this command wrote used
+to be filed against the *blocked* task, so the task it had just minted had no
+event of its own anywhere in the log — a replay could see an edge pointing at it
+and still have no way to create it. `block_emits_creation_event_for_new_blocker`
+covers it.
 
 ## Ownership in the `WHERE`
 

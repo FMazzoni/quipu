@@ -10,6 +10,15 @@
 //! whether the children overlap or accidentally serialise — so the test cannot
 //! be flaky. Overlap is maximised (not relied upon) by spawning every child up
 //! front and by using several rounds with N > 2.
+//!
+//! `claim` and `assign` guard on a state literal. `cancel`, `abandon`, `reclaim`
+//! and `block` cannot: their guards name a *set* of legal origins, so they read
+//! the row before the guarded `UPDATE` to put the origin in the event payload.
+//! That read is safe only because the transaction is `IMMEDIATE` — the write
+//! lock is held before the `SELECT`, so nothing can move the row between the two
+//! statements. `concurrent_cancels_produce_exactly_one_winner` races one of
+//! those commands, and `with_tx_uses_immediate_transactions` pins the property
+//! the whole arrangement rests on.
 
 use assert_cmd::Command;
 use std::path::{Path, PathBuf};
@@ -164,4 +173,88 @@ fn concurrent_assigns_produce_exactly_one_winner() {
             "exactly one assignment may land on {task}"
         );
     }
+}
+
+/// A command that reads the row before mutating still produces one winner.
+///
+/// `cancel` guards on `state NOT IN ('done','cancelled')`, a set rather than a
+/// literal, so it reads the current state first to name the transition's origin
+/// in the event. The read is payload-only — nothing branches on it — and this
+/// asserts the guard behind it is still the only thing deciding who wins.
+#[test]
+fn concurrent_cancels_produce_exactly_one_winner() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+
+    for round in 1..=ROUNDS {
+        let task = format!("QP-{round}");
+        qp(&db).args(["add", "race"]).assert().success();
+
+        let results = race(&db, &["cancel", &task, "--reason", "r"]);
+        tally(&results, "already_terminal");
+
+        assert_eq!(
+            state_change_count(&db, &task, "cancelled"),
+            1,
+            "exactly one cancellation may land on {task}"
+        );
+        // And exactly one of them recorded an origin — if two racers had both
+        // read `ready` and both written, this would be 2 with the guard intact
+        // only by luck.
+        let out = qp(&db)
+            .args(["timeline", &task, "--json", "--kind", "state_change"])
+            .assert()
+            .success();
+        let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+        let events: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+        let origins: Vec<&str> = events
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["payload"]["to"] == "cancelled")
+            .filter_map(|e| e["payload"]["from"].as_str())
+            .collect();
+        assert_eq!(
+            origins,
+            vec!["ready"],
+            "the surviving cancellation names the state the winner actually found"
+        );
+    }
+}
+
+/// `with_tx` opens `IMMEDIATE` transactions, and this is what says so.
+///
+/// Asserted against source because `qp` is a bin-only crate with nothing for an
+/// integration test to import, the same reason `tests/docs.rs` reads source.
+///
+/// It is worth a test of its own because nothing else fails without it. Flip
+/// `with_tx` to the `DEFERRED` default and every test in this file still passes
+/// — the races resolve by `SQLITE_BUSY` and retry rather than by the write lock
+/// — while the payload reads in `cancel`, `abandon`, `reclaim` and `block`
+/// quietly stop being safe: with a deferred transaction the `SELECT` runs
+/// outside the write lock, so another writer can move the row between it and the
+/// guarded `UPDATE`. The transition would still be correct, because the guard is
+/// still the only authority on it, but the event could name an origin that was
+/// already stale when it was written, and a log that misreports history is the
+/// exact defect this file's neighbours exist to prevent.
+#[test]
+fn with_tx_uses_immediate_transactions() {
+    let src = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("db.rs"),
+    )
+    .expect("read src/db.rs");
+    let body = src
+        .split_once("pub fn with_tx<T>")
+        .expect("with_tx still exists in db.rs")
+        .1;
+    let body = &body[..body.find("\n}\n").expect("with_tx has a body")];
+    assert!(
+        body.contains("TransactionBehavior::Immediate"),
+        "with_tx must open IMMEDIATE transactions — the payload reads in cancel, \
+         abandon, reclaim and block are only safe while the write lock is held \
+         before the SELECT. Body was:\n{body}"
+    );
 }

@@ -664,6 +664,76 @@ pub fn insert_event(
     Ok(tx.last_insert_rowid())
 }
 
+/// Appends a `state_change` event naming both ends of the transition.
+///
+/// The `from` key is always written, and its three cases are deliberately
+/// distinct:
+///
+/// - **absent** — the event predates this function. The origin was never
+///   stored and is recoverable from nothing else in the log, so that stretch of
+///   history stays one-ended. It is documented rather than backfilled: a
+///   reconstruction would be a guess wearing an audit trail's clothes.
+/// - **`null`** — there was no origin. Task creation is the only such case; a
+///   task comes into existence already in a state.
+/// - **a string** — a real transition, and the pair is enough to check the move
+///   was legal without consulting the task table at all.
+///
+/// The key is spelled to match the `edit` event's per-field `{"from","to"}`
+/// pairs, so one convention covers both and a consumer learns it once. No
+/// schema version bump rides with it: `schema.sql` is unchanged, the payload is
+/// opaque JSON either way, and a bump would advertise a migration that cannot
+/// exist.
+///
+/// Callers pass the origin their guard already named. Where the guard is exact
+/// (`WHERE state = 'running'`) that is a literal; where it names a set
+/// (`WHERE state IN ('assigned','running')`) the caller reads the row first,
+/// purely for the payload. That read is not a read-then-write — the `UPDATE`
+/// stays conditional and `changes() == 1` remains the only thing that decides
+/// whether the transition happened.
+pub fn insert_state_change(
+    tx: &Transaction,
+    task_id: i64,
+    from: Option<&str>,
+    to: &str,
+    agent: Option<&str>,
+    extra: &[(&str, serde_json::Value)],
+) -> Result<i64> {
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        "from".to_string(),
+        match from {
+            Some(s) => serde_json::Value::String(s.to_string()),
+            None => serde_json::Value::Null,
+        },
+    );
+    payload.insert("to".to_string(), serde_json::Value::String(to.to_string()));
+    for (k, v) in extra {
+        payload.insert((*k).to_string(), v.clone());
+    }
+    insert_event(
+        tx,
+        Some(task_id),
+        "state_change",
+        agent,
+        Some(&serde_json::Value::Object(payload)),
+    )
+}
+
+/// The state a task sits in right now, for stamping an event's `from`.
+///
+/// An auxiliary read for event quality, never for control flow — the same
+/// permitted exception `abandon` and `reclaim` already take to name the state
+/// they landed in. Inside the `IMMEDIATE` transaction no other writer can move
+/// the row between this and the guarded `UPDATE` that follows, and if the guard
+/// fails the transition did not happen no matter what this returned.
+pub fn state_of(tx: &Transaction, task_id: i64) -> Result<Option<String>> {
+    tx.query_row("SELECT state FROM task WHERE id = ?", [task_id], |r| {
+        r.get(0)
+    })
+    .optional()
+    .map_err(Into::into)
+}
+
 /// Re-derives readiness store-wide.
 ///
 /// Every `pending` task whose dependencies are all resolved becomes `ready`.
@@ -687,7 +757,16 @@ pub fn insert_event(
 /// calling it twice is free. It only ever promotes — nothing here demotes a
 /// task, so running it at the wrong moment costs a query, not correctness.
 /// [`demote_frozen`] is the other half.
-pub fn refresh_ready(tx: &Transaction) -> Result<()> {
+///
+/// **Private, and that is the fix.** It emits nothing, so every promotion it
+/// performs is invisible to `qp timeline` and unreachable by anything replaying
+/// the log. It used to be `pub` and was called directly from six commands —
+/// including `complete`, the most common write in the system — which is how the
+/// log came to disagree with the task table about which work was ready. The
+/// only caller now is [`refresh_ready_logged`], which wraps it in the diff that
+/// produces the events, so a new call site cannot skip the log without first
+/// deleting this paragraph.
+fn refresh_ready(tx: &Transaction) -> Result<()> {
     tx.execute(
         &format!(
             "{FROZEN}
@@ -800,12 +879,18 @@ pub fn demote_frozen(tx: &Transaction, agent: Option<&str>, via: &str) -> Result
         )?;
         if n == 1 {
             demoted.push(*id);
-            insert_event(
+            // `from` is a literal, not a read: the guard above matched only a
+            // `ready` row, so the origin is settled by the `UPDATE` itself.
+            // This is the transition the origin matters most for — a demotion
+            // is otherwise indistinguishable in the log from a task arriving at
+            // `pending` for the first time.
+            insert_state_change(
                 tx,
-                Some(*id),
-                "state_change",
+                *id,
+                Some(State::Ready.as_str()),
+                State::Pending.as_str(),
                 agent,
-                Some(&serde_json::json!({"to": "pending", "via": via})),
+                &[("via", serde_json::json!(via))],
             )?;
         }
     }
@@ -847,12 +932,15 @@ pub fn refresh_ready_logged(tx: &Transaction, agent: Option<&str>, via: &str) ->
             tx.query_row("SELECT state FROM task WHERE id = ?", [tid], |r| r.get(0))?;
         if now == "ready" {
             promoted.push(tid);
-            insert_event(
+            // Every candidate was `pending` when the snapshot was taken and the
+            // sweep only ever promotes, so the origin is a literal here too.
+            insert_state_change(
                 tx,
-                Some(tid),
-                "state_change",
+                tid,
+                Some(State::Pending.as_str()),
+                State::Ready.as_str(),
                 agent,
-                Some(&serde_json::json!({"to": "ready", "via": via})),
+                &[("via", serde_json::json!(via))],
             )?;
         }
     }
@@ -998,6 +1086,33 @@ pub fn link_dep(
     mode: &str,
     agent: Option<&str>,
 ) -> Result<bool> {
+    let changed = write_dep_edge(tx, task_id, task_display, on_id, on_display, mode, agent)?;
+    reconcile_readiness(tx, agent, mode)?;
+    Ok(changed)
+}
+
+/// Writes one dep edge and demotes the depender if the edge blocks it.
+///
+/// The half of [`link_dep`] that touches only the named pair. Split out for
+/// callers that write several edges in one transaction: running the store-wide
+/// sweeps after each edge means sweeping a half-written graph, which invents
+/// transitions the store was never in. Anything calling this directly owes the
+/// transaction one [`reconcile_readiness`] before it commits.
+///
+/// Event order here is the point. The `dep_added` is written immediately after
+/// the `INSERT` and *before* the demote it causes, so a replayer applying the
+/// log in `event.id` order never sees a task pushed back to `pending` with no
+/// edge in the graph to justify it. The edge exists first, then the states it
+/// moves move.
+pub fn write_dep_edge(
+    tx: &Transaction,
+    task_id: i64,
+    task_display: &str,
+    on_id: i64,
+    on_display: &str,
+    mode: &str,
+    agent: Option<&str>,
+) -> Result<bool> {
     if would_cycle(tx, task_id, on_id)? {
         return Err(invariant(
             "dependency_cycle",
@@ -1014,6 +1129,18 @@ pub fn link_dep(
            DO UPDATE SET mode = excluded.mode WHERE dep.mode <> excluded.mode",
         rusqlite::params![task_id, on_id, mode],
     )?;
+    // One event kind for both modes, with `mode` in the payload. A separate
+    // `contains_added` kind would mean a consumer filtering on `dep_added`
+    // silently missed half the graph mutations.
+    if changed != 0 {
+        insert_event(
+            tx,
+            Some(task_id),
+            "dep_added",
+            agent,
+            Some(&serde_json::json!({"on": on_display, "mode": mode})),
+        )?;
+    }
     // Guarded demote: matches only a `ready` task that now has an unresolved
     // dep. `assigned`/`running` are deliberately excluded — a task already in an
     // agent's hands is never yanked back, and the ownership gate above is what
@@ -1026,39 +1153,41 @@ pub fn link_dep(
         rusqlite::params![State::Pending, task_id, State::Ready],
     )?;
     if demoted == 1 {
-        insert_event(
+        insert_state_change(
             tx,
-            Some(task_id),
-            "state_change",
+            task_id,
+            Some(State::Ready.as_str()),
+            State::Pending.as_str(),
             agent,
-            Some(&serde_json::json!({"to": "pending", "via": mode})),
+            &[("via", serde_json::json!(mode))],
         )?;
     }
-    // The new edge can also freeze work *below* `task_id`: a blocker hung on a
-    // container reaches every slice inside it, and a slice newly attached to an
-    // already-blocked container inherits the freeze. Both arrive here, so this
-    // is the single place either needs handling.
-    //
-    // Reclassifying can also *thaw* — dropping a `contains` edge to `blocks`
-    // takes everything under it out of the frozen set — so both directions run,
-    // and both run even when `changed` is 0 so that re-running a command is a
-    // real repair rather than a no-op.
-    demote_frozen(tx, agent, mode)?;
-    refresh_ready(tx)?;
-    if changed == 0 {
-        return Ok(false);
-    }
-    // One event kind for both modes, with `mode` in the payload. A separate
-    // `contains_added` kind would mean a consumer filtering on `dep_added`
-    // silently missed half the graph mutations.
-    insert_event(
-        tx,
-        Some(task_id),
-        "dep_added",
-        agent,
-        Some(&serde_json::json!({"on": on_display, "mode": mode})),
-    )?;
-    Ok(true)
+    Ok(changed != 0)
+}
+
+/// Re-derives readiness store-wide after an edge mutation, in both directions.
+///
+/// A new edge can freeze work *below* the task it names: a blocker hung on a
+/// container reaches every slice inside it, and a slice newly attached to an
+/// already-blocked container inherits the freeze. Both arrive here, so this is
+/// the single place either needs handling.
+///
+/// Reclassifying can also *thaw* — dropping a `contains` edge to `blocks` takes
+/// everything under it out of the frozen set — so both halves run, and they run
+/// even when the edge write changed nothing, so that re-running a command is a
+/// real repair rather than a silent no-op.
+///
+/// Both halves are the logged variants. An unlogged promotion is precisely the
+/// hole that made the log unreplayable, and reclassifying an edge can thaw work
+/// several containment levels away from anything the caller named.
+///
+/// Call this **once**, after every edge in the transaction is written. Calling
+/// it per edge sweeps a graph that is still half-written, and the promotions it
+/// then logs are transitions no committed state ever held.
+pub fn reconcile_readiness(tx: &Transaction, agent: Option<&str>, via: &str) -> Result<()> {
+    demote_frozen(tx, agent, via)?;
+    refresh_ready_logged(tx, agent, via)?;
+    Ok(())
 }
 
 #[cfg(test)]

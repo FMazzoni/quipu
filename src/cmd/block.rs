@@ -73,11 +73,33 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
             "UPDATE task SET display_id = ? WHERE id = ?",
             rusqlite::params![blocker_display, blocker_id],
         )?;
+        // The blocker's own creation event. Until this existed, every event
+        // this command wrote was filed against the *blocked* task, so the new
+        // task had no `state_change` of its own and a replay of the log could
+        // never bring it into existence — it appeared only as the far end of an
+        // edge pointing at nothing.
+        db::insert_state_change(
+            tx,
+            blocker_id,
+            None,
+            db::State::Ready.as_str(),
+            Some(&a.agent),
+            &[("title", serde_json::json!(a.new))],
+        )?;
         for t in &tags {
             tx.execute(
                 "INSERT OR IGNORE INTO tag(task_id, name) VALUES (?,?)",
                 rusqlite::params![blocker_id, t],
             )?;
+            if tx.changes() == 1 {
+                db::insert_event(
+                    tx,
+                    Some(blocker_id),
+                    "tag_added",
+                    Some(&a.agent),
+                    Some(&serde_json::json!({"name": t})),
+                )?;
+            }
         }
 
         // (2) Insert dep edge orig → blocker. No cycle possible (blocker is
@@ -97,9 +119,22 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
             "INSERT INTO dep(task_id, depends_on_task_id, mode) VALUES (?,?,?)",
             rusqlite::params![task_id, blocker_id, db::MODE_BLOCKS],
         )?;
+        // The edge still goes in directly, but it no longer goes in silently:
+        // `link_dep` is what normally writes `dep_added`, and skipping it left
+        // this edge invisible to anything replaying the graph from the log.
+        db::insert_event(
+            tx,
+            Some(task_id),
+            "dep_added",
+            Some(&a.agent),
+            Some(&serde_json::json!({"on": blocker_display, "mode": db::MODE_BLOCKS})),
+        )?;
         db::demote_frozen(tx, Some(&a.agent), "block")?;
 
-        // (3) Guarded UPDATE: demote orig to pending.
+        // (3) Guarded UPDATE: demote orig to pending. The origin is read first,
+        // for the event payload only — the guard admits both `assigned` and
+        // `running`, and the `UPDATE` stays conditional either way.
+        let from = db::state_of(tx, task_id)?;
         let n = tx.execute(
             "UPDATE task SET state = ?1
               WHERE id = ?2 AND state IN ('assigned','running')
@@ -166,12 +201,13 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
             })),
         )?;
         // Plus a state_change event so timeline/watch reflect the demotion.
-        db::insert_event(
+        db::insert_state_change(
             tx,
-            Some(task_id),
-            "state_change",
+            task_id,
+            from.as_deref(),
+            db::State::Pending.as_str(),
             Some(&a.agent),
-            Some(&serde_json::json!({"to": "pending", "via": "block"})),
+            &[("via", serde_json::json!("block"))],
         )?;
         Ok(blocker_display)
     })?;

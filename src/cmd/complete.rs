@@ -94,14 +94,19 @@ pub fn run(db_path: &std::path::Path, a: CompleteArgs) -> Result<()> {
                 Some(&serde_json::json!({"path": p})),
             )?;
         }
-        db::insert_event(
+        // `from` is the state the guarded UPDATE above already required.
+        db::insert_state_change(
             tx,
-            Some(task_id),
-            "state_change",
+            task_id,
+            Some(db::State::Running.as_str()),
+            db::State::Done.as_str(),
             Some(&a.agent),
-            Some(&serde_json::json!({"to": "done"})),
+            &[],
         )?;
-        db::refresh_ready(tx)?;
+        // Logged: finishing a blocker is the single most common way work gets
+        // unblocked in this system, and the bare sweep left that promotion —
+        // the entire point of the dependency graph — with no event at all.
+        db::refresh_ready_logged(tx, Some(&a.agent), "complete")?;
         Ok(())
     })?;
     emit(

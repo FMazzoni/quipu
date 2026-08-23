@@ -3433,6 +3433,450 @@ fn report_json_wave_scope_filters_subtree() {
     assert!(!ids.contains(&"QP-3"));
 }
 
+/// Every `state_change` a store contains, in event order, as (kind-agnostic) payloads.
+fn state_changes(db: &std::path::Path, task: &str) -> Vec<serde_json::Value> {
+    let out = qp(db).args(["timeline", task, "--json"]).output().unwrap();
+    let events: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    events
+        .as_array()
+        .expect("timeline json is an array")
+        .iter()
+        .filter(|e| e["kind"] == "state_change")
+        .map(|e| e["payload"].clone())
+        .collect()
+}
+
+/// The regression that matters most: completing a blocker promotes its
+/// dependent, and that promotion is an event naming both ends of the move.
+///
+/// The promotion used to be performed by a silent set-based sweep. The
+/// dependent's timeline ended at `→ pending` while the dependent itself sat in
+/// `ready`, so a replay of the log put it in the wrong state — and `ready` is
+/// exactly the state an orchestrator reads to decide what to dispatch next.
+#[test]
+fn complete_promotion_emits_from_and_to() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "blocker"]).assert().success(); // QP-1
+    qp(&db)
+        .args(["add", "dependent", "--depends-on", "QP-1"])
+        .assert()
+        .success(); // QP-2, pending
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["complete", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+
+    let promoted = state_changes(&db, "QP-2");
+    let saw = promoted.iter().any(|p| {
+        p["from"] == serde_json::json!("pending")
+            && p["to"] == serde_json::json!("ready")
+            && p["via"] == serde_json::json!("complete")
+    });
+    assert!(
+        saw,
+        "completing a blocker must log the dependent's promotion with both ends: {promoted:?}"
+    );
+
+    // And the blocker's own transition carries the origin the guard required.
+    let blocker = state_changes(&db, "QP-1");
+    let done = blocker
+        .iter()
+        .find(|p| p["to"] == serde_json::json!("done"))
+        .expect("blocker has a done event");
+    assert_eq!(done["from"], serde_json::json!("running"), "{done:?}");
+}
+
+/// Cancel, abandon and reclaim promote too, and owe the same event.
+#[test]
+fn cancel_promotion_emits_from_and_to() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "blocker"]).assert().success();
+    qp(&db)
+        .args(["add", "dependent", "--depends-on", "QP-1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["cancel", "QP-1", "--reason", "dropped"])
+        .assert()
+        .success();
+    let promoted = state_changes(&db, "QP-2");
+    assert!(
+        promoted.iter().any(|p| {
+            p["from"] == serde_json::json!("pending")
+                && p["to"] == serde_json::json!("ready")
+                && p["via"] == serde_json::json!("cancel")
+        }),
+        "cancelling a blocker resolves it, so the dependent's promotion is an event: {promoted:?}"
+    );
+    let cancelled = state_changes(&db, "QP-1");
+    assert!(
+        cancelled
+            .iter()
+            .any(|p| p["from"] == serde_json::json!("ready")
+                && p["to"] == serde_json::json!("cancelled")),
+        "the cancelled task's own origin is read from the row, since the guard names a set: {cancelled:?}"
+    );
+}
+
+/// A release is two moves, and the log says so rather than collapsing them.
+///
+/// `running` → `ready` is not a transition the state machine has. Emitting one
+/// event naming the state the task landed in after the sweep produced exactly
+/// that illegal-looking hop.
+#[test]
+fn abandon_logs_release_and_promotion_separately() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["abandon", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    let seen: Vec<(String, String)> = state_changes(&db, "QP-1")
+        .iter()
+        .map(|p| {
+            (
+                p["from"].as_str().unwrap_or("<null>").to_string(),
+                p["to"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    let tail = &seen[seen.len() - 2..];
+    assert_eq!(
+        tail,
+        [
+            ("running".to_string(), "pending".to_string()),
+            ("pending".to_string(), "ready".to_string()),
+        ],
+        "abandon logs the release and the re-promotion as two legal moves: {seen:?}"
+    );
+}
+
+/// A containment demotion is where the origin earns its keep.
+///
+/// Blocking a container demotes the slices inside it. Without an origin that
+/// event reads `→ pending`, identical to a slice that had merely been created
+/// pending and never been workable — so the log could not distinguish work that
+/// was taken away from work that was never given.
+#[test]
+fn containment_demotion_records_the_origin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "wave"]).assert().success(); // QP-1
+    qp(&db)
+        .args(["add", "slice", "--part-of", "QP-1"])
+        .assert()
+        .success(); // QP-2, ready
+    qp(&db).args(["add", "prereq"]).assert().success(); // QP-3
+                                                        // A blocker on the container freezes everything inside it.
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-3"])
+        .assert()
+        .success();
+
+    let slice = state_changes(&db, "QP-2");
+    let demotion = slice
+        .iter()
+        .rev()
+        .find(|p| p["to"] == serde_json::json!("pending"))
+        .unwrap_or_else(|| panic!("slice was demoted by the freeze: {slice:?}"));
+    assert_eq!(
+        demotion["from"],
+        serde_json::json!("ready"),
+        "a demotion must be distinguishable from an ordinary arrival at pending: {demotion:?}"
+    );
+
+    // The creation event is the one legitimate origin-less `state_change`, and
+    // it says so with an explicit null rather than by omitting the key.
+    let birth = &slice[0];
+    assert_eq!(birth["from"], serde_json::Value::Null, "{birth:?}");
+    assert_eq!(birth["to"], serde_json::json!("ready"), "{birth:?}");
+}
+
+/// `qp add` writes tags and deps, so it owes an event for each.
+///
+/// Both used to go in through raw `INSERT`s with no event at all. Since `--tag`
+/// is how essentially every tag in a store arrives, the log knew about almost
+/// none of them.
+#[test]
+fn add_emits_events_for_tags_and_deps() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "blocker"]).assert().success(); // QP-1
+    qp(&db)
+        .args([
+            "add",
+            "b",
+            "--depends-on",
+            "QP-1",
+            "--tag",
+            "kind:bug",
+            "--tag",
+            "ux",
+            "--tier",
+            "T1",
+            "--description",
+            "why it matters",
+        ])
+        .assert()
+        .success(); // QP-2
+
+    let out = qp(&db)
+        .args(["timeline", "QP-2", "--json"])
+        .output()
+        .unwrap();
+    let events: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let arr = events.as_array().expect("timeline json is an array");
+
+    let tags: Vec<&str> = arr
+        .iter()
+        .filter(|e| e["kind"] == "tag_added")
+        .filter_map(|e| e["payload"]["name"].as_str())
+        .collect();
+    assert!(
+        tags.contains(&"kind:bug") && tags.contains(&"ux"),
+        "every tag a create lands gets a tag_added: {arr:?}"
+    );
+
+    assert!(
+        arr.iter().any(|e| e["kind"] == "dep_added"
+            && e["payload"]["on"] == serde_json::json!("QP-1")
+            && e["payload"]["mode"] == serde_json::json!("blocks")),
+        "a dep written at create time is a graph mutation like any other: {arr:?}"
+    );
+
+    // The creation event leads, and carries the fields the INSERT set silently.
+    let first = &arr[0];
+    assert_eq!(
+        first["kind"],
+        serde_json::json!("state_change"),
+        "{first:?}"
+    );
+    assert_eq!(
+        first["payload"]["from"],
+        serde_json::Value::Null,
+        "{first:?}"
+    );
+    assert_eq!(
+        first["payload"]["to"],
+        serde_json::json!("pending"),
+        "{first:?}"
+    );
+    assert_eq!(
+        first["payload"]["tier"],
+        serde_json::json!("T1"),
+        "{first:?}"
+    );
+    assert_eq!(
+        first["payload"]["description"],
+        serde_json::json!("why it matters"),
+        "{first:?}"
+    );
+}
+
+/// An edge is logged before the demotion it causes, not after.
+///
+/// A replayer applies events in `event.id` order. Emitting the demote first
+/// showed a task pushed back to `pending` with nothing in the graph yet to
+/// justify it — a state that is unjustifiable at the moment it is applied, even
+/// though the end state is right once the edge lands.
+#[test]
+fn dep_added_precedes_the_demotion_it_causes() {
+    for (label, args) in [
+        ("contains", vec!["add", "s1", "--part-of", "QP-1"]),
+        ("blocks", vec!["depends", "QP-1", "--on", "QP-2"]),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("db.sqlite");
+        qp(&db).arg("init").assert().success();
+        qp(&db).args(["add", "wave"]).assert().success(); // QP-1, ready
+        if label == "blocks" {
+            qp(&db).args(["add", "other"]).assert().success(); // QP-2
+        }
+        qp(&db).args(args).assert().success();
+
+        let out = qp(&db)
+            .args(["timeline", "QP-1", "--json"])
+            .output()
+            .unwrap();
+        let events: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let arr = events.as_array().expect("timeline json is an array");
+        let edge = arr
+            .iter()
+            .position(|e| e["kind"] == "dep_added")
+            .unwrap_or_else(|| panic!("{label}: expected a dep_added: {arr:?}"));
+        let demote = arr
+            .iter()
+            .position(|e| {
+                e["kind"] == "state_change" && e["payload"]["to"] == serde_json::json!("pending")
+            })
+            .unwrap_or_else(|| panic!("{label}: expected a demotion: {arr:?}"));
+        assert!(
+            edge < demote,
+            "{label}: the edge must be logged before the demotion it causes: {arr:?}"
+        );
+    }
+}
+
+/// A create with several deps must not log a state the store was never in.
+///
+/// Sweeping after each edge read a half-written graph: with one resolved dep and
+/// one open one, the first sweep saw only the resolved dep and promoted the new
+/// task to `ready`, which the second edge then undid. `ready` was never
+/// committed, but `qp watch` streams raw events, so an orchestrator reacting to
+/// `to: "ready"` got a false readiness signal on the wire.
+#[test]
+fn multi_dep_add_logs_no_intermediate_ready() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "resolved"]).assert().success(); // QP-1
+    qp(&db).args(["add", "open"]).assert().success(); // QP-2
+    for args in [
+        vec!["assign", "QP-1", "--to", "x"],
+        vec!["claim", "QP-1", "--as", "x"],
+        vec!["complete", "QP-1", "--as", "x"],
+    ] {
+        qp(&db).args(args).assert().success();
+    }
+    // The resolved dep is named first, so a per-edge sweep would promote before
+    // the second edge lands. Order matters to the repro; keep it.
+    qp(&db)
+        .args(["add", "x", "--depends-on", "QP-1", "--depends-on", "QP-2"])
+        .assert()
+        .success(); // QP-3
+
+    let seen = state_changes(&db, "QP-3");
+    assert_eq!(
+        seen.len(),
+        1,
+        "a create that ends up pending logs exactly its creation: {seen:?}"
+    );
+    assert_eq!(seen[0]["to"], serde_json::json!("pending"), "{seen:?}");
+    assert!(
+        !seen.iter().any(|p| p["to"] == serde_json::json!("ready")),
+        "no event may claim a `ready` the store never held: {seen:?}"
+    );
+    qp(&db)
+        .args(["show", "QP-3", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""state":"pending""#));
+}
+
+/// The promotion still happens when every dep named at create time is resolved.
+///
+/// The guard on the fix above: batching the edges must not cost the single
+/// trailing sweep that makes a create against finished prerequisites `ready`.
+#[test]
+fn multi_dep_add_still_promotes_when_all_deps_resolved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "one"]).assert().success(); // QP-1
+    qp(&db).args(["add", "two"]).assert().success(); // QP-2
+    for t in ["QP-1", "QP-2"] {
+        qp(&db)
+            .args(["cancel", t, "--reason", "done with"])
+            .assert()
+            .success();
+    }
+    qp(&db)
+        .args(["add", "x", "--depends-on", "QP-1", "--depends-on", "QP-2"])
+        .assert()
+        .success(); // QP-3
+
+    qp(&db)
+        .args(["show", "QP-3", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""state":"ready""#));
+    let seen = state_changes(&db, "QP-3");
+    assert!(
+        seen.iter()
+            .any(|p| p["from"] == serde_json::json!("pending")
+                && p["to"] == serde_json::json!("ready")
+                && p["via"] == serde_json::json!("add")),
+        "the single trailing sweep still promotes, and still logs it: {seen:?}"
+    );
+}
+
+/// The task `qp block` mints needs an event of its own, or a replay cannot
+/// create it — every event this command wrote used to name the *blocked* task.
+#[test]
+fn block_emits_creation_event_for_new_blocker() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "work"]).assert().success(); // QP-1
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["block", "QP-1", "--new", "need creds", "--as", "x"])
+        .assert()
+        .success(); // QP-2 is the blocker
+
+    let blocker = state_changes(&db, "QP-2");
+    assert_eq!(
+        blocker.len(),
+        1,
+        "blocker has its own creation event: {blocker:?}"
+    );
+    assert_eq!(blocker[0]["from"], serde_json::Value::Null, "{blocker:?}");
+    assert_eq!(
+        blocker[0]["to"],
+        serde_json::json!("ready"),
+        "a fresh blocker has no deps of its own: {blocker:?}"
+    );
+
+    let out = qp(&db)
+        .args(["timeline", "QP-1", "--json"])
+        .output()
+        .unwrap();
+    let events: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let arr = events.as_array().unwrap();
+    assert!(
+        arr.iter()
+            .any(|e| e["kind"] == "dep_added" && e["payload"]["on"] == serde_json::json!("QP-2")),
+        "the edge to the new blocker is a graph mutation and gets an event: {arr:?}"
+    );
+    assert!(
+        arr.iter().any(|e| e["kind"] == "state_change"
+            && e["payload"]["from"] == serde_json::json!("running")
+            && e["payload"]["to"] == serde_json::json!("pending")),
+        "the demotion names the state the caller was actually in: {arr:?}"
+    );
+}
+
 #[test]
 fn depends_rm_emits_state_change_on_promote() {
     let tmp = tempfile::tempdir().unwrap();
