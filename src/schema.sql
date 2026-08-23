@@ -107,3 +107,81 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_assign_one_open
     ON assignment(task_id) WHERE completed_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_rel_from     ON relation(from_task_id, kind);
 CREATE INDEX IF NOT EXISTS idx_rel_to       ON relation(to_task_id, kind);
+
+-- ---------------------------------------------------------------------------
+-- Import bookkeeping. Written only by `qp import`; empty in a store that never
+-- imported, which is why none of it is referenced by any other command.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS task_origin (
+    task_id        INTEGER PRIMARY KEY,
+    origin_uuid    TEXT NOT NULL,
+    origin_task_id INTEGER NOT NULL,
+    UNIQUE (origin_uuid, origin_task_id)
+);
+-- The canonical name of a task that was created in ANOTHER store: the uuid of
+-- the store that minted it plus the rowid it holds there. A task with no row
+-- here is native, and its canonical name is (this store's project_uuid, its
+-- own rowid) — which is why `qp add` writes nothing here and never has to.
+--
+-- No foreign key to task(id) on purpose: a merge rebuilds the whole projection
+-- from the merged log, deleting and reinserting every task row, and this table
+-- is the thing that has to survive that in order for the reinserted rows to
+-- land on the same local ids. It is the mapping, not a property of the row.
+--
+-- It also rides in every exported batch header. A peer reading our batch sees
+-- events carrying OUR local rowids; without the map it cannot tell that our
+-- task 4 is its own task 1, and the same ticket merges as two.
+
+CREATE TABLE IF NOT EXISTS peer_task_origin (
+    store_uuid     TEXT NOT NULL,
+    store_task_id  INTEGER NOT NULL,
+    origin_uuid    TEXT NOT NULL,
+    origin_task_id INTEGER NOT NULL,
+    PRIMARY KEY (store_uuid, store_task_id)
+);
+-- What a PEER told us about its own numbering, learned from its batch headers.
+--
+-- Its events stay in `foreign_event` forever, referencing tasks by the rowids
+-- they hold in that peer's store; the header that explained those rowids is
+-- read once and then not in reach again. Merging a third store's directory
+-- would otherwise re-replay the second store's events with nothing left to
+-- decode them, and every ticket the peer had itself imported would split in
+-- two. This is that explanation, kept.
+
+CREATE TABLE IF NOT EXISTS foreign_event (
+    origin_uuid TEXT NOT NULL,
+    origin_id   INTEGER NOT NULL,
+    task_id     INTEGER,
+    ts          TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    agent_id    TEXT,
+    payload     TEXT,
+    PRIMARY KEY (origin_uuid, origin_id)
+);
+-- Events merged in from another store. Deliberately NOT in `event`: that table
+-- is what `qp export` writes out, and re-exporting a peer's events under our
+-- own uuid and a fresh id would mint a second identity for an event that
+-- already has one, breaking the dedupe every reader depends on. Each machine
+-- exports what it wrote; the union of the batches is the whole log.
+--
+-- `task_id` is the ORIGIN store's rowid, resolved through `task_origin` (and
+-- the batch header's copy of it) at replay time. The PRIMARY KEY is what makes
+-- importing the same batch twice a no-op.
+
+CREATE TABLE IF NOT EXISTS conflict (
+    task_id         INTEGER NOT NULL,
+    field           TEXT NOT NULL,
+    origin_uuid     TEXT NOT NULL,
+    origin_event_id INTEGER NOT NULL,
+    base            TEXT,
+    value           TEXT,
+    ts              TEXT NOT NULL,
+    PRIMARY KEY (task_id, field, origin_uuid, origin_event_id)
+);
+-- Two edits to one field that both claim the same prior value are concurrent
+-- by definition, and neither may be discarded. Both candidate values are
+-- recorded here, the field itself is left at the `base` they agree on, and the
+-- task is tagged for a human to settle. Rebuilt from scratch by every merge.
+
+CREATE INDEX IF NOT EXISTS idx_foreign_event_ts ON foreign_event(ts, origin_uuid, origin_id);

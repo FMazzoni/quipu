@@ -8,7 +8,7 @@ use predicates::str::contains;
 /// migrating, not on any particular number, so a version bump belongs here and
 /// nowhere else in this file. If a bump makes some other test fail, that test
 /// found a real migration bug — do not chase it back to a literal.
-const CURRENT_SCHEMA_VERSION: &str = "4";
+const CURRENT_SCHEMA_VERSION: &str = "5";
 
 #[test]
 fn cancel_terminates_task_unblocks_dependents() {

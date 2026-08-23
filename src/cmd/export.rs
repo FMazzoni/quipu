@@ -41,6 +41,13 @@ struct Header {
     project_uuid: String,
     display_prefix: String,
     default_tags: Vec<String>,
+    /// Local rowid -> canonical name, for every task this store did not mint.
+    ///
+    /// Absent when the store has never imported, which is why an older batch
+    /// with no such key is read correctly rather than ambiguously: every task
+    /// in it is native to the store named in the header.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    task_origins: Vec<OriginRecord>,
     first_event_id: i64,
     last_event_id: i64,
     event_count: usize,
@@ -67,6 +74,18 @@ struct EventRecord {
     /// Escape hatch for a payload that is not JSON, so no byte is ever dropped.
     #[serde(skip_serializing_if = "Option::is_none")]
     payload_text: Option<String>,
+}
+
+/// One task whose canonical name is not the one its rowid implies.
+///
+/// The events in this batch carry `task_id` as the rowid it holds *here*; a
+/// peer needs this to recognise the ticket it already knows under another
+/// number. See `task_origin` in `schema.sql`.
+#[derive(Serialize)]
+struct OriginRecord {
+    task_id: i64,
+    origin_uuid: String,
+    origin_task_id: i64,
 }
 
 #[derive(Serialize)]
@@ -133,6 +152,7 @@ pub fn run(db_path: &Path, a: ExportArgs) -> Result<()> {
         project_uuid: project_uuid.clone(),
         display_prefix,
         default_tags,
+        task_origins: task_origins(&conn)?,
         first_event_id: lo,
         last_event_id: hi,
         event_count: events.len(),
@@ -180,6 +200,20 @@ pub fn batch_range(name: &str, project_uuid: &str) -> Option<(i64, i64)> {
     let rest = rest.strip_suffix(".jsonl")?;
     let (lo, hi) = rest.split_once('-')?;
     Some((lo.parse().ok()?, hi.parse().ok()?))
+}
+
+/// Every row of `task_origin`, which is empty in a store that never imported.
+fn task_origins(conn: &Connection) -> Result<Vec<OriginRecord>> {
+    let mut stmt = conn
+        .prepare("SELECT task_id, origin_uuid, origin_task_id FROM task_origin ORDER BY task_id")?;
+    let rows = stmt.query_map([], |r| {
+        Ok(OriginRecord {
+            task_id: r.get(0)?,
+            origin_uuid: r.get(1)?,
+            origin_task_id: r.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
 }
 
 fn meta(conn: &Connection, key: &str) -> Result<Option<String>> {
