@@ -3,7 +3,7 @@
 #![doc = include_str!("../../docs/modules/reclaim.md")]
 
 use crate::outcome::{emit, Outcome};
-use crate::{db, id};
+use crate::{claimref, db, id};
 use anyhow::Result;
 use clap::Args;
 use serde::Serialize;
@@ -33,6 +33,10 @@ pub fn run(db_path: &std::path::Path, a: ReclaimArgs) -> Result<()> {
     let mut conn = db::open(db_path)?;
     let resolved = id::resolve_full(&conn, &a.task)?;
     let task_id = resolved.id;
+    // Resolved before the transaction: the ref is deleted only once the
+    // local release has committed. `None` on a local-only store, which is
+    // what keeps this edge offline and unchanged.
+    let release = claimref::release_for(db_path, &conn, task_id, &resolved.display_id)?;
     let resulting = db::with_tx(&mut conn, |tx| {
         // Origin read first, for the event payload only — the guard names a set,
         // so the log cannot tell `assigned` from `running` otherwise. The
@@ -83,6 +87,9 @@ pub fn run(db_path: &std::path::Path, a: ReclaimArgs) -> Result<()> {
         }
         Ok(resulting)
     })?;
+    if let Some(r) = &release {
+        r.finish(&conn);
+    }
     emit(
         a.json,
         &Reclaimed {

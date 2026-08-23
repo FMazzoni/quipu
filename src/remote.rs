@@ -53,6 +53,15 @@ fn read_key(conn: &Connection, key: &str) -> Result<Option<String>> {
     Ok(v.filter(|s| !s.is_empty()))
 }
 
+/// Reads just the authority, which is all `claim` needs.
+///
+/// One `SELECT`, deliberately: an unconfigured store must not pay two reads to
+/// discover it has no remote, and the local claim path is measured in
+/// milliseconds.
+pub fn authority(conn: &Connection) -> Result<Option<String>> {
+    read_key(conn, KEY_AUTHORITY)
+}
+
 /// Upserts one url. Config only — no network, no validation of the far end.
 pub fn set(conn: &Connection, key: &str, url: &str) -> Result<()> {
     conn.execute(
