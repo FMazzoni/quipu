@@ -263,15 +263,27 @@ right while the store is materially incomplete. Where a task has no creation
 event at all, import refuses by default and names it; `--force` is genuinely
 best effort and rebuilds everything else.
 
+Restoring one of those ledgers into an empty store rebuilds as far as the log
+allows rather than refusing, and reports every gap it found. That asymmetry is
+deliberate. A merge has live data in front of it and refuses. A restore into an
+empty store has nothing to protect, so refusing would hand someone mid-recovery
+an empty store instead of a partial one — and where an event records no origin
+state at all, the destination it *does* record is the better evidence, so the
+move is applied and reported rather than dropped. Legality stays absolute
+wherever the log claims to know where a move started: a ledger whose events all
+carry their origins still refuses on any anomaly, in both modes.
+
 **A merge never deletes what the log does not mention.** It distinguishes a row
 the log recorded removing from one it never knew about, so pre-fix tags, edges
 and descriptions survive a sync while a logged removal still removes. That is
 the default, not a flag.
 
-Two things a merge will not do quietly. Every replayed transition is re-checked
-against the state replay actually reached, and a log that implies an impossible
-move aborts the import instead of writing a projection nothing can justify
-(`--force` overrides, and still reports). And where two machines edited the same
+Two things a merge will not do quietly. Every replayed transition is checked
+twice — against the state replay actually reached, and against the state machine
+itself, since an impossible pair like `pending` straight to `assigned` applies
+perfectly cleanly to a task that *is* pending — and a log that implies a move
+nothing can justify aborts the import instead of writing it (`--force`
+overrides, and still reports). And where two machines edited the same
 field starting from the same value — concurrent by definition, since both claim
 the same prior state — **both** values are kept, the field is left where the two
 sides last agreed, and the ticket is tagged `needs-resolution`. Picking a winner
@@ -303,7 +315,8 @@ comparable.
 - A ledger containing pre-fidelity history (any store written before the event
   log recorded every write) cannot be fully restored — permanently, not pending
   a fix, and the shortfall cannot even be enumerated. `qp import` warns on every
-  such ledger; merging into a live store is still non-destructive.
+  such ledger; restoring one into an empty store rebuilds what it can and reports
+  the rest, and merging into a live store is still non-destructive.
 - `qp timeline` shows locally written history only. Events merged in from a peer
   are held apart from the local log so they are never re-exported under this
   store's name, and the read commands do not union the two yet.

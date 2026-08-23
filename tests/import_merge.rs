@@ -522,6 +522,11 @@ fn an_illegal_transition_aborts_the_import_and_is_reported() {
         .assert()
         .failure()
         .stderr(predicates::str::contains("assigned"))
+        // Named, not merely counted: the reader's next move is to open the
+        // ticket, and a refusal that does not say which one sends them to the
+        // whole log instead. A restore adopts the ledger's prefix before replay
+        // runs, so the name is the source store's, not this store's.
+        .stderr(predicates::str::contains("AAA-1"))
         .stderr(predicates::str::contains("--force"));
     assert_eq!(
         count(&dst, "task"),
@@ -961,4 +966,371 @@ fn a_merge_still_lets_the_log_remove_what_it_recorded_removing() {
         vec!["keep-me"],
         "the peer's logged removal did not take effect"
     );
+}
+
+// ---------------------------------------------------------------------------
+// the merge order itself
+// ---------------------------------------------------------------------------
+
+/// Rewrites every event in a batch directory to one timestamp.
+///
+/// Real stores tie on the millisecond often enough — a burst of writes inside a
+/// single command does it routinely — but not on demand, and a test that waits
+/// for a coincidence tests nothing on the run where the coincidence does not
+/// happen. Forcing the tie makes the tie-break the only thing left deciding the
+/// sequence.
+fn flatten_timestamps(dir: &Path, ts: &str) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|x| x != "jsonl") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut out = String::new();
+        for line in text.lines() {
+            let mut v: serde_json::Value = serde_json::from_str(line).unwrap();
+            if v["record"] == "event" {
+                v["ts"] = serde_json::Value::String(ts.to_string());
+            }
+            out.push_str(&serde_json::to_string(&v).unwrap());
+            out.push('\n');
+        }
+        std::fs::write(&path, out).unwrap();
+    }
+}
+
+/// The same batches, delivered to two peers in opposite orders, one projection.
+///
+/// This is the whole reason the merge order exists. `peers_converge_...` proves
+/// it across three stores that each keep working; this proves the narrower and
+/// sharper case — two receivers with *identical* starting points, handed the
+/// same set of batches in opposite sequences. Any dependence on arrival order
+/// at all shows up here as a diff, with nothing else in the picture that could
+/// explain it.
+///
+/// The two writers interleave in time on purpose. If they took turns in clean
+/// blocks the merged order would be a concatenation, and a replay that ignored
+/// the order entirely would still pass.
+#[test]
+fn two_peers_handed_the_same_batches_in_opposite_orders_agree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (a, b) = (tmp.path().join("a.sqlite"), tmp.path().join("b.sqlite"));
+    let (x, y) = (tmp.path().join("x.sqlite"), tmp.path().join("y.sqlite"));
+    let ledger = tmp.path().join("ledger");
+
+    for (db, prefix) in [(&a, "AAA"), (&b, "BBB"), (&x, "XXX"), (&y, "YYY")] {
+        init(db, prefix);
+    }
+
+    // The common ancestor everyone has seen, so neither receiver is being asked
+    // to apply events about a task it has never heard of.
+    ok(&a, &["add", "shared work"]);
+    export(&a, &ledger);
+    for db in [&b, &x, &y] {
+        merge(db, &dir_of(&ledger, &a));
+    }
+    tick();
+
+    // Now the two writers diverge, alternating in time. A drives the shared
+    // ticket through the state machine; B annotates it and adds work of its
+    // own — different projections of the same ticket, which must all survive.
+    ok(&a, &["assign", "AAA-1", "--to", "agentA"]);
+    tick();
+    ok(&b, &["tag", "BBB-1", "add", "prio:high"]);
+    tick();
+    ok(&a, &["claim", "AAA-1", "--as", "agentA"]);
+    tick();
+    ok(&b, &["add", "b's own work"]);
+    ok(&b, &["relation", "add", "BBB-2", "related-to", "BBB-1"]);
+    tick();
+    ok(&a, &["complete", "AAA-1", "--as", "agentA"]);
+    tick();
+    ok(
+        &b,
+        &["edit", "BBB-1", "--description", "b filled the body in"],
+    );
+    export(&a, &ledger);
+    export(&b, &ledger);
+
+    // The same two batch sets, opposite delivery sequences.
+    merge(&x, &dir_of(&ledger, &a));
+    merge(&x, &dir_of(&ledger, &b));
+    merge(&y, &dir_of(&ledger, &b));
+    merge(&y, &dir_of(&ledger, &a));
+
+    let (dx, dy) = (canonical_dump(&x), canonical_dump(&y));
+    assert_eq!(
+        dx, dy,
+        "the same batches in two orders built two stores:\n--- a then b ---\n{dx}\n\
+         --- b then a ---\n{dy}"
+    );
+
+    // And they agree on the merged content, not on having dropped it. Every
+    // clause here comes from a different writer.
+    assert!(dx.contains("| done"), "A's transitions are missing:\n{dx}");
+    assert!(dx.contains("prio:high"), "B's tag is missing:\n{dx}");
+    assert!(
+        dx.contains("b filled the body in"),
+        "B's edit is missing:\n{dx}"
+    );
+    assert!(dx.contains("b's own work"), "B's ticket is missing:\n{dx}");
+    assert!(
+        dx.contains("agentA | claimed=1 | closed=1 | success"),
+        "the assignment did not survive the merge:\n{dx}"
+    );
+}
+
+/// A whole store's log tied on one instant still replays in its own order.
+///
+/// With every timestamp equal, the first key of the merge order decides
+/// nothing and the second decides nothing either — one store wrote all of it.
+/// What is left is the event id, and the store's own sequence is the only
+/// defensible reading of it: `ready` before `assigned` before `running`,
+/// because that is the order the store wrote them in. Without that key the
+/// sequence is whatever fed the sort, and the transition guard turns a wrong
+/// answer into a refused merge rather than a wrong store.
+#[test]
+fn a_log_tied_on_a_single_instant_replays_in_the_order_its_store_wrote_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (src, peer) = (
+        tmp.path().join("src.sqlite"),
+        tmp.path().join("peer.sqlite"),
+    );
+    let ledger = tmp.path().join("ledger");
+
+    init(&src, "AAA");
+    init(&peer, "BBB");
+
+    // A ticket driven the whole way through the machine, plus a second one
+    // demoted and promoted again, so the tied log holds transitions in both
+    // directions rather than one monotone run.
+    ok(&src, &["add", "the work"]);
+    ok(&src, &["add", "the blocker"]);
+    ok(&src, &["depends", "AAA-1", "--on", "AAA-2"]);
+    ok(&src, &["assign", "AAA-2", "--to", "agentA"]);
+    ok(&src, &["claim", "AAA-2", "--as", "agentA"]);
+    ok(&src, &["complete", "AAA-2", "--as", "agentA"]);
+    ok(&src, &["assign", "AAA-1", "--to", "agentB"]);
+    ok(&src, &["claim", "AAA-1", "--as", "agentB"]);
+    ok(&src, &["complete", "AAA-1", "--as", "agentB"]);
+    export(&src, &ledger);
+
+    let dir = dir_of(&ledger, &src);
+    flatten_timestamps(&dir, "2026-01-01T00:00:00.000Z");
+    merge(&peer, &dir);
+
+    assert_eq!(
+        canonical_dump(&peer),
+        canonical_dump(&src),
+        "a log whose events all share one timestamp did not replay in its \
+         store's own order"
+    );
+}
+
+/// A move the state machine has no edge for is refused, whatever the ordering.
+///
+/// Continuity is not legality: this event's `from` is exactly where replay has
+/// the task, so the guarded UPDATE matches a row and the projection accepts a
+/// hop the machine cannot make. That is the illegal-transition class found in
+/// bulk in pre-fidelity logs, and merging a ledger carrying one would import
+/// the defect into a healthy store. The refusal has to name the ticket, because
+/// the reader's next move is to go and look at it.
+#[test]
+fn a_transition_the_machine_has_no_edge_for_is_refused_and_names_the_task() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (src, peer) = (
+        tmp.path().join("src.sqlite"),
+        tmp.path().join("peer.sqlite"),
+    );
+    let ledger = tmp.path().join("ledger");
+
+    init(&src, "AAA");
+    init(&peer, "BBB");
+    ok(&src, &["add", "a task"]);
+    ok(&src, &["assign", "AAA-1", "--to", "agentA"]);
+    export(&src, &ledger);
+
+    // `ready` -> `done`, in one hop. The task really is `ready` when this
+    // event lands, so nothing about *where* it is applied is wrong.
+    let dir = dir_of(&ledger, &src);
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(r#""to":"assigned""#), "nothing to doctor");
+        std::fs::write(&path, text.replace(r#""to":"assigned""#, r#""to":"done""#)).unwrap();
+    }
+
+    qp(&peer)
+        .args(["import", "--from", dir.to_str().unwrap(), "--merge"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("BBB-1"))
+        .stderr(predicates::str::contains("`ready` -> `done`"))
+        .stderr(predicates::str::contains(
+            "not an edge of the state machine",
+        ));
+
+    assert_eq!(
+        count(&peer, "task"),
+        0,
+        "a refused merge must leave the store untouched"
+    );
+}
+
+/// Ages a ledger into the shape a pre-fidelity binary wrote.
+///
+/// Strips every recorded origin, then loses the step into `assigned` the way
+/// those writes were lost — without a trace. Both halves matter: an event with
+/// no origin is what buys a restore its latitude, and the missing step is what
+/// leaves replay somewhere the next event cannot be reached from.
+fn age_ledger(dir: &Path) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let kept: Vec<String> = text
+            .lines()
+            .filter(|l| !l.contains(r#""to":"assigned""#))
+            .map(|l| {
+                l.replace(r#""from":"ready","#, "")
+                    .replace(r#""from":"assigned","#, "")
+            })
+            .collect();
+        std::fs::write(&path, kept.join("\n") + "\n").unwrap();
+    }
+}
+
+/// A pre-fidelity hop is refused by a merge, whatever it claims.
+///
+/// An event written before the origin state was recorded says only where the
+/// task went. Replay has to supply the origin from where it stands, and a
+/// ledger full of those is exactly where illegal hops were found in bulk — a
+/// move to `running` from a task nothing ever assigned. There is no recorded
+/// pair to check, so the check is against the state replay actually reached,
+/// and a merge still refuses rather than folding it into live data.
+#[test]
+fn a_hop_with_no_recorded_origin_is_refused_by_a_merge() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (src, peer) = (
+        tmp.path().join("src.sqlite"),
+        tmp.path().join("peer.sqlite"),
+    );
+    let ledger = tmp.path().join("ledger");
+
+    init(&src, "AAA");
+    init(&peer, "BBB");
+    ok(&src, &["add", "a task"]);
+    ok(&src, &["assign", "AAA-1", "--to", "agentA"]);
+    ok(&src, &["claim", "AAA-1", "--as", "agentA"]);
+    export(&src, &ledger);
+
+    let dir = dir_of(&ledger, &src);
+    age_ledger(&dir);
+
+    qp(&peer)
+        .args(["import", "--from", dir.to_str().unwrap(), "--merge"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("BBB-1"))
+        .stderr(predicates::str::contains("records no origin state"))
+        .stderr(predicates::str::contains("`running` is not reachable"));
+    assert_eq!(count(&peer, "task"), 0);
+}
+
+/// The same ledger, restored into an empty store, rebuilds rather than refuses.
+///
+/// This is the direction where refusing is the destructive answer. A merge has
+/// live data to protect and refuses; a restore into an empty store has nothing
+/// to protect and hands back an empty store instead of a partial one, which is
+/// strictly worse for someone mid-recovery. So the ledger's own admission — a
+/// `state_change` recording no origin at all — buys best effort by default, and
+/// the move is applied to the destination the event does record. Measured
+/// against a real pre-fidelity ledger, refusing these left most of a store's
+/// finished tickets sitting in `pending`.
+///
+/// `--force` is deliberately not the mechanism. A flag every real recovery has
+/// to pass is a flag people learn to pass always, which spends the guard's
+/// credibility everywhere else.
+#[test]
+fn the_same_ledger_restored_into_an_empty_store_rebuilds_best_effort() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (src, peer) = (
+        tmp.path().join("src.sqlite"),
+        tmp.path().join("peer.sqlite"),
+    );
+    let ledger = tmp.path().join("ledger");
+
+    init(&src, "AAA");
+    ok(&src, &["add", "a task"]);
+    ok(&src, &["assign", "AAA-1", "--to", "agentA"]);
+    ok(&src, &["claim", "AAA-1", "--as", "agentA"]);
+    export(&src, &ledger);
+    let dir = dir_of(&ledger, &src);
+    age_ledger(&dir);
+
+    init(&peer, "BBB");
+    qp(&peer)
+        .args(["import", "--from", dir.to_str().unwrap(), "--restore"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("APPLIED ANYWAY"))
+        .stderr(predicates::str::contains("AAA-1"));
+
+    // The destination the event recorded, not the state replay was stranded
+    // in. Anything less means a recovered store where finished work looks
+    // untouched.
+    let conn = Connection::open(&peer).unwrap();
+    let state: String = conn
+        .query_row("SELECT state FROM task WHERE id = 1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        state, "running",
+        "the restore discarded a move whose destination the log records"
+    );
+    assert_eq!(
+        count(&peer, "event"),
+        2,
+        "every event still lands in the log"
+    );
+}
+
+/// A modern ledger gets no such latitude: anomalies still refuse a restore.
+///
+/// The line is where the log's own claims are. Where every event records an
+/// origin, an anomaly is a real integrity signal about history we trust, and
+/// relaxing it there would make the guard advisory everywhere.
+#[test]
+fn a_modern_ledger_with_an_anomaly_still_refuses_a_restore() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (src, peer) = (
+        tmp.path().join("src.sqlite"),
+        tmp.path().join("peer.sqlite"),
+    );
+    let ledger = tmp.path().join("ledger");
+
+    init(&src, "AAA");
+    ok(&src, &["add", "a task"]);
+    ok(&src, &["assign", "AAA-1", "--to", "agentA"]);
+    ok(&src, &["claim", "AAA-1", "--as", "agentA"]);
+    export(&src, &ledger);
+
+    // Origins left intact — only the step into `assigned` is lost, so the log
+    // still claims to know where every move started.
+    let dir = dir_of(&ledger, &src);
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let kept: Vec<&str> = text
+            .lines()
+            .filter(|l| !l.contains(r#""to":"assigned""#))
+            .collect();
+        std::fs::write(&path, kept.join("\n") + "\n").unwrap();
+    }
+
+    init(&peer, "BBB");
+    qp(&peer)
+        .args(["import", "--from", dir.to_str().unwrap(), "--restore"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--force"));
+    assert_eq!(count(&peer, "task"), 0);
 }

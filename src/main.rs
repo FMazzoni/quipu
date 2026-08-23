@@ -5,6 +5,7 @@
 mod cmd;
 mod db;
 mod id;
+mod merge;
 mod outcome;
 mod remote;
 mod store;
