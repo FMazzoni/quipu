@@ -1707,6 +1707,56 @@ fn install_skills_symlinks_into_target() {
     assert!(target.path().join("qp-wave/SKILL.md").exists());
 }
 
+/// Copy an executable to `dst` so that it can be `exec`d immediately afterwards.
+///
+/// `std::fs::copy` is *not* safe for that here, and the reason is not a lag in
+/// its own descriptor teardown — it closes both files before it returns, and a
+/// single-threaded copy-then-exec loop never fails. The hazard is the test
+/// harness around it: `cargo test` runs these tests on many threads, all of
+/// them spawning `qp` subprocesses. Spawning is `fork`-then-`exec`, and a
+/// `fork` on any sibling thread duplicates *every* descriptor this process has
+/// open at that instant — including the writable one that `fs::copy` is holding
+/// mid-copy. `O_CLOEXEC` does not help: the duplicate is closed at the child's
+/// `exec`, not at its `fork`, so for that window an unrelated child process
+/// holds a write handle on our freshly copied binary and the kernel answers our
+/// own `exec` with `ETXTBSY` ("Text file busy"). More load means more sibling
+/// spawns in flight, which is why this lost on CI and effectively never lost
+/// locally.
+///
+/// So the writable descriptor must never exist in *this* process. Delegating
+/// the copy to a short-lived child gives that: `cp` is single-threaded and
+/// never forks, so its write handle cannot be duplicated anywhere, and
+/// `status()` reaps it — the kernel tears a task's descriptor table down before
+/// it reports the exit to the parent, so by the time this returns the inode
+/// provably has no writers left. That is an ordering the kernel guarantees, not
+/// a window we made small; retrying on `ETXTBSY` would only have done the
+/// latter.
+#[cfg(unix)]
+fn copy_executable_for_exec(src: &std::path::Path, dst: &std::path::Path) {
+    let st = std::process::Command::new("cp")
+        .arg(src)
+        .arg(dst)
+        .status()
+        .expect("spawning cp");
+    assert!(
+        st.success(),
+        "cp {} {} failed",
+        src.display(),
+        dst.display()
+    );
+    // `cp` without `-p` applies the umask, so restate the source's mode rather
+    // than assume the executable bit survived. `chmod` takes a path, not a
+    // writable descriptor, so this cannot reintroduce the hazard above.
+    let mode = std::fs::metadata(src).unwrap().permissions();
+    std::fs::set_permissions(dst, mode).unwrap();
+}
+
+/// Windows has no `ETXTBSY`; a plain copy is fine there.
+#[cfg(not(unix))]
+fn copy_executable_for_exec(src: &std::path::Path, dst: &std::path::Path) {
+    std::fs::copy(src, dst).unwrap();
+}
+
 /// With no usable source root the embedded snapshot is written out.
 ///
 /// This is the distributed-binary case: `current_exe()` derives a `skills/`
@@ -1719,7 +1769,7 @@ fn install_skills_writes_embedded_snapshot_without_a_source_root() {
     // repo's own skills/ and we would be testing live mode again.
     let bin_dir = tempfile::tempdir().unwrap();
     let bin = bin_dir.path().join("qp");
-    std::fs::copy(assert_cmd::cargo::cargo_bin("qp"), &bin).unwrap();
+    copy_executable_for_exec(&assert_cmd::cargo::cargo_bin("qp"), &bin);
 
     let out = Command::new(&bin)
         .env_remove("QP_SKILLS_SRC")
