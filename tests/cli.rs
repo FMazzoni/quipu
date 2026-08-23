@@ -376,8 +376,7 @@ fn open_assignment_implies_assigned_or_running() {
 
 #[test]
 fn version_flag_prints_version() {
-    Command::cargo_bin("qp")
-        .unwrap()
+    qp_bare()
         .arg("--version")
         .assert()
         .success()
@@ -386,11 +385,7 @@ fn version_flag_prints_version() {
 
 #[test]
 fn help_lists_core_commands() {
-    let assert = Command::cargo_bin("qp")
-        .unwrap()
-        .arg("--help")
-        .assert()
-        .success();
+    let assert = qp_bare().arg("--help").assert().success();
     let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     for cmd in [
         "init",
@@ -433,11 +428,7 @@ fn help_lists_core_commands() {
 #[test]
 fn release_command_help_names_the_real_transition() {
     for cmd in ["abandon", "reclaim", "block"] {
-        let assert = Command::cargo_bin("qp")
-            .unwrap()
-            .args([cmd, "--help"])
-            .assert()
-            .success();
+        let assert = qp_bare().args([cmd, "--help"]).assert().success();
         let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
         let summary = out.lines().next().unwrap_or_default().to_string();
         assert!(
@@ -454,8 +445,24 @@ fn release_command_help_names_the_real_transition() {
 }
 
 fn qp(db: &std::path::Path) -> Command {
-    let mut c = Command::cargo_bin("qp").unwrap();
+    let mut c = qp_bare();
     c.env("QP_DB", db);
+    c
+}
+
+/// `qp` with the ambient store scrubbed out of its environment.
+///
+/// Every test spawns the binary as a child, and a child inherits the shell's
+/// environment — so a `QP_DB` exported by whoever ran `cargo test` silently
+/// overrode the store the test meant to use, and tests that assert on *which*
+/// store was picked failed for reasons that had nothing to do with the code
+/// under test. A test names its store explicitly or deliberately exercises
+/// discovery; in neither case does the outside environment get a vote.
+///
+/// Use this instead of `Command::cargo_bin("qp")` anywhere in this file.
+fn qp_bare() -> Command {
+    let mut c = Command::cargo_bin("qp").unwrap();
+    c.env_remove("QP_DB");
     c
 }
 
@@ -1052,8 +1059,7 @@ fn mismatched_project_uuid_emits_warning() {
     std::fs::create_dir_all(cwd_b.join(".quipu")).unwrap();
     std::fs::copy(&dbb, cwd_b.join(".quipu/db.sqlite")).unwrap();
 
-    let assert = Command::cargo_bin("qp")
-        .unwrap()
+    let assert = qp_bare()
         .current_dir(&cwd_b)
         .env("QP_DB", &dba)
         .arg("status")
@@ -1404,8 +1410,7 @@ fn wait_returns_when_filter_set_empties() {
     // a loaded machine instead of a hand-tuned sleep duration.
     let db2 = db.clone();
     let join = std::thread::spawn(move || {
-        Command::cargo_bin("qp")
-            .unwrap()
+        qp_bare()
             .env("QP_DB", &db2)
             .args([
                 "wait",
@@ -1694,8 +1699,7 @@ fn install_skills_symlinks_into_target() {
     std::fs::create_dir_all(src.path().join("skills/wave")).unwrap();
     std::fs::write(src.path().join("skills/wave/SKILL.md"), "x").unwrap();
 
-    Command::cargo_bin("qp")
-        .unwrap()
+    qp_bare()
         .env("QP_SKILLS_SRC", src.path())
         .args([
             "install-skills",
@@ -1723,6 +1727,7 @@ fn install_skills_writes_embedded_snapshot_without_a_source_root() {
 
     let out = Command::new(&bin)
         .env_remove("QP_SKILLS_SRC")
+        .env_remove("QP_DB")
         .args([
             "install-skills",
             "--target",
@@ -1752,8 +1757,7 @@ fn install_skills_writes_embedded_snapshot_without_a_source_root() {
 #[test]
 fn install_skills_rejects_a_bogus_explicit_source_root() {
     let target = tempfile::tempdir().unwrap();
-    Command::cargo_bin("qp")
-        .unwrap()
+    qp_bare()
         .env("QP_SKILLS_SRC", "/nonexistent-qp-skills-src")
         .args([
             "install-skills",
@@ -1771,8 +1775,7 @@ fn install_skills_fails_hard_when_home_unset_and_no_target() {
     std::fs::create_dir_all(src.path().join("skills/wave")).unwrap();
     std::fs::write(src.path().join("skills/wave/SKILL.md"), "x").unwrap();
 
-    Command::cargo_bin("qp")
-        .unwrap()
+    qp_bare()
         .current_dir(cwd.path())
         .env("QP_SKILLS_SRC", src.path())
         .env_remove("HOME")
@@ -2386,58 +2389,245 @@ fn decisions_json_and_auto_only_json_share_row_shape() {
     );
 }
 
+/// Run `git` in `at`, carrying its own identity, and fail loudly if it errors.
+///
+/// The identity is not decoration. `git commit` needs one and will happily
+/// invent it from the account and hostname when nothing supplies it — which
+/// works on a developer machine and does *not* work on a CI runner, where the
+/// account has no full name and git refuses with "empty ident name". A test
+/// that commits has to bring its own identity for the same reason it has to
+/// name its own store: anything taken from the host is something that can
+/// differ on the next host. `.invalid` is the reserved TLD (RFC 2606), so the
+/// address can never resolve anywhere.
+///
+/// Set as environment variables rather than `-c user.*` because these outrank
+/// config *and* anything the caller already exported. `-c` only outranks
+/// config, so a `GIT_AUTHOR_NAME` inherited from the surrounding shell would
+/// still win — which is the same inherited-environment trap as `QP_DB`, and no
+/// more acceptable here.
+///
+/// Checking the exit status matters just as much. The version of these helpers
+/// discarded it, and a failed commit then went unnoticed: `git worktree add`
+/// happens to work from an unborn HEAD, so the test still passed while one of
+/// its setup steps had in fact failed. It was luck, not coverage — a setup step
+/// allowed to fail in silence is a test that can quietly stop testing what its
+/// name claims, and say nothing when it does.
+fn git(at: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .env("GIT_AUTHOR_NAME", "qp test")
+        .env("GIT_AUTHOR_EMAIL", "qp-test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "qp test")
+        .env("GIT_COMMITTER_EMAIL", "qp-test@example.invalid")
+        .args(args)
+        .current_dir(at)
+        .output()
+        .unwrap_or_else(|e| panic!("could not spawn git {args:?}: {e}"));
+    assert!(
+        out.status.success(),
+        "git {args:?} failed in {}:\n{}",
+        at.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A git repo with one empty commit, ready for `git worktree add`.
+fn git_repo(at: &std::path::Path) {
+    std::fs::create_dir_all(at).unwrap();
+    git(at, &["init", "-q"]);
+    git(at, &["commit", "--allow-empty", "-q", "-m", "init"]);
+}
+
+/// Add a linked worktree of `repo` at `at`, on a fresh branch.
+fn git_worktree(repo: &std::path::Path, at: &std::path::Path, branch: &str) {
+    git(
+        repo,
+        &["worktree", "add", "-q", "-b", branch, at.to_str().unwrap()],
+    );
+}
+
+/// Number of tasks in the store at `db`, read by naming it explicitly.
+fn task_count(db: &std::path::Path) -> usize {
+    let out = qp(db).args(["list", "--json"]).assert().success();
+    let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    serde_json::from_str::<serde_json::Value>(s.trim())
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .len()
+}
+
+/// The regression this whole area exists for: a worktree parked under a
+/// directory that has a store of its own must still resolve to its *repo's*
+/// store, not to the one that happens to be sitting above it.
+///
+/// The ancestor walk used to run to the filesystem root before the git-aware
+/// lookup got a turn. A worktree is a sibling of the main repo, so the walk
+/// sailed past the repo entirely and landed on whatever store was overhead —
+/// a valid store, so reads and writes both succeeded, in the wrong project,
+/// with no warning. Every earlier worktree test put the worktree somewhere
+/// with nothing above it, which is the one arrangement that hides this.
+#[test]
+fn worktree_prefers_its_repo_store_over_an_ancestor_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outer_db = tmp.path().join(".quipu").join("db.sqlite");
+    qp(&outer_db).arg("init").assert().success();
+
+    let main = tmp.path().join("repo-main");
+    git_repo(&main);
+    let main_db = main.join(".quipu").join("db.sqlite");
+    qp(&main_db).arg("init").assert().success();
+
+    let wt = tmp.path().join("repo-wt");
+    git_worktree(&main, &wt, "wt-branch");
+
+    qp_bare()
+        .current_dir(&wt)
+        .args(["add", "filed-from-a-worktree"])
+        .assert()
+        .success();
+
+    assert_eq!(
+        task_count(&main_db),
+        1,
+        "task must land in the repo's store"
+    );
+    assert_eq!(
+        task_count(&outer_db),
+        0,
+        "the store above the worktree must not have been touched"
+    );
+}
+
+/// The other half of the tradeoff: bounding the walk at the checkout root must
+/// not cost a *deliberately* nested store its precedence. A `.quipu/` inside
+/// the worktree is below that boundary, so it still wins over both the main
+/// repo's store and any ancestor's — which a plain "ask git first" reorder
+/// would have broken.
+#[test]
+fn nested_store_inside_a_worktree_still_wins() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outer_db = tmp.path().join(".quipu").join("db.sqlite");
+    qp(&outer_db).arg("init").assert().success();
+
+    let main = tmp.path().join("repo-main");
+    git_repo(&main);
+    let main_db = main.join(".quipu").join("db.sqlite");
+    qp(&main_db).arg("init").assert().success();
+
+    let wt = tmp.path().join("repo-wt");
+    git_worktree(&main, &wt, "wt-branch");
+    let wt_db = wt.join(".quipu").join("db.sqlite");
+    qp(&wt_db).arg("init").assert().success();
+
+    qp_bare()
+        .current_dir(&wt)
+        .args(["add", "filed-into-the-nested-store"])
+        .assert()
+        .success();
+
+    assert_eq!(task_count(&wt_db), 1, "the nested store must win");
+    assert_eq!(task_count(&main_db), 0);
+    assert_eq!(task_count(&outer_db), 0);
+}
+
+/// A subdirectory deep inside a checkout still resolves to the store at the
+/// checkout root — the bounded walk stops *at* the root, not before it.
+#[test]
+fn subdirectory_of_a_repo_resolves_to_the_repo_root_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outer_db = tmp.path().join(".quipu").join("db.sqlite");
+    qp(&outer_db).arg("init").assert().success();
+
+    let repo = tmp.path().join("repo");
+    git_repo(&repo);
+    let repo_db = repo.join(".quipu").join("db.sqlite");
+    qp(&repo_db).arg("init").assert().success();
+
+    let deep = repo.join("src").join("inner");
+    std::fs::create_dir_all(&deep).unwrap();
+    qp_bare()
+        .current_dir(&deep)
+        .args(["add", "from-a-subdirectory"])
+        .assert()
+        .success();
+
+    assert_eq!(task_count(&repo_db), 1);
+    assert_eq!(task_count(&outer_db), 0);
+}
+
+/// A repo with no store of its own keeps falling back to an ancestor's. That
+/// is the pre-existing behaviour and it stays: nothing in view conflicts, so
+/// there is no wrong answer to pick and no reason to warn about it.
+#[test]
+fn repo_without_a_store_still_falls_back_to_an_ancestor_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outer_db = tmp.path().join(".quipu").join("db.sqlite");
+    qp(&outer_db).arg("init").assert().success();
+
+    let repo = tmp.path().join("repo");
+    git_repo(&repo);
+
+    qp_bare()
+        .current_dir(&repo)
+        .args(["add", "no-store-of-its-own"])
+        .assert()
+        .success();
+
+    assert_eq!(task_count(&outer_db), 1);
+}
+
+/// Precedence, pinned: an explicit `QP_DB` beats discovery outright, even when
+/// the cwd has a perfectly good store of its own.
+///
+/// This is the flip side of hermeticity. Because an explicit store always wins,
+/// a `QP_DB` exported in the caller's shell reaches straight into any child
+/// process that inherits it — which is how a probe run inside a worktree once
+/// filed a junk task into a real project's ledger. Tests therefore spawn `qp`
+/// through `qp_bare`, which scrubs the inherited value, and name the store they
+/// mean; the environment the suite happens to run in gets no vote.
+#[test]
+fn explicit_qp_db_wins_over_a_discoverable_store_in_the_cwd() {
+    let tmp = tempfile::tempdir().unwrap();
+    let discoverable = tmp.path().join(".quipu").join("db.sqlite");
+    qp(&discoverable).arg("init").assert().success();
+
+    let other = tempfile::tempdir().unwrap();
+    let other_db = other.path().join("db.sqlite");
+    qp(&other_db).arg("init").assert().success();
+
+    qp(&other_db)
+        .current_dir(tmp.path())
+        .args(["add", "explicit-wins"])
+        .assert()
+        .success();
+
+    assert_eq!(task_count(&other_db), 1);
+    assert_eq!(task_count(&discoverable), 0);
+}
+
 #[test]
 fn resolve_path_finds_store_from_worktree() {
     // Simulate: a main repo with .quipu/, and a sibling "worktree" dir
     // whose only git-link points back at the main repo. qp run from inside
     // the worktree should find the main repo's .quipu/.
-    use std::process::Command as PCommand;
     let tmp = tempfile::tempdir().unwrap();
     let main = tmp.path().join("repo-main");
-    std::fs::create_dir(&main).unwrap();
     // Init a git repo + initial commit so worktree-add works.
-    PCommand::new("git")
-        .args(["init", "-q"])
-        .current_dir(&main)
-        .status()
-        .unwrap();
-    PCommand::new("git")
-        .args(["commit", "--allow-empty", "-q", "-m", "init"])
-        .current_dir(&main)
-        .status()
-        .unwrap();
+    git_repo(&main);
     // Initialize a qp store in the main repo.
-    Command::cargo_bin("qp")
-        .unwrap()
-        .current_dir(&main)
-        .arg("init")
-        .assert()
-        .success();
+    qp_bare().current_dir(&main).arg("init").assert().success();
     // Create a worktree as a sibling.
     let wt = tmp.path().join("repo-wt");
-    PCommand::new("git")
-        .args([
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "tmpbranch",
-            wt.to_str().unwrap(),
-        ])
-        .current_dir(&main)
-        .status()
-        .unwrap();
+    git_worktree(&main, &wt, "tmpbranch");
     // Without QP_DB, running qp from the worktree should still work
     // and create the task in the MAIN repo's store.
-    Command::cargo_bin("qp")
-        .unwrap()
+    qp_bare()
         .current_dir(&wt)
         .args(["add", "from-worktree"])
         .assert()
         .success();
     // Verify the task landed in the main store.
-    let out = Command::cargo_bin("qp")
-        .unwrap()
+    let out = qp_bare()
         .current_dir(&main)
         .args(["list", "--json"])
         .assert()
@@ -2659,7 +2849,7 @@ fn list_assigned_to_supports_glob_pattern() {
         .assert()
         .success();
     qp(&db)
-        .args(["assign", "QP-3", "--to", "cli:nando"])
+        .args(["assign", "QP-3", "--to", "cli:human"])
         .assert()
         .success();
     let out = qp(&db)
@@ -4925,12 +5115,23 @@ fn assign_claim_complete_transitions_unchanged_by_state_enum_sweep() {
 // failed and an agent could not read the error it had just been handed.
 
 /// Build two stores with distinct project_uuids, return (cwd_store_dir, other_db).
+/// Two independent stores, one per tempdir, each at `<dir>/.quipu/db.sqlite`.
+///
+/// `init` names its target explicitly instead of letting discovery place it.
+/// Relying on discovery made this helper a hostage to whatever lived above the
+/// tempdir: a stray `.quipu/` in the temp root captured *both* inits, the two
+/// "stores" became one store with one `project_uuid`, and the mismatch tests
+/// downstream had nothing left to mismatch. The stores must genuinely differ
+/// for those tests to mean anything, so they are placed, not found.
+///
+/// Once the store exists at the tempdir root, commands run with that tempdir as
+/// their cwd resolve to it on the first step of the walk, so they stay hermetic
+/// too — nothing above the tempdir is ever reached.
 fn two_stores() -> (tempfile::TempDir, tempfile::TempDir) {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
     for d in [&a, &b] {
-        Command::cargo_bin("qp")
-            .unwrap()
+        qp(&d.path().join(".quipu").join("db.sqlite"))
             .current_dir(d.path())
             .arg("init")
             .assert()
@@ -4949,8 +5150,7 @@ fn json_mode_stderr_is_json_lines_when_project_uuid_mismatches() {
         vec!["assign", "QP-1", "--to", "alice"],
         vec!["claim", "QP-1", "--as", "alice"],
     ] {
-        Command::cargo_bin("qp")
-            .unwrap()
+        qp_bare()
             .env("QP_DB", &a_db)
             .current_dir(a.path())
             .args(&args)
@@ -4959,8 +5159,7 @@ fn json_mode_stderr_is_json_lines_when_project_uuid_mismatches() {
     }
     // Now run from store B's directory while pointing QP_DB at store A: the
     // mismatch warning fires, and the double-claim fails.
-    let assert = Command::cargo_bin("qp")
-        .unwrap()
+    let assert = qp_bare()
         .env("QP_DB", &a_db)
         .current_dir(b.path())
         .args(["claim", "QP-1", "--as", "alice", "--json"])
@@ -4995,8 +5194,7 @@ fn json_mode_stderr_is_json_lines_when_project_uuid_mismatches() {
 fn human_mode_keeps_prose_warning_on_mismatch() {
     let (a, b) = two_stores();
     let a_db = a.path().join(".quipu").join("db.sqlite");
-    let assert = Command::cargo_bin("qp")
-        .unwrap()
+    let assert = qp_bare()
         .env("QP_DB", &a_db)
         .current_dir(b.path())
         .args(["list"])
@@ -5324,16 +5522,8 @@ fn parse_error_emits_json_envelope() {
 /// has to sort them out; getting this wrong would send help text to exit 1.
 #[test]
 fn help_and_version_still_exit_zero() {
-    Command::cargo_bin("qp")
-        .unwrap()
-        .arg("--help")
-        .assert()
-        .success();
-    Command::cargo_bin("qp")
-        .unwrap()
-        .arg("--version")
-        .assert()
-        .success();
+    qp_bare().arg("--help").assert().success();
+    qp_bare().arg("--version").assert().success();
 }
 
 // ---------------------------------------------------------------------------

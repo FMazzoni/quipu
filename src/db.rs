@@ -211,10 +211,15 @@ pub fn invalid_input(msg: impl Into<String>) -> anyhow::Error {
 
 /// Locates the store.
 ///
-/// Explicit `--db`/`QP_DB` wins, else the nearest `.quipu/db.sqlite` walking
-/// up from the cwd, else the git-aware fallback.
+/// Explicit `--db`/`QP_DB` wins. Otherwise, in order:
 ///
-/// The fallback is what makes a bare `qp` work from inside a git worktree. A
+/// 1. the nearest `.quipu/db.sqlite` walking up from the cwd, **stopping at
+///    the checkout root** (the first ancestor holding a `.git` entry);
+/// 2. the store beside the repository git-common-dir asks for;
+/// 3. the nearest `.quipu/db.sqlite` *above* that checkout root;
+/// 4. `./.quipu/db.sqlite`, so `qp init` has somewhere to create one.
+///
+/// Step 2 is what makes a bare `qp` work from inside a git worktree. A
 /// worktree's checkout is a *sibling* of the main repo, not a descendant, so
 /// the ancestor walk never reaches the main repo's `.quipu/`. Asking git for
 /// `--git-common-dir` resolves to the main repo's `.git` from either a
@@ -222,6 +227,23 @@ pub fn invalid_input(msg: impl Into<String>) -> anyhow::Error {
 /// Without this, every agent working in a worktree would have to set `QP_DB`
 /// by hand — and one that got it wrong would silently file into the wrong
 /// project.
+///
+/// The bounded walk in step 1 is what lets step 2 actually run. An unbounded
+/// walk climbs straight past a worktree into whatever directory happens to
+/// hold it; if *anything* up there has a `.quipu/`, that store wins and the
+/// git-aware fallback is never reached — a silent wrong-project write, since
+/// the wrong store is still a valid store and reads and writes both succeed.
+/// Bounding the walk at the checkout root keeps a deliberately nested store
+/// (one inside the worktree) winning, which a plain "git first" reorder would
+/// have broken, while a store belonging to some unrelated parent directory no
+/// longer outranks the repository the cwd is actually in.
+///
+/// Step 3 preserves the pre-existing behaviour for a repo that has no store of
+/// its own but sits under a directory that does: nothing in view conflicts, so
+/// the outer store is still the answer.
+///
+/// git is only spawned when the checkout itself has no store, so the common
+/// case — a repo with `.quipu/` at its root — costs no subprocess.
 ///
 /// Never fails on a missing store: when nothing is found it returns the path
 /// where one *would* live, so `qp init` has somewhere to create it and every
@@ -231,42 +253,76 @@ pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
         return Ok(p);
     }
     let cwd = std::env::current_dir()?;
+
+    // Walk up, tracking whether we have crossed out of the current checkout.
+    // A store found at or below the checkout root wins outright; one found
+    // above it is only a fallback, behind the git-aware lookup.
+    let mut above_checkout: Option<PathBuf> = None;
+    let mut inside_checkout = true;
     for a in cwd.ancestors() {
         let c = a.join(".quipu").join("db.sqlite");
         if c.exists() {
-            return Ok(c);
+            if inside_checkout {
+                return Ok(c);
+            }
+            above_checkout = Some(c);
+            break;
+        }
+        // `.git` is a directory in a primary checkout and a file in a linked
+        // worktree; either marks the root of the checkout we started in.
+        if inside_checkout && a.join(".git").exists() {
+            inside_checkout = false;
         }
     }
-    if let Ok(out) = std::process::Command::new("git")
-        .args(["rev-parse", "--git-common-dir"])
-        .output()
-    {
-        if out.status.success() {
-            let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !raw.is_empty() {
-                let git_dir = PathBuf::from(&raw);
-                let git_dir = if git_dir.is_absolute() {
-                    git_dir
-                } else {
-                    cwd.join(git_dir)
-                };
-                let git_dir = git_dir.canonicalize().unwrap_or(git_dir);
-                if let Some(repo_root) = git_dir.parent() {
-                    let c = repo_root.join(".quipu").join("db.sqlite");
-                    if c.exists() {
-                        return Ok(c);
-                    }
-                }
-            }
-        }
+
+    if let Some(c) = git_common_dir_store(&cwd) {
+        return Ok(c);
+    }
+    if let Some(c) = above_checkout {
+        return Ok(c);
     }
     Ok(cwd.join(".quipu").join("db.sqlite"))
+}
+
+/// The store beside the repository's common git dir, if it exists.
+///
+/// `--git-common-dir` is the main repo's `.git` seen from anywhere in the
+/// repository, linked worktrees included — which is the whole point.
+fn git_common_dir_store(cwd: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+    let git_dir = PathBuf::from(&raw);
+    let git_dir = if git_dir.is_absolute() {
+        git_dir
+    } else {
+        cwd.join(git_dir)
+    };
+    let git_dir = git_dir.canonicalize().unwrap_or(git_dir);
+    let c = git_dir.parent()?.join(".quipu").join("db.sqlite");
+    c.exists().then_some(c)
 }
 
 /// Guard against filing into the wrong project.
 ///
 /// Warns when an explicit `--db`/`QP_DB` points at a different store than the
-/// one the cwd would have resolved to.
+/// one a bare `qp` would have picked.
+///
+/// The comparison runs through `resolve_path` itself rather than a private
+/// ancestor walk, so the warning always describes the store the implicit path
+/// would really have chosen. That matters in a worktree: a second, subtly
+/// different walk here reported a mismatch on every single command for a
+/// perfectly consistent `QP_DB`, and an always-on warning for a legitimate
+/// configuration is one people learn to filter out. It now fires on a genuine
+/// difference of `project_uuid` and nothing else.
 ///
 /// Only fires when the path was given explicitly — that is, in automation. Which
 /// is exactly why `json` matters: under `--json`, stderr is JSON Lines (zero or
@@ -277,18 +333,10 @@ pub fn warn_on_project_mismatch(explicit: &Option<PathBuf>, json: bool) -> Resul
     let Some(explicit_path) = explicit else {
         return Ok(());
     };
-    let cwd = std::env::current_dir()?;
-    let mut local: Option<PathBuf> = None;
-    for a in cwd.ancestors() {
-        let c = a.join(".quipu").join("db.sqlite");
-        if c.exists() {
-            local = Some(c);
-            break;
-        }
-    }
-    let Some(local) = local else {
+    let local = resolve_path(None)?;
+    if !local.exists() {
         return Ok(());
-    };
+    }
     if local.canonicalize().ok() == explicit_path.canonicalize().ok() {
         return Ok(());
     }
