@@ -339,41 +339,45 @@ fn parse_event(v: &Value, origin_uuid: &str, path: &Path) -> Result<LedgerEvent>
 // the command
 // ---------------------------------------------------------------------------
 
+/// What one import did to the store.
+///
+/// Public because `qp sync` composes import rather than reimplementing it, and
+/// reports the merge's own numbers rather than counting its own.
 #[derive(Serialize)]
-struct ImportOutcome {
-    mode: &'static str,
-    from: String,
-    batches: usize,
-    stores: Vec<String>,
-    events_read: usize,
-    events_new: usize,
+pub struct ImportOutcome {
+    pub mode: &'static str,
+    pub from: String,
+    pub batches: usize,
+    pub stores: Vec<String>,
+    pub events_read: usize,
+    pub events_new: usize,
     /// Events a best-effort restore could not write, because they name a task
     /// the log cannot rebuild and `event.task_id` is a foreign key.
-    events_lost: usize,
+    pub events_lost: usize,
     /// Transitions replayed with a weaker check than the live command ran,
     /// because the event predates the log recording an origin state.
-    unguarded_transitions: usize,
+    pub unguarded_transitions: usize,
     /// Field values recovered from an edit's own `from`, where the creation
     /// event that should have carried them did not.
-    repaired_fields: usize,
+    pub repaired_fields: usize,
     /// Live rows the merged log never mentioned, kept rather than rebuilt away.
     #[serde(default)]
-    rows_carried_forward: usize,
+    pub rows_carried_forward: usize,
     /// Whether the ledger contains history from before the log recorded every
     /// write. If so the restore is partial in ways nothing can enumerate.
-    pre_fidelity_history: bool,
+    pub pre_fidelity_history: bool,
     /// Whether the projection was written despite anomalies. A script that
     /// cares about a clean rebuild reads this rather than the exit code: the
     /// pre-fidelity restore path is a success at what it can do, not a failure.
-    best_effort: bool,
-    tasks: usize,
-    conflicts: usize,
-    conflicted_tasks: Vec<String>,
+    pub best_effort: bool,
+    pub tasks: usize,
+    pub conflicts: usize,
+    pub conflicted_tasks: Vec<String>,
     /// Canonical names of the tasks no creation event in the ledger minted.
-    unreconstructable_tasks: Vec<String>,
+    pub unreconstructable_tasks: Vec<String>,
     /// Tasks a forced merge kept as they were rather than dropping.
-    carried_over: Vec<String>,
-    anomalies: Vec<String>,
+    pub carried_over: Vec<String>,
+    pub anomalies: Vec<String>,
 }
 
 impl Outcome for ImportOutcome {
@@ -457,6 +461,16 @@ impl Outcome for ImportOutcome {
 }
 
 pub fn run(db_path: &Path, a: ImportArgs) -> Result<()> {
+    let out = import(db_path, &a)?;
+    crate::outcome::emit(a.json, &out)
+}
+
+/// Reads `a.from`, replays it into the store, and reports what changed.
+///
+/// Split from [`run`] so `qp sync` composes the merge instead of shelling out
+/// to a second `qp`, and so the warnings below are emitted once, here, for
+/// every caller rather than only for the CLI one.
+pub fn import(db_path: &Path, a: &ImportArgs) -> Result<ImportOutcome> {
     let mode = match (a.restore, a.merge) {
         (true, false) => Mode::Restore,
         (false, true) => Mode::Merge,
@@ -471,35 +485,32 @@ pub fn run(db_path: &Path, a: ImportArgs) -> Result<()> {
     let ledger = read_ledger(&a.from)?;
     let stores = ledger.uuids();
     if ledger.events.is_empty() {
-        return crate::outcome::emit(
-            a.json,
-            &ImportOutcome {
-                mode: mode.as_str(),
-                from: a.from.display().to_string(),
-                batches: ledger.batches,
-                stores,
-                events_read: 0,
-                events_new: 0,
-                events_lost: 0,
-                unguarded_transitions: 0,
-                repaired_fields: 0,
-                rows_carried_forward: 0,
-                pre_fidelity_history: false,
-                best_effort: false,
-                tasks: 0,
-                conflicts: 0,
-                conflicted_tasks: Vec::new(),
-                unreconstructable_tasks: Vec::new(),
-                carried_over: Vec::new(),
-                anomalies: Vec::new(),
-            },
-        );
+        return Ok(ImportOutcome {
+            mode: mode.as_str(),
+            from: a.from.display().to_string(),
+            batches: ledger.batches,
+            stores,
+            events_read: 0,
+            events_new: 0,
+            events_lost: 0,
+            unguarded_transitions: 0,
+            repaired_fields: 0,
+            rows_carried_forward: 0,
+            pre_fidelity_history: false,
+            best_effort: false,
+            tasks: 0,
+            conflicts: 0,
+            conflicted_tasks: Vec::new(),
+            unreconstructable_tasks: Vec::new(),
+            carried_over: Vec::new(),
+            anomalies: Vec::new(),
+        });
     }
 
     let mut conn = db::open(db_path)?;
     let mut out = db::with_tx(&mut conn, |tx| match mode {
-        Mode::Restore => restore(tx, &a, &ledger, &stores),
-        Mode::Merge => merge(tx, &a, &ledger, &stores),
+        Mode::Restore => restore(tx, a, &ledger, &stores),
+        Mode::Merge => merge(tx, a, &ledger, &stores),
     })?;
     out.from = a.from.display().to_string();
     out.batches = ledger.batches;
@@ -522,7 +533,7 @@ pub fn run(db_path: &Path, a: ImportArgs) -> Result<()> {
     if out.pre_fidelity_history {
         eprintln!("{}", PRE_FIDELITY_WARNING);
     }
-    crate::outcome::emit(a.json, &out)
+    Ok(out)
 }
 
 /// Refuses the write when replay hit anomalies — where refusing protects

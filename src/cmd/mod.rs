@@ -25,6 +25,7 @@ pub mod render;
 pub mod report;
 pub mod show;
 pub mod status;
+pub mod sync;
 pub mod tag;
 pub mod timeline;
 pub mod tree;
