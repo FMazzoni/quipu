@@ -13,6 +13,7 @@ pub mod contains;
 pub mod decisions;
 pub mod depends;
 pub mod edit;
+pub mod export;
 pub mod install_skills;
 pub mod list;
 pub mod log;

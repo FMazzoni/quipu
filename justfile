@@ -14,8 +14,9 @@ build:
 # agents resolve that by skipping the gate (QP-167). Looping the targets runs
 # exactly the same tests with one rustc live at a time.
 #
-# `ls tests` rather than a hardcoded list, so a new integration target is gated
-# the day it is added. `--bins`, not `--lib`: quipu has no src/lib.rs, so the
+# Only top-level `*.rs`: `tests/common/` is a shared module, not a target, and
+# `cargo test --test common` fails on it. Still no hardcoded list, so a new
+# integration target is gated the day it is added. `--bins`, not `--lib`: quipu has no src/lib.rs, so the
 # unit tests compile into the `qp` binary and `--lib` matches no target, prints
 # nothing, and silently drops all of them. Do not "simplify" this to `--tests`,
 # which fans the targets back out in parallel and gives up the whole point.
@@ -27,7 +28,7 @@ build:
 test:
     #!/usr/bin/env bash
     set -euo pipefail
-    for t in $(ls tests | sed 's/\.rs$//'); do
+    for t in $(find tests -maxdepth 1 -name '*.rs' -printf '%f\n' | sed 's/\.rs$//'); do
         cargo test --test "$t"
     done
     cargo test --bins
