@@ -34,6 +34,10 @@ pub fn run(db_path: &std::path::Path, a: ReclaimArgs) -> Result<()> {
     let resolved = id::resolve_full(&conn, &a.task)?;
     let task_id = resolved.id;
     let resulting = db::with_tx(&mut conn, |tx| {
+        // Origin read first, for the event payload only — the guard names a set,
+        // so the log cannot tell `assigned` from `running` otherwise. The
+        // `UPDATE` stays conditional and `changes() == 1` still decides.
+        let from = db::state_of(tx, task_id)?;
         let n = tx.execute(
             "UPDATE task SET state = ?1 WHERE id = ?2 AND state IN ('assigned','running')",
             rusqlite::params![db::State::Pending, task_id],
@@ -45,14 +49,25 @@ pub fn run(db_path: &std::path::Path, a: ReclaimArgs) -> Result<()> {
                 Some(resolved.display_id.clone()),
             ));
         }
-        db::refresh_ready(tx)?;
-
-        // Read back the resulting state for the event payload. Permitted exception:
-        // auxiliary read for error/event-quality, not control flow.
-        let resulting: String =
-            tx.query_row("SELECT state FROM task WHERE id = ?", [task_id], |r| {
-                r.get(0)
-            })?;
+        // The release and the re-promotion are two moves, and get two events —
+        // see the note in `abandon`, which this mirrors.
+        db::insert_state_change(
+            tx,
+            task_id,
+            from.as_deref(),
+            db::State::Pending.as_str(),
+            None,
+            &[
+                ("via", serde_json::json!("reclaim")),
+                ("reason", serde_json::json!(a.reason)),
+            ],
+        )?;
+        let promoted = db::refresh_ready_logged(tx, None, "reclaim")?;
+        let resulting = if promoted.contains(&task_id) {
+            db::State::Ready.to_string()
+        } else {
+            db::State::Pending.to_string()
+        };
 
         let n2 = tx.execute(
             "UPDATE assignment SET completed_at = ?, outcome = 'reclaimed'
@@ -66,13 +81,6 @@ pub fn run(db_path: &std::path::Path, a: ReclaimArgs) -> Result<()> {
                 Some(resolved.display_id.clone()),
             ));
         }
-        db::insert_event(
-            tx,
-            Some(task_id),
-            "state_change",
-            None,
-            Some(&serde_json::json!({"to": resulting, "via": "reclaim", "reason": a.reason})),
-        )?;
         Ok(resulting)
     })?;
     emit(

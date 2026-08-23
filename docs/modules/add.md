@@ -3,13 +3,42 @@ A new task lands in `ready` when it has no unresolved deps, `pending` otherwise.
 ## Initial state, decided twice
 
 The `INSERT` picks `ready` or `pending` from whether any deps were named at all.
-Then, if deps were named, `refresh_ready` runs before the transaction closes and
-promotes the row back to `ready` when every one of those deps is already `done`
-or `cancelled`. The `state_change` event is written from the state read back
-after that promotion, not from the guess made at insert time, so a task created
-against already-finished prerequisites emits one event saying `ready` rather than
-two that contradict each other. `add_with_deps_starts_pending_then_unblocks`
-covers the case where the deps are genuinely open.
+Then each dep goes in through `link_dep`, which runs the logged readiness sweep
+and promotes the row back to `ready` when every one of those deps is already
+`done` or `cancelled`. `add_with_deps_starts_pending_then_unblocks` covers the
+case where the deps are genuinely open.
+
+Both steps are in the log, and that is a change. The command used to write a
+single `state_change` naming the state read back at the end, which collapsed
+"born `pending`, then promoted" into one event claiming the task had always been
+`ready`. Now the creation event names the state the row was born in and the
+promotion gets its own event with both ends of the move, so the sequence replays
+to the same place the table is in. The reported state is still the one read back
+at the end, because that is the state the caller's next command will meet.
+
+## Everything a create writes, it now says
+
+A create is the one command that can populate four different tables, and for
+most of the project's life it announced one of them. Deps went in through a raw
+`INSERT` that bypassed `link_dep` and its `dep_added` event; tags went in through
+a raw `INSERT OR IGNORE` with no event at all; tier and description were set by
+the `INSERT` itself and mentioned nowhere. Since `--tag` is how essentially every
+tag in a store arrives, the log knew about almost none of them.
+
+So: the creation `state_change` carries `title`, and `tier` and `description`
+when they were given; each dep is written by `link_dep` and gets its `dep_added`;
+each tag that lands gets the same `tag_added` event `qp tag add` writes. The
+creation event is emitted *first*, before any edge or tag referencing the new
+task, because a log whose first mention of a task is an edge pointing at it
+cannot be replayed in order.
+
+Its `from` is `null` — explicitly, not by omission. A task has no prior state,
+which is a different claim from an event too old to have recorded one, and the
+two need to stay distinguishable.
+
+Routing deps through `link_dep` also makes a repeated `--depends-on QP-1
+--depends-on QP-1` a no-op instead of a `UNIQUE` constraint failure, since the
+shared helper writes the edge with an `ON CONFLICT` clause.
 
 ## `--depends-on` and `--part-of` point opposite ways
 

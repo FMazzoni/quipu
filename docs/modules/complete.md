@@ -27,8 +27,15 @@ are repeatable and each value becomes its own event row, which is what lets
 
 ## Dependency promotion
 
-`refresh_ready` runs last, inside the same transaction. Completing a task is the
-most common way a dependency gets resolved, so anything waiting on this one is
-promoted before the write lock is released and no reader observes a `done` task
-whose dependents are still `pending`
+`refresh_ready_logged` runs last, inside the same transaction. Completing a task
+is the most common way a dependency gets resolved, so anything waiting on this
+one is promoted before the write lock is released and no reader observes a `done`
+task whose dependents are still `pending`
 (`complete_marks_done_records_decisions_unblocks_deps`).
+
+The *logged* sweep, not the bare one. This path used the silent version for most
+of the project's life, which meant the single most common unblocking in the
+system — the entire point of the dependency graph — produced no event. A task's
+timeline ended at `→ pending` while the task itself sat in `ready`, and a replay
+of the log put it in the wrong state. `complete_promotion_emits_from_and_to`
+pins the promoted task's event down, both ends of it.

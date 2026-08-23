@@ -61,12 +61,14 @@ pub fn run(db_path: &std::path::Path, a: AssignArgs) -> Result<()> {
                 Some(resolved.display_id.clone()),
             ));
         }
-        db::insert_event(
+        // `from` is a literal: the guarded UPDATE above matched `ready` only.
+        db::insert_state_change(
             tx,
-            Some(task_id),
-            "state_change",
+            task_id,
+            Some(db::State::Ready.as_str()),
+            db::State::Assigned.as_str(),
             Some(&a.to),
-            Some(&serde_json::json!({"to": "assigned", "agent_id": a.to})),
+            &[("agent_id", serde_json::json!(a.to))],
         )?;
         Ok(())
     })?;

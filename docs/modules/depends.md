@@ -33,13 +33,16 @@ prerequisite. So it is a no-op when the new dep is already `done` — no spuriou
 demotion, no event (`depends_demote_emits_state_change_event` covers the case
 where the demotion does happen).
 
-The promotion cannot work that way, because `refresh_ready` promotes tasks in
-bulk and reports nothing about which ones moved. Removing an edge can free tasks
-other than the one named, so the branch snapshots the promotion candidates first,
-calls `refresh_ready`, then re-reads each candidate to see which actually landed
-in `ready` and emits an event for it. Without the snapshot the promotions would
-be silent, and a `watch` consumer would see a task become workable with nothing
-in the log explaining why (`depends_rm_emits_state_change_on_promote`).
+The promotion cannot work that way, because the underlying sweep promotes tasks
+in bulk and reports nothing about which ones moved. Removing an edge can free
+tasks other than the one named, so `refresh_ready_logged` snapshots the promotion
+candidates first, sweeps, then re-reads each candidate to see which actually
+landed in `ready` and emits an event for it. Without the snapshot the promotions
+would be silent, and a `watch` consumer would see a task become workable with
+nothing in the log explaining why (`depends_rm_emits_state_change_on_promote`).
+
+Every command that can promote now goes through that wrapper; the silent sweep is
+private to `db` and has no callers but the wrapper itself.
 
 ## Ownership gate on the downstream task
 

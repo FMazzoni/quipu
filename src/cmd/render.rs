@@ -9,7 +9,19 @@ use serde_json::Value;
 /// Shared by `timeline` and `show`.
 pub fn summarize_payload(kind: &str, p: &Value) -> String {
     match kind {
-        "state_change" => format!("→ {}", p.get("to").and_then(|v| v.as_str()).unwrap_or("")),
+        "state_change" => {
+            let to = p.get("to").and_then(|v| v.as_str()).unwrap_or("");
+            // `from` reads as an origin only when it is a string. A `null` is a
+            // task's creation — no prior state — and an absent key is an event
+            // written before origins were recorded at all. Both render as the
+            // bare arrow, because neither has an origin to name and inventing a
+            // placeholder for the second would be the renderer asserting
+            // something the log does not say.
+            match p.get("from").and_then(|v| v.as_str()) {
+                Some(from) => format!("{from} → {to}"),
+                None => format!("→ {to}"),
+            }
+        }
         "decision" => {
             let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
             if p.get("auto").and_then(|v| v.as_bool()).unwrap_or(false) {

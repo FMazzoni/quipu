@@ -75,7 +75,7 @@ pub fn run(db_path: &std::path::Path, a: AddArgs) -> Result<()> {
     // Pre-resolve deps outside tx; errors early.
     let mut dep_ids = Vec::with_capacity(a.depends_on.len());
     for d in &a.depends_on {
-        dep_ids.push(id::resolve(&conn, d)?);
+        dep_ids.push(id::resolve_full(&conn, d)?);
     }
     let parents = a
         .part_of
@@ -100,21 +100,47 @@ pub fn run(db_path: &std::path::Path, a: AddArgs) -> Result<()> {
             "UPDATE task SET display_id = ? WHERE id = ?",
             rusqlite::params![display, row],
         )?;
-        for did in &dep_ids {
-            // Cycle check: dep edges only go from `row` outward, so cycle only possible if
-            // some existing edge from *did to row exists. Use would_cycle for safety.
-            if db::would_cycle(tx, row, *did)? {
-                return Err(db::invariant(
-                    "dependency_cycle",
-                    format!(
-                        "cycle: {} depends on dep#{} which (transitively) depends on {}",
-                        display, did, display
-                    ),
-                ));
-            }
-            tx.execute(
-                "INSERT INTO dep(task_id, depends_on_task_id, mode) VALUES (?,?,?)",
-                rusqlite::params![row, did, db::MODE_BLOCKS],
+        // The creation event leads, before any edge or tag that references this
+        // task. A log whose first mention of a task is an edge pointing at it
+        // cannot be replayed in order, and everything below this line can move
+        // the row's state, so this is also the only point at which the state
+        // written here is the state the row was born in.
+        //
+        // `from` is `null` rather than absent: a task has no prior state, and
+        // that is a different claim from an event too old to record one.
+        // `tier` and `description` ride along because the `INSERT` above is the
+        // only place they are ever set without an `edit` event to say so.
+        let mut birth: Vec<(&str, serde_json::Value)> = vec![("title", serde_json::json!(a.title))];
+        if let Some(t) = &a.tier {
+            birth.push(("tier", serde_json::json!(t)));
+        }
+        if let Some(d) = &a.description {
+            birth.push(("description", serde_json::json!(d)));
+        }
+        db::insert_state_change(tx, row, None, state, None, &birth)?;
+        // Through the shared edge writer rather than a raw `INSERT`: the raw
+        // insert wrote edges no `dep_added` event ever described, which is most
+        // of how the dep graph became unreplayable. It also brings the cycle
+        // check, vacuous for a task nothing points at yet and cheap enough to
+        // keep for free rather than special-case.
+        //
+        // `write_dep_edge`, not `link_dep`, because a create can name several
+        // edges and `link_dep` sweeps after each one. Sweeping between edges
+        // reads a half-written graph: with `--depends-on DONE --depends-on OPEN`
+        // the first sweep sees only the resolved dep, promotes the new task to
+        // `ready`, and the second edge immediately demotes it again — logging a
+        // `ready` the store was never in, and putting a `to: "ready"` on the
+        // wire for anything watching. All the edges go in first; the single
+        // sweep below then runs once, against the finished graph.
+        for dep in &dep_ids {
+            db::write_dep_edge(
+                tx,
+                row,
+                &display,
+                dep.id,
+                &dep.display_id,
+                db::MODE_BLOCKS,
+                a.agent.as_deref(),
             )?;
         }
         // Direction inverts here: the container is the depender. See the note on
@@ -122,7 +148,7 @@ pub fn run(db_path: &std::path::Path, a: AddArgs) -> Result<()> {
         // wave is a mutation of their row.
         for parent in &parents {
             db::require_edge_owner(tx, parent.id, &parent.display_id, a.agent.as_deref())?;
-            db::link_dep(
+            db::write_dep_edge(
                 tx,
                 parent.id,
                 &parent.display_id,
@@ -132,6 +158,10 @@ pub fn run(db_path: &std::path::Path, a: AddArgs) -> Result<()> {
                 a.agent.as_deref(),
             )?;
         }
+        // The one sweep, after every edge is written. It promotes the new task
+        // when all its deps were already resolved, and freezes it when a
+        // container it just joined is itself blocked.
+        db::reconcile_readiness(tx, a.agent.as_deref(), "add")?;
         let defaults = db::default_tags(tx)?;
         let mut merged: HashSet<String> = HashSet::new();
         for t in defaults {
@@ -142,26 +172,31 @@ pub fn run(db_path: &std::path::Path, a: AddArgs) -> Result<()> {
         }
         let mut merged_tags: Vec<String> = merged.into_iter().collect();
         merged_tags.sort();
+        // One `tag_added` per tag that actually landed, same kind and payload
+        // `qp tag add` writes. `--tag` is how essentially every tag in a store
+        // arrives, so a silent insert here meant the log knew about almost none
+        // of them. Guarded on `changes()` so a tag already present — only
+        // possible via the default-tag merge — is not announced twice.
         for tag in &merged_tags {
             tx.execute(
                 "INSERT OR IGNORE INTO tag(task_id, name) VALUES (?,?)",
                 rusqlite::params![row, tag],
             )?;
+            if tx.changes() == 1 {
+                db::insert_event(
+                    tx,
+                    Some(row),
+                    "tag_added",
+                    a.agent.as_deref(),
+                    Some(&serde_json::json!({"name": tag})),
+                )?;
+            }
         }
-        // If deps were added, run refresh_ready now: if all deps are already done/cancelled
-        // this task may immediately transition to ready.
-        if !dep_ids.is_empty() {
-            db::refresh_ready(tx)?;
-        }
+        // Read back for the *reported* state only. It can differ from the state
+        // the row was born in, in both directions: deps already resolved
+        // promote it, and a container that is itself blocked freezes it.
         let actual_state: String =
             tx.query_row("SELECT state FROM task WHERE id = ?", [row], |r| r.get(0))?;
-        db::insert_event(
-            tx,
-            Some(row),
-            "state_change",
-            None,
-            Some(&serde_json::json!({"to": actual_state, "title": a.title})),
-        )?;
         Ok(Created {
             display_id: display,
             title: a.title.clone(),

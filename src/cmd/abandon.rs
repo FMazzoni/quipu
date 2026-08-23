@@ -52,8 +52,14 @@ pub fn run(db_path: &std::path::Path, a: AbandonArgs) -> Result<()> {
             ));
         }
 
-        // Route through `pending`, then let `refresh_ready` promote it back to `ready`
-        // if it has no unresolved deps. Same destination logic as `reclaim`, one code path.
+        // Route through `pending`, then let the readiness sweep promote it back to
+        // `ready` if it has no unresolved deps. Same destination logic as
+        // `reclaim`, one code path.
+        //
+        // The origin is read first, for the event payload only: the guard names
+        // a set, so `assigned` and `running` are both legal here and the log
+        // cannot tell them apart otherwise. The `UPDATE` stays conditional.
+        let from = db::state_of(tx, task_id)?;
         let n = tx.execute(
             "UPDATE task SET state = ?1 WHERE id = ?2 AND state IN ('assigned','running')",
             rusqlite::params![db::State::Pending, task_id],
@@ -65,14 +71,28 @@ pub fn run(db_path: &std::path::Path, a: AbandonArgs) -> Result<()> {
                 Some(resolved.display_id.clone()),
             ));
         }
-        db::refresh_ready(tx)?;
-
-        // Read back the resulting state for the event payload. Permitted exception:
-        // auxiliary read for error/event-quality, not control flow.
-        let resulting: String =
-            tx.query_row("SELECT state FROM task WHERE id = ?", [task_id], |r| {
-                r.get(0)
-            })?;
+        // Two events, not one. This used to emit a single `state_change` naming
+        // the state the task landed in after the sweep, which reads as a direct
+        // `running` → `ready` hop — a transition the state machine does not
+        // have. The release and the re-promotion are separate moves and the log
+        // now says so, which is what makes the sequence replayable.
+        db::insert_state_change(
+            tx,
+            task_id,
+            from.as_deref(),
+            db::State::Pending.as_str(),
+            Some(&a.agent),
+            &[
+                ("via", serde_json::json!("abandon")),
+                ("reason", serde_json::json!(a.reason)),
+            ],
+        )?;
+        let promoted = db::refresh_ready_logged(tx, Some(&a.agent), "abandon")?;
+        let resulting = if promoted.contains(&task_id) {
+            db::State::Ready.to_string()
+        } else {
+            db::State::Pending.to_string()
+        };
 
         let n2 = tx.execute(
             "UPDATE assignment SET completed_at = ?, outcome = 'abandoned' \
@@ -86,15 +106,6 @@ pub fn run(db_path: &std::path::Path, a: AbandonArgs) -> Result<()> {
                 Some(resolved.display_id.clone()),
             ));
         }
-        db::insert_event(
-            tx,
-            Some(task_id),
-            "state_change",
-            Some(&a.agent),
-            Some(&serde_json::json!({
-                "to": resulting, "via": "abandon", "reason": a.reason
-            })),
-        )?;
         Ok(resulting)
     })?;
     emit(

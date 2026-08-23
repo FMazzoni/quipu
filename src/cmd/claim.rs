@@ -79,12 +79,14 @@ pub fn run(db_path: &std::path::Path, a: ClaimArgs) -> Result<()> {
             "UPDATE assignment SET claimed_at = ? WHERE id = ?",
             rusqlite::params![crate::time::now_rfc3339(), aid],
         )?;
-        db::insert_event(
+        // `from` is a literal: the guarded UPDATE above matched `assigned` only.
+        db::insert_state_change(
             tx,
-            Some(task_id),
-            "state_change",
+            task_id,
+            Some(db::State::Assigned.as_str()),
+            db::State::Running.as_str(),
             Some(&a.agent),
-            Some(&serde_json::json!({"to": "running"})),
+            &[],
         )?;
         Ok(())
     })?;

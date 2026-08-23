@@ -38,6 +38,12 @@ pub fn run(db_path: &std::path::Path, a: CancelArgs) -> Result<()> {
         // `NOT IN ('done','cancelled')` guard stays a literal on purpose — multi-state
         // predicates don't parametrize idiomatically in rusqlite, and `db::State` remains
         // the single source of truth for what those literals may spell.
+        // Read the origin before the transition, for the event payload only.
+        // The guard names a set rather than one state, so the log cannot name
+        // the origin without this; the `UPDATE` stays conditional and the
+        // `changes() == 1` check below is still the sole authority on whether
+        // the transition happened.
+        let from = db::state_of(tx, task_id)?;
         let n = tx.execute(
             "UPDATE task SET state = ?1
               WHERE id = ?2 AND state NOT IN ('done','cancelled')",
@@ -62,14 +68,17 @@ pub fn run(db_path: &std::path::Path, a: CancelArgs) -> Result<()> {
               WHERE task_id = ? AND completed_at IS NULL",
             rusqlite::params![crate::time::now_rfc3339(), task_id],
         )?;
-        db::insert_event(
+        db::insert_state_change(
             tx,
-            Some(task_id),
-            "state_change",
+            task_id,
+            from.as_deref(),
+            db::State::Cancelled.as_str(),
             None,
-            Some(&serde_json::json!({"to": "cancelled", "reason": a.reason})),
+            &[("reason", serde_json::json!(a.reason))],
         )?;
-        db::refresh_ready(tx)?;
+        // Logged: `cancelled` counts as resolved, so cancelling a blocker
+        // unblocks its dependents — a promotion that owes the log an entry.
+        db::refresh_ready_logged(tx, None, "cancel")?;
         Ok(())
     })?;
     emit(
