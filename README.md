@@ -144,6 +144,39 @@ Each store stamps a `project_uuid` at `qp init`. Setting `--db`/`QP_DB` explicit
 while the working directory would have resolved to a *different* store triggers the
 mismatch warning above — the guard against filing tickets into the wrong project.
 
+## Exporting the ledger
+
+    qp export --out /path/to/ledger
+
+Serialises the store's event log to plain-text JSONL under
+`<out>/<project_uuid>/`, one file per export:
+
+    <project_uuid>/<project_uuid>-0000000001-0000000128.jsonl
+
+Each file begins with a header record carrying the store's identity
+(`project_uuid`, `display_prefix`), the schema version it was written under, and
+the range of event ids it holds; the remaining lines are the events themselves.
+
+Three properties are the point:
+
+- **Append-only and immutable.** A batch is written once and never rewritten.
+  Re-running `export` emits only what is new, deriving the high-water mark from
+  the filenames already present — there is no state file to fall out of sync.
+- **Named by origin store.** Two stores can never mint the same filename, so
+  combining two ledgers is a union of files rather than a merge of one file.
+- **Readable without tooling.** The whole ledger is `cat`-able text. That is
+  what a durable backup needs and what a binary snapshot cannot offer.
+
+The event log is the complete content of the store: `tests/replay_equivalence.rs`
+holds it to rebuilding `task`, `dep`, `tag`, `assignment` and `relation` exactly,
+and `tests/export_roundtrip.rs` restores an exported ledger into an empty store
+and asserts the two projections are identical.
+
+Reading a ledger back is not a command yet — `qp export` is one direction, and
+it makes no assumption about where the directory lives or what transports it.
+Keep the destination somewhere you control: an export contains every ticket
+title, description, tag and event in the store.
+
 ## Install skills into Claude Code
 
     qp install-skills                          # symlinks skills/* into ~/.claude/skills/qp-*
@@ -161,7 +194,8 @@ mismatch warning above — the guard against filing tickets into the wrong proje
 ## Known MVP limitations
 
 - No liveness detection (no PID/heartbeat). Orchestrator runs `qp reclaim` on detected failures.
-- Single SQLite, single machine. Remote/sync is v2.
+- Single SQLite, single machine. Remote/sync is v2; `qp export` writes the
+  interchange format but nothing reads it back yet.
 - Display ID prefix is fixed at `qp init` and cannot be changed afterwards (`qp init --prefix ACME`; default `QP`). Re-running `init` with a different prefix warns and keeps the original.
 - Exit codes: `0` success, `1` invalid input, including argument-parse failures (and uncategorized internal failures), `2` conflict/not-owner/not-found/invariant, `3` wait timeout, `4` `wait --cohort-done` matched an empty cohort.
 
