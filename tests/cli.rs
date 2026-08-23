@@ -6475,3 +6475,207 @@ fn report_since_rejects_out_of_range_durations() {
         .assert()
         .success();
 }
+
+/// `--since` date forms are *validated* and *normalised*, not passed through.
+///
+/// Both consumers compare `--since` against `event.ts` as TEXT (the SQL
+/// `ts >= ?1` scope filter and the in-memory `e.ts.as_str() < s` skip), so a
+/// value that is accepted but not converted to UTC is not merely sloppy — it
+/// silently answers the wrong question with exit 0. This test pins the three
+/// ways that used to happen: an unparsed 10-char date, a non-`Z` offset
+/// compared verbatim, and a fractionless bound sorting above every event in
+/// the same second.
+#[test]
+fn report_since_normalises_date_forms() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+
+    let rejects = |args: &[&str], probe: &str| {
+        let assert = qp(&db).args(args).assert().failure().code(1);
+        let env = json_stderr(&assert);
+        assert_eq!(
+            env["error"]["kind"], "invalid_input",
+            "--since {probe} must be typed invalid input: {env}"
+        );
+        assert!(
+            env["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("--since"),
+            "envelope should name the offending argument: {env}"
+        );
+    };
+
+    // Shape is not validation. A 10-char string with `-` at 4 and 7 used to be
+    // widened to `{s}T00:00:00Z` and returned WITHOUT PARSING, so garbage sorted
+    // above every real timestamp and the report came back empty at exit 0.
+    for probe in ["20xx-aa-bb", "2026-13-45", "2026-02-30", "0000-00-00"] {
+        rejects(&["report", "--since", probe, "--json"], probe);
+    }
+    // The 11-char control, rejected before this change too: strictness must not
+    // depend on string length.
+    rejects(
+        &["report", "--since", "2026-13-45x", "--json"],
+        "2026-13-45x",
+    );
+
+    // Anchor every membership assertion on a real event.
+    let board = json_stdout(&qp(&db).args(["report", "--json"]).assert().success());
+    let ev = board["events"]
+        .as_array()
+        .unwrap()
+        .first()
+        .expect("`add` must have written an event")
+        .clone();
+    let id = ev["id"].as_i64().unwrap();
+    let ts = ev["ts"].as_str().unwrap().to_string();
+    // `event.ts` is written by the schema default
+    // `strftime('%Y-%m-%dT%H:%M:%fZ','now')`, which is exactly this shape. The
+    // field slicing below depends on it.
+    assert_eq!(ts.len(), 24, "unexpected event ts shape: {ts}");
+
+    let holds = |since: &str| -> bool {
+        let v = json_stdout(
+            &qp(&db)
+                .args(["report", "--since", since, "--json"])
+                .assert()
+                .success(),
+        );
+        v["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["id"].as_i64() == Some(id))
+    };
+
+    let date = &ts[..10];
+    let hh: u32 = ts[11..13].parse().unwrap();
+    let mm: u32 = ts[14..16].parse().unwrap();
+    let ss: u32 = ts[17..19].parse().unwrap();
+    let frac = &ts[19..23]; // ".mmm"
+
+    // A bare date still means midnight UTC of that day, so the day's own events
+    // are in the window.
+    assert!(
+        holds(date),
+        "bare date {date} must still keep its own events"
+    );
+
+    // Positive offset. The probe names the SAME INSTANT as the event (or an
+    // earlier one), so the event is inside the window — but its TEXT sorts
+    // above the event's, which is exactly what used to drop it. The branches
+    // pick the coarsest field that can be bumped without wrapping past the day.
+    let ahead = if hh < 23 {
+        format!("{date}T{:02}:{mm:02}:{ss:02}{frac}+01:00", hh + 1)
+    } else if mm < 59 {
+        format!("{date}T{hh:02}:{:02}:{ss:02}{frac}+00:01", mm + 1)
+    } else if ss < 59 {
+        format!("{date}T{hh:02}:{mm:02}:{:02}{frac}+00:01", ss + 1)
+    } else {
+        // 23:59:59 — the one second a day where no same-date text sorts above
+        // the event while naming an earlier instant. Still a correct probe,
+        // just not a discriminating one.
+        format!("{date}T{hh:02}:{mm:02}:{ss:02}{frac}+00:01")
+    };
+    assert!(
+        holds(&ahead),
+        "--since {ahead} names an instant at or before {ts}; the event belongs in the window"
+    );
+
+    // Negative offset, the other direction: the probe names an instant one hour
+    // AFTER the event, so the event is outside the window — but its text sorts
+    // below the event's (`-` 0x2D < `Z` 0x5A at the offset position), which is
+    // what used to over-include it.
+    let behind = format!("{}-01:00", &ts[..23]);
+    assert!(
+        !holds(&behind),
+        "--since {behind} names an instant after {ts}; the event must be excluded"
+    );
+    // Same string through the other consumer — the SQL `ts >= ?1` scope filter.
+    let scoped = json_stdout(
+        &qp(&db)
+            .args(["report", "--all-tickets", "--since", &behind, "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(
+        scoped.as_array().unwrap().len(),
+        0,
+        "SQL scope filter must agree with the in-memory one: {scoped}"
+    );
+
+    // Subsecond boundary. `event.ts` always carries three subsecond digits; a
+    // bound written to the second used to sort above them all (`Z` 0x5A above
+    // `.` 0x2E) and exclude the very second it names.
+    let second = format!("{}Z", &ts[..19]);
+    assert!(
+        holds(&second),
+        "--since {second} names the start of the second holding {ts}; the event is in it"
+    );
+}
+
+/// Normalising a `--since` offset must not be able to panic.
+///
+/// Folding `+05:00`/`-05:00` into UTC shifts the instant, and the shift can
+/// leave the representable range: a negative offset on a year-9999 value walks
+/// forward past the ceiling, a positive one on a year-0 value walks back below
+/// the floor. The unchecked shift *panicked* on the first — a raw abort on
+/// stderr instead of the JSON error envelope, the same class of failure the
+/// `Nh`/`Nd` overflow guards exist to prevent.
+///
+/// Below year 0 is rejected rather than emitted: it renders with a leading `-`,
+/// which is not RFC3339, and the whole point of normalising is that the bound
+/// is a real instant in the shape `event.ts` uses.
+#[test]
+fn report_since_rejects_unrepresentable_offset_shifts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+
+    let rejects = |probe: &str| {
+        let assert = qp(&db)
+            .args(["report", "--since", probe, "--json"])
+            .assert()
+            .failure()
+            .code(1);
+        let env = json_stderr(&assert);
+        assert_eq!(
+            env["error"]["kind"], "invalid_input",
+            "--since {probe} must be typed invalid input, not a panic: {env}"
+        );
+        assert!(
+            env["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("--since"),
+            "envelope should name the offending argument: {env}"
+        );
+    };
+
+    for probe in [
+        // Forward past year 9999. This one panicked.
+        "9999-12-31T23:59:59-00:01",
+        "9999-12-31T23:00:00-05:00",
+        // Back below year 0.
+        "0000-01-01T00:00:00+05:00",
+        "0000-01-01T00:00:00+00:01",
+    ] {
+        rejects(probe);
+    }
+
+    // The other side of each edge still resolves: the guard rejects only what
+    // it cannot render, and does not clamp the range in from where it was.
+    for probe in [
+        "9999-12-31T23:59:59+00:01",
+        "0000-01-01T00:00:00Z",
+        "0000-01-01T00:00:00-05:00",
+    ] {
+        qp(&db)
+            .args(["report", "--since", probe, "--json"])
+            .assert()
+            .success();
+    }
+}
