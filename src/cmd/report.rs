@@ -382,6 +382,9 @@ fn collect_json(
 
 // ---------- duration parsing ----------
 
+const SECONDS_PER_HOUR: i64 = 3_600;
+const SECONDS_PER_DAY: i64 = 86_400;
+
 /// Parse `--since` into an RFC3339 UTC string.
 ///
 /// Accepts `Nh`, `Nd`, or an RFC3339-ish date. The result is suitable for
@@ -393,16 +396,29 @@ fn parse_since(s: &str) -> Result<String> {
             .parse()
             .map_err(|_| db::invalid_input(format!("bad --since `{s}` (expected Nh)")))?;
         let now = OffsetDateTime::now_utc();
-        let then = now - time::Duration::hours(hours);
-        return Ok(then.format(&Rfc3339).unwrap());
+        // `Duration::hours` and `-` both panic on overflow, and a timestamp
+        // that lands before year 0 has no RFC3339 rendering. All three are
+        // reachable from `--since`, so all three fold into the same error.
+        let then = hours
+            .checked_mul(SECONDS_PER_HOUR)
+            .map(time::Duration::seconds)
+            .and_then(|d| now.checked_sub(d))
+            .and_then(|t| t.format(&Rfc3339).ok())
+            .ok_or_else(|| db::invalid_input(format!("bad --since `{s}` (out of range)")))?;
+        return Ok(then);
     }
     if let Some(rest) = s.strip_suffix('d') {
         let days: i64 = rest
             .parse()
             .map_err(|_| db::invalid_input(format!("bad --since `{s}` (expected Nd)")))?;
         let now = OffsetDateTime::now_utc();
-        let then = now - time::Duration::days(days);
-        return Ok(then.format(&Rfc3339).unwrap());
+        let then = days
+            .checked_mul(SECONDS_PER_DAY)
+            .map(time::Duration::seconds)
+            .and_then(|d| now.checked_sub(d))
+            .and_then(|t| t.format(&Rfc3339).ok())
+            .ok_or_else(|| db::invalid_input(format!("bad --since `{s}` (out of range)")))?;
+        return Ok(then);
     }
     // RFC3339 — or a bare YYYY-MM-DD which we widen to T00:00:00Z.
     if s.len() == 10 && s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-' {

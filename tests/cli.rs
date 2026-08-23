@@ -6399,3 +6399,79 @@ fn tree_notes_a_tasks_other_containers_instead_of_hiding_them() {
         "noted an out-of-scope container:\n{s}"
     );
 }
+
+/// `report --since` must reject out-of-range durations, not panic.
+///
+/// The `Nh`/`Nd` parse was already mapped into `invalid_input`, but the value
+/// then went straight into `Duration::hours` and `-`, both of which panic on
+/// overflow — so a plausible typo (`999999999999h`) aborted the process
+/// instead of reporting bad input.
+///
+/// Both signs are covered: a huge positive offset overflows going back, a huge
+/// negative one overflows going forward, and only the positive direction has
+/// the extra pre-year-0 band described below.
+#[test]
+fn report_since_rejects_out_of_range_durations() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+
+    let rejects = |args: &[&str], probe: &str| {
+        let assert = qp(&db).args(args).assert().failure().code(1);
+        let env = json_stderr(&assert);
+        assert_eq!(
+            env["error"]["kind"], "invalid_input",
+            "--since {probe} must be typed invalid input: {env}"
+        );
+        assert!(
+            env["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("--since"),
+            "envelope should name the offending argument: {env}"
+        );
+    };
+
+    // Overflow constructing the Duration, overflow subtracting it, and a
+    // timestamp that lands before year 0 and so has no RFC3339 rendering.
+    // That last band is why `20000000h` (~2283 years back) is rejected while
+    // the same magnitude forward is not: RFC3339's floor of year 0 sits far
+    // closer to now than its ceiling of year 9999.
+    let probes = [
+        "9223372036854775807h",
+        "999999999999h",
+        "20000000h",
+        "9223372036854775807d",
+        "99999999999d",
+        "1000000d",
+    ];
+    for probe in probes {
+        rejects(&["report", "--since", probe, "--json"], probe);
+    }
+
+    // The negative direction: `now - (-huge)` overflows forward, and it was
+    // the same unguarded `-` that panicked. These MUST use the `--since=-N`
+    // form. Space-separated, clap reads `-99999999999h` as an unknown flag and
+    // rejects it before `parse_since` ever runs — so a space-form probe would
+    // assert on clap's behaviour rather than on this code path, and would keep
+    // passing even if the guard were removed.
+    //
+    // Magnitudes here are far larger than the positive ones on purpose: going
+    // forward there is no pre-year-0 band to trip, so nothing short of true
+    // overflow fails. `-1000000d` lands in year ~4765 and legitimately
+    // succeeds.
+    for probe in ["--since=-99999999999h", "--since=-99999999999d"] {
+        rejects(&["report", probe, "--json"], probe);
+    }
+
+    // The in-range case still works.
+    qp(&db)
+        .args(["report", "--since", "24h", "--json"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["report", "--since", "7d", "--json"])
+        .assert()
+        .success();
+}
