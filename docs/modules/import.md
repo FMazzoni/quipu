@@ -54,14 +54,20 @@ commands to union the two.
 
 ## The order
 
-`(ts, origin_uuid, origin_id)`.
+`(ts, origin_uuid, origin_id)`, and it is not defined here: the order and the
+legality check that keeps it honest both live in `merge`, so that `sync` and
+anything else that replays a union derives the sequence the same way. Two copies
+of an order that must agree are a divergence waiting for a schedule. All this
+command adds is the union of the local log with the peers' events, which is the
+part that needs a database handle.
 
 Wall clock alone is not an order. Two stores both hold an event with id 2, and
 two events written in the same millisecond on two machines would be sequenced
 one way here and the other way there — after which the two stores have quietly
 diverged with nothing to detect it. The uuid tiebreak makes the sequence a
 function of the set, so every machine that has seen the same batches computes
-the same one.
+the same one; the event id behind it keeps a store's own same-millisecond burst
+in the order that store wrote it.
 
 Ordering by wall clock is acceptable *because* every transition is then checked,
 not because clocks are trusted. See *Anomalies*.
@@ -112,19 +118,52 @@ settles a conflict is a separate one.
 
 ## Anomalies
 
-Every replayed transition runs the same guard the live command ran: one
-conditional `UPDATE ... WHERE state = <from>`, and `changes() == 1` decides. A
-merged log that implies an impossible move — `pending` straight to `assigned`,
-or two stores moving one task at once — produces an anomaly naming both ends and
-where the store actually was.
+Every replayed transition is checked twice, because one check is not enough.
 
-Anomalies abort the import and nothing is written. The commonest one by far is
-history the log cannot rebuild — see the section above for what that is and what
-to do about it. That is the point: a
-projection the log cannot justify is exactly what silent ordering bugs look
-like, and accepting one quietly would make the wall-clock order hopeful instead
-of checked. `--force` writes it anyway and still reports every anomaly, which is
-the escape hatch a disaster recovery from a damaged ledger needs.
+**Continuity** is the same guard the live command ran: one conditional
+`UPDATE ... WHERE state = <from>`, and `changes() == 1` decides. It catches a
+sequence that arrives out of order — two stores moving one task at once, or a
+move whose predecessor is missing.
+
+**Legality** is a question about the event itself: is `from` -> `to` an edge of
+the state machine at all? Continuity does not imply it. An event recording
+`pending` straight to `assigned` applies perfectly cleanly to a task that *is*
+pending, so a continuity-only check writes the hop and reports success — which
+is how that defect, found in bulk in pre-fidelity logs, would cross from a
+damaged ledger into a healthy store.
+
+Either refusal names the ticket, both ends of the move, both stores involved and
+both timestamps. The reader is usually trying to work out whose clock is wrong,
+and a message naming only the event that failed sends them to the one store that
+is probably fine.
+
+**A merge aborts on any anomaly and writes nothing.** A projection the log
+cannot justify is what a silent ordering bug looks like, and folding one into a
+store that currently holds good data is the failure this design exists to
+prevent. `--force` writes it anyway and still reports everything.
+
+**A restore into an empty store aborts too — unless the ledger has already
+declared itself pre-fidelity**, by carrying a `state_change` that records no
+origin state. Then it rebuilds as far as the log allows, reports every anomaly
+in full, and says on stderr that it did so. There is nothing to protect in that
+direction: the target is empty by definition, and refusing leaves someone
+mid-recovery with an empty store rather than a partial one. `best_effort` in the
+JSON outcome says which happened, so a script wanting a clean rebuild reads that
+rather than the exit code.
+
+Which events survive that latitude is decided by the same principle. An event
+whose *recorded* origin makes the pair illegal is refused in both modes — the
+log is asserting something impossible. An event with no recorded origin is
+applied by a restore and refused by a merge: it records where the task went,
+which is not in doubt, and only the origin replay had to supply is unreachable.
+Against a real pre-fidelity ledger, dropping those instead left most of the
+store's finished tickets `pending` in the restored copy — a recovery that looks
+complete and reads as though the work was never done.
+
+The line, stated once: legality is absolute wherever the log claims to know
+where a move started, and relaxed only where the log itself admits it does not.
+A ledger whose events all carry their origins refuses on any anomaly, in both
+modes. See `merge` for the reasoning in full.
 
 ## History the log cannot rebuild, and why that is permanent
 
@@ -136,11 +175,15 @@ stored, and a reconstruction would be a guess wearing an audit trail's clothes.
 **1. Events that record no origin state.** A pre-fix `state_change` is
 `{"title":...,"to":"ready"}` — where it came FROM is absent. The move itself is
 not in doubt, only the expectation to check it against, so replay takes the
-origin from where it has the task and applies the transition. That is a weaker
-check, not a guess about content; it is counted and reported on every import.
-Refusing instead would make every store written before that fix permanently
-unrestorable, turning a partial loss into a total one. Events that DO carry a
-`from` are still checked absolutely, and an illegal one still aborts.
+origin from where it has the task. That is a weaker check, not a guess about
+content; it is counted and reported on every import. Refusing outright would
+make every store written before that fix permanently unrestorable, turning a
+partial loss into a total one.
+
+The derived origin is still checked for legality, and that is where it earns its
+keep: a move to `running` on a task nothing ever assigned is refused even though
+the event claims no origin to contradict. Events that DO carry a `from` are
+checked absolutely, and an illegal one still aborts.
 
 Reading those events naively is worse than it sounds: with no `from`, every
 creation looks like a transition and every task looks like one the log never

@@ -3,7 +3,7 @@
 #![doc = include_str!("../../docs/modules/import.md")]
 
 use crate::cmd::export::{batch_name, FORMAT, FORMAT_VERSION};
-use crate::{db, id, outcome::Outcome};
+use crate::{db, id, merge as order, outcome::Outcome};
 use anyhow::{Context, Result};
 use clap::Args;
 use rusqlite::Transaction;
@@ -362,6 +362,10 @@ struct ImportOutcome {
     /// Whether the ledger contains history from before the log recorded every
     /// write. If so the restore is partial in ways nothing can enumerate.
     pre_fidelity_history: bool,
+    /// Whether the projection was written despite anomalies. A script that
+    /// cares about a clean rebuild reads this rather than the exit code: the
+    /// pre-fidelity restore path is a success at what it can do, not a failure.
+    best_effort: bool,
     tasks: usize,
     conflicts: usize,
     conflicted_tasks: Vec<String>,
@@ -386,6 +390,18 @@ impl Outcome for ImportOutcome {
                 self.tasks
             ),
         };
+        if self.best_effort {
+            s.push_str(&format!(
+                "\nWRITTEN DESPITE {} anomal{}, each one reported above. This rebuild is \
+                 partial: read them before trusting what is here.",
+                self.anomalies.len(),
+                if self.anomalies.len() == 1 {
+                    "y"
+                } else {
+                    "ies"
+                }
+            ));
+        }
         if self.conflicts > 0 {
             s.push_str(&format!(
                 "\n{} field conflict(s) need resolution on {} — tagged `{CONFLICT_TAG}`",
@@ -469,6 +485,7 @@ pub fn run(db_path: &Path, a: ImportArgs) -> Result<()> {
                 repaired_fields: 0,
                 rows_carried_forward: 0,
                 pre_fidelity_history: false,
+                best_effort: false,
                 tasks: 0,
                 conflicts: 0,
                 conflicted_tasks: Vec::new(),
@@ -491,21 +508,60 @@ pub fn run(db_path: &Path, a: ImportArgs) -> Result<()> {
     for line in &out.anomalies {
         eprintln!("import anomaly: {line}");
     }
+    // Said on stderr as well as in the outcome, because the anomalies are here
+    // and a notice about them printed somewhere else is a notice nobody reads
+    // next to the thing it is about.
+    if out.best_effort && !a.force {
+        eprintln!(
+            "note: this ledger records no origin state for some transitions, so `--restore` \n\
+             applied BEST EFFORT rather than refusing — a store rebuilt as far as the log \n\
+             allows is worth more mid-recovery than an empty one. Every anomaly is above. \n\
+             `--merge` still refuses on any anomaly: there it would damage live data."
+        );
+    }
     if out.pre_fidelity_history {
         eprintln!("{}", PRE_FIDELITY_WARNING);
     }
     crate::outcome::emit(a.json, &out)
 }
 
-/// Refuses the write when replay hit anomalies, unless the caller insisted.
+/// Refuses the write when replay hit anomalies — where refusing protects
+/// something.
+///
+/// Returns whether it wrote anyway despite them, so the caller can say so.
 ///
 /// A rebuild that produced an illegal sequence is a claim that the log and the
-/// projection disagree. Committing it anyway is the silent-loss failure this
-/// whole design rejects, so the default is to roll back and say why — at
-/// length, because the person reading it is usually mid-recovery.
-fn guard_anomalies(mode: Mode, force: bool, summary: &Summary, lost_events: usize) -> Result<()> {
-    if force || summary.anomalies.is_empty() {
-        return Ok(());
+/// projection disagree, and committing it quietly is the silent-loss failure
+/// this whole design rejects. But "refuse" is only the safer answer where there
+/// is something on the other side of the refusal to protect, and that differs
+/// by mode:
+///
+/// **Merge** refuses. It folds unjustifiable history into a store that holds
+/// good data right now, and the store it would damage is the one in front of
+/// you. Refusing costs a sync; accepting costs the data.
+///
+/// **Restore into an empty store** does not, when the ledger has already
+/// declared itself pre-fidelity — some `state_change` in it records no origin
+/// state, so `PRE_FIDELITY_WARNING` is going to print regardless. There is
+/// nothing to protect: the target is empty by definition, and refusing hands
+/// someone mid-recovery an empty store instead of a reported partial one. The
+/// partial one is strictly better, and every anomaly is still reported in full.
+///
+/// The line is where the log's own claims are: legality is enforced absolutely
+/// wherever the log says it knows the origin state, and relaxed only where the
+/// log itself admits it does not. So a MODERN ledger that produces anomalies
+/// still refuses in both modes — that is a real integrity signal about history
+/// we do trust, and it stays hard.
+///
+/// `--force` is not the answer to the restore case and never was: a flag every
+/// real recovery has to pass is a flag people learn to pass always, which
+/// spends the guard's credibility everywhere else to buy it here.
+fn guard_anomalies(mode: Mode, force: bool, summary: &Summary, lost_events: usize) -> Result<bool> {
+    if summary.anomalies.is_empty() {
+        return Ok(false);
+    }
+    if force || (mode == Mode::Restore && summary.unguarded > 0) {
+        return Ok(true);
     }
     Err(db::invariant(
         "replay_anomaly",
@@ -635,7 +691,7 @@ fn restore(
     let mut events: Vec<&LedgerEvent> = ledger.events.values().collect();
     events.sort_by_key(|e| e.origin_id);
 
-    let mut replay = Replay::new(tx, &header.display_prefix, uuid)?;
+    let mut replay = Replay::new(tx, &header.display_prefix, uuid, Mode::Restore)?;
     replay.load_origins(ledger);
     replay.index_creations(events.iter().copied());
     for ev in &events {
@@ -652,7 +708,7 @@ fn restore(
         .iter()
         .partition(|ev| ev.task_id.is_none_or(|t| alive.contains(&t)));
 
-    guard_anomalies(Mode::Restore, a.force, &summary, lost.len())?;
+    let best_effort = guard_anomalies(Mode::Restore, a.force, &summary, lost.len())?;
 
     for ev in &lost {
         summary.anomalies.push(format!(
@@ -690,6 +746,7 @@ fn restore(
         repaired_fields: summary.repaired,
         rows_carried_forward: 0,
         pre_fidelity_history: summary.unguarded > 0,
+        best_effort,
         tasks: summary.tasks,
         conflicts: summary.conflicts,
         unreconstructable_tasks: named(&summary),
@@ -797,7 +854,7 @@ fn merge(
     }
     tx.execute("DELETE FROM task", [])?;
 
-    let mut replay = Replay::new(tx, &prefix, &local_uuid)?;
+    let mut replay = Replay::new(tx, &prefix, &local_uuid, Mode::Merge)?;
     replay.load_origins(ledger);
     replay.index_creations(merged.iter());
     for ev in &merged {
@@ -805,7 +862,7 @@ fn merge(
     }
     let mut summary = replay.finish()?;
 
-    guard_anomalies(Mode::Merge, a.force, &summary, 0)?;
+    let best_effort = guard_anomalies(Mode::Merge, a.force, &summary, 0)?;
 
     // Under `--force`: a task the log cannot rebuild still has a real row, and
     // dropping it would destroy live data on every sync — a far worse outcome
@@ -832,6 +889,7 @@ fn merge(
         repaired_fields: summary.repaired,
         rows_carried_forward: carried_rows,
         pre_fidelity_history: summary.unguarded > 0,
+        best_effort,
         tasks: tasks as usize,
         conflicts: summary.conflicts,
         unreconstructable_tasks: named(&summary),
@@ -1007,11 +1065,11 @@ fn carry_over_unrebuilt(tx: &Transaction, prefix: &str) -> Result<Vec<String>> {
 
 /// Every event this store knows about, in the one order all machines agree on.
 ///
-/// `(ts, origin_uuid, origin_id)`. A union of batches is a set and replay needs
-/// a sequence; wall-clock alone is not one, because two stores both hold an
-/// event 2 and a same-millisecond tie would be broken differently on each
-/// machine. The uuid makes the tie deterministic, and the guarded transitions
-/// in `Replay` are what keep wall-clock ordering honest rather than hopeful.
+/// The order itself is `merge`'s, not this function's: a union of batches is a
+/// set and replay needs a sequence, and every consumer of that sequence has to
+/// derive it the same way or convergence is a coincidence. All this adds is the
+/// union of the local log with the peers' events, which is the part that needs
+/// a database handle.
 fn merged_log(tx: &Transaction, local_uuid: &str) -> Result<Vec<LedgerEvent>> {
     let mut out = Vec::new();
     let mut stmt = tx.prepare(
@@ -1033,8 +1091,8 @@ fn merged_log(tx: &Transaction, local_uuid: &str) -> Result<Vec<LedgerEvent>> {
     for row in rows {
         out.push(row?);
     }
-    out.sort_by(|a, b| {
-        (&a.ts, &a.origin_uuid, a.origin_id).cmp(&(&b.ts, &b.origin_uuid, b.origin_id))
+    order::sort_for_replay(&mut out, |e| {
+        order::MergeKey::new(&e.ts, &e.origin_uuid, e.origin_id)
     });
     Ok(out)
 }
@@ -1088,6 +1146,9 @@ struct Summary {
 /// being written. That check is what makes ordering by wall clock defensible.
 struct Replay<'a> {
     tx: &'a Transaction<'a>,
+    /// Which import is running. A refusal costs a sync in one mode and a
+    /// recovered store in the other, so the two do not weigh it the same.
+    mode: Mode,
     prefix: String,
     local_uuid: String,
     /// Canonical `(origin_uuid, origin_task_id)` -> local rowid.
@@ -1115,10 +1176,15 @@ struct Replay<'a> {
     said_fields: HashSet<(i64, String)>,
     moved: HashSet<i64>,
     unreconstructable: BTreeSet<(String, i64)>,
+    /// Per task, the state event that last moved it: which store wrote it, its
+    /// id there, and when. A refusal is a question about two events, not one —
+    /// usually "whose clock is wrong?" — so the loser has to be able to name
+    /// the winner.
+    last_state: HashMap<i64, (String, i64, String)>,
 }
 
 impl<'a> Replay<'a> {
-    fn new(tx: &'a Transaction<'a>, prefix: &str, local_uuid: &str) -> Result<Self> {
+    fn new(tx: &'a Transaction<'a>, prefix: &str, local_uuid: &str, mode: Mode) -> Result<Self> {
         // The mint has to clear every id the store has ever used, not just the
         // live ones: a task deleted from the projection by a rebuild still owns
         // its name in the log, and reusing it would rename someone's ticket.
@@ -1173,6 +1239,7 @@ impl<'a> Replay<'a> {
         }
         Ok(Self {
             tx,
+            mode,
             prefix: prefix.to_string(),
             local_uuid: local_uuid.to_string(),
             tasks,
@@ -1184,6 +1251,7 @@ impl<'a> Replay<'a> {
             branches: HashMap::new(),
             anomalies: Vec::new(),
             unguarded: 0,
+            last_state: HashMap::new(),
             creations: HashMap::new(),
             hoisted: HashSet::new(),
             repaired: 0,
@@ -1289,6 +1357,19 @@ impl<'a> Replay<'a> {
 
     fn anomaly(&mut self, msg: String) {
         self.anomalies.push(msg);
+    }
+
+    /// Names the state event that put a task where replay has it.
+    ///
+    /// Half of every transition refusal: the reader needs the losing event and
+    /// the winning one to work out which of the two machines is wrong, and a
+    /// message naming only the event that failed sends them looking in the one
+    /// store that is probably fine.
+    fn previously(&self, task: i64) -> String {
+        match self.last_state.get(&task) {
+            Some((uuid, id, ts)) => format!("It was last moved by event {uuid}/{id} at {ts}."),
+            None => "No earlier state event for it exists in the merged log.".to_string(),
+        }
     }
 
     fn apply(&mut self, ev: &LedgerEvent) -> Result<()> {
@@ -1505,6 +1586,18 @@ impl<'a> Replay<'a> {
         self.field_value.insert((task, "tier".into()), tier);
         self.field_value
             .insert((task, "description".into()), description);
+        self.last_state
+            .insert(task, (ev.origin_uuid.clone(), ev.origin_id, ev.ts.clone()));
+        if !order::is_birth_state(state) {
+            self.anomaly(format!(
+                "event {}/{} at {}: {} is created directly into `{state}`, which is not a \
+                 state a task can come into existence in. The creation event is malformed.",
+                ev.origin_uuid,
+                ev.origin_id,
+                ev.ts,
+                id::encode(task, &self.prefix)
+            ));
+        }
         Ok(())
     }
 
@@ -1536,10 +1629,76 @@ impl<'a> Replay<'a> {
                 actual
             }
         };
-        if payload.get("from").is_some() {
+        let recorded = payload.get("from").and_then(Value::as_str).is_some();
+        if recorded {
             self.moved.insert(task);
         }
         let from = from.as_str();
+        // Legality, which continuity does not imply. An event recording a move
+        // the machine cannot make applies cleanly whenever the projection
+        // happens to be in the state it claims to leave — which is how an
+        // illegal `pending` -> `assigned` hop crosses from a damaged ledger
+        // into a healthy store without anything objecting.
+        //
+        // It is checked on the derived origin too, and that is the case it was
+        // built for: an event with no recorded origin is exactly where the
+        // illegal hops in pre-fidelity logs live, and there the derived origin
+        // is the only origin there will ever be. The wording says which of the
+        // two it is, because the accusation is different — one log claims an
+        // impossible move, the other claims a move that cannot be reached from
+        // where replay actually stands.
+        if !order::is_legal_transition(from, to) {
+            let previous = self.previously(task);
+            let name = id::encode(task, &self.prefix);
+            // A RECORDED origin makes this the log's own claim, and the claim is
+            // impossible. Nothing recovers from that, in either mode.
+            if recorded {
+                self.anomaly(format!(
+                    "event {}/{} at {}: {name} `{from}` -> `{to}` is not an edge of the \
+                     state machine, so no ordering of the merged log can justify it. \
+                     {previous} {}",
+                    ev.origin_uuid,
+                    ev.origin_id,
+                    ev.ts,
+                    order::SKEW_HINT
+                ));
+                return Ok(());
+            }
+            // A DERIVED origin is a different accusation. The event records
+            // where the task WENT — that much is not in doubt — and says
+            // nothing about where it came from, because the binary that wrote
+            // it predates the log recording origins. Only the origin replay
+            // supplied is unreachable.
+            //
+            // Merging that into live data is still refused: it would fold a
+            // move nothing can justify into a store that currently holds good
+            // state. Restoring it into an empty store applies it, because
+            // discarding it is not the cautious choice — it leaves a finished
+            // ticket sitting in `pending` in someone's recovered store, and
+            // measured against a real ledger that is most of the tasks the log
+            // cannot fully justify. The destination is evidence; the missing
+            // origin is the gap, and the gap is reported either way.
+            let verdict = match self.mode {
+                Mode::Merge => "REFUSED: a merge will not fold that into live data",
+                Mode::Restore => {
+                    "APPLIED ANYWAY: this is a restore into an empty store, where the \
+                     destination the event records is better evidence than the origin it \
+                     never carried"
+                }
+            };
+            self.anomaly(format!(
+                "event {}/{} at {}: {name} records no origin state, and replay has it in \
+                 `{from}`, from which `{to}` is not reachable in one move. {verdict}. \
+                 {previous} {}",
+                ev.origin_uuid,
+                ev.origin_id,
+                ev.ts,
+                order::SKEW_HINT
+            ));
+            if self.mode == Mode::Merge {
+                return Ok(());
+            }
+        }
         // The guard, exactly as the live command wrote it: one conditional
         // UPDATE, and `changes() == 1` is the only thing that decides.
         let n = self.tx.execute(
@@ -1551,17 +1710,22 @@ impl<'a> Replay<'a> {
                 .tx
                 .query_row("SELECT state FROM task WHERE id = ?", [task], |r| r.get(0))
                 .ok();
+            let previous = self.previously(task);
             self.anomaly(format!(
-                "event {}/{}: {} `{from}` -> `{to}` is not a legal move from {:?}, which is \
-                 where the merged log left it. Some transition into `{from}` is missing, or \
-                 two stores moved the same task at once.",
+                "event {}/{} at {}: {} `{from}` -> `{to}` cannot be applied; the merged log \
+                 left it in {:?}. {previous} Some transition into `{from}` is missing, or two \
+                 stores moved the same task at once. {}",
                 ev.origin_uuid,
                 ev.origin_id,
+                ev.ts,
                 id::encode(task, &self.prefix),
-                actual
+                actual,
+                order::SKEW_HINT
             ));
             return Ok(());
         }
+        self.last_state
+            .insert(task, (ev.origin_uuid.clone(), ev.origin_id, ev.ts.clone()));
 
         match to {
             "assigned" => {
