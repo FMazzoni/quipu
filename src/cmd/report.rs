@@ -8,7 +8,9 @@ use clap::Args;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::io::Write;
-use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use time::{
+    format_description::well_known::Rfc3339, macros::format_description, OffsetDateTime, UtcOffset,
+};
 
 #[derive(Args, Debug)]
 pub struct ReportArgs {
@@ -385,10 +387,48 @@ fn collect_json(
 const SECONDS_PER_HOUR: i64 = 3_600;
 const SECONDS_PER_DAY: i64 = 86_400;
 
+/// The wire shape every `--since` bound is emitted in.
+///
+/// RFC3339 at millisecond precision, matching the
+/// `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` SQLite writes into `event.ts`.
+/// Fixed width and an always-present fraction are what make byte ordering
+/// agree with instant ordering.
+const SINCE_FORMAT: &[time::format_description::FormatItem<'static>] =
+    format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z");
+
+/// Render an instant as the canonical `--since` bound.
+///
+/// Every failure — including a pre-year-0 instant, which has no RFC3339
+/// rendering — maps onto the caller's out-of-range error.
+fn emit_bound(at: OffsetDateTime, s: &str) -> Result<String> {
+    let out_of_range = || db::invalid_input(format!("bad --since `{s}` (out of range)"));
+    if at.year() < 0 {
+        return Err(out_of_range());
+    }
+    at.format(SINCE_FORMAT).map_err(|_| out_of_range())
+}
+
 /// Parse `--since` into an RFC3339 UTC string.
 ///
-/// Accepts `Nh`, `Nd`, or an RFC3339-ish date. The result is suitable for
-/// lexicographic comparison against `event.ts`.
+/// Accepts `Nh`, `Nd`, or an RFC3339-ish date. Every accepted form is *parsed*
+/// and re-emitted in UTC at millisecond precision, so the result really is the
+/// UTC instant the caller asked for and string ordering against `event.ts` is
+/// instant ordering — the property both consumers rely on (the SQL `ts >= ?1`
+/// filter and the in-memory `e.ts.as_str() < s` skip).
+///
+/// All three forms go through [`emit_bound`], so all three land on the same
+/// fixed-width `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` shape SQLite writes into
+/// `event.ts`. That matters twice over. A *fractionless* bound sorts above
+/// every event in the same second, because `Z` (0x5A) sorts above `.` (0x2E) —
+/// and `Rfc3339` emits exactly that whenever the nanoseconds happen to be zero,
+/// as well as a truncated `.5` whenever they are a multiple of 1e8. Either one
+/// silently drops events inside the requested window. Sub-millisecond input is
+/// truncated instead, which can only widen the window, never narrow it.
+///
+/// Instants that cannot be rendered in this shape — pre-year-0 (reachable from
+/// a positive offset near year 0) or past year 9999 (reachable from a negative
+/// offset, or from `Nh`/`Nd` arithmetic) — are rejected as out of range rather
+/// than emitted as something that is not RFC3339.
 fn parse_since(s: &str) -> Result<String> {
     let s = s.trim();
     if let Some(rest) = s.strip_suffix('h') {
@@ -403,9 +443,8 @@ fn parse_since(s: &str) -> Result<String> {
             .checked_mul(SECONDS_PER_HOUR)
             .map(time::Duration::seconds)
             .and_then(|d| now.checked_sub(d))
-            .and_then(|t| t.format(&Rfc3339).ok())
             .ok_or_else(|| db::invalid_input(format!("bad --since `{s}` (out of range)")))?;
-        return Ok(then);
+        return emit_bound(then, s);
     }
     if let Some(rest) = s.strip_suffix('d') {
         let days: i64 = rest
@@ -416,22 +455,175 @@ fn parse_since(s: &str) -> Result<String> {
             .checked_mul(SECONDS_PER_DAY)
             .map(time::Duration::seconds)
             .and_then(|d| now.checked_sub(d))
-            .and_then(|t| t.format(&Rfc3339).ok())
             .ok_or_else(|| db::invalid_input(format!("bad --since `{s}` (out of range)")))?;
-        return Ok(then);
+        return emit_bound(then, s);
     }
-    // RFC3339 — or a bare YYYY-MM-DD which we widen to T00:00:00Z.
-    if s.len() == 10 && s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-' {
-        return Ok(format!("{s}T00:00:00Z"));
-    }
-    // Sanity check it actually parses as RFC3339.
-    OffsetDateTime::parse(s, &Rfc3339).map_err(|_| {
+    // RFC3339 — or a bare YYYY-MM-DD which we widen to T00:00:00Z. The widened
+    // form goes through the same parse as any other RFC3339 value: shape alone
+    // ("20xx-aa-bb" is 10 bytes with dashes in the right places) is not
+    // validation, and skipping it made strictness depend on string length.
+    let widened;
+    let candidate = if s.len() == 10 && s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-' {
+        widened = format!("{s}T00:00:00Z");
+        widened.as_str()
+    } else {
+        s
+    };
+    let at = OffsetDateTime::parse(candidate, &Rfc3339).map_err(|_| {
         db::invalid_input(format!("bad --since `{s}` (expected Nh, Nd, or RFC3339)"))
     })?;
-    Ok(s.to_string())
+    // Normalise: an accepted `+05:00` value names a UTC instant, but compared
+    // verbatim as text it is neither that instant nor any other. The shift is
+    // *checked* — `to_offset` panics when it pushes past the representable
+    // range, which `9999-12-31T23:59:59-00:01` does.
+    let utc = at
+        .checked_to_offset(UtcOffset::UTC)
+        .ok_or_else(|| db::invalid_input(format!("bad --since `{s}` (out of range)")))?;
+    emit_bound(utc, s)
 }
 
 fn resolve_subtree(conn: &rusqlite::Connection, task: &str) -> Result<HashSet<i64>> {
     let root = id::resolve_full(conn, task)?.id;
     store::subtree_ids(conn, root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_since, SINCE_FORMAT};
+    use time::{OffsetDateTime, PrimitiveDateTime};
+
+    /// Read a bound back as an instant.
+    ///
+    /// Also pins that the emitted shape is round-trippable, which a
+    /// fractionless or variable-width one is not.
+    fn as_instant(bound: &str) -> OffsetDateTime {
+        PrimitiveDateTime::parse(bound, SINCE_FORMAT)
+            .unwrap_or_else(|e| panic!("bound {bound} is not in the canonical shape: {e}"))
+            .assume_utc()
+    }
+
+    /// Every bound is fixed-width with all three subsecond digits present,
+    /// whatever branch produced it.
+    fn assert_canonical(bound: &str, probe: &str) {
+        assert_eq!(bound.len(), 24, "--since {probe} -> {bound}: wrong width");
+        assert_eq!(
+            &bound[19..20],
+            ".",
+            "--since {probe} -> {bound}: missing subsecond fraction"
+        );
+        assert!(
+            bound[20..23].bytes().all(|b| b.is_ascii_digit()),
+            "--since {probe} -> {bound}: fraction is not three digits"
+        );
+        assert!(bound.ends_with('Z'), "--since {probe} -> {bound}: not UTC");
+        // The discriminator. `event.ts` always carries three subsecond digits,
+        // so a bound written to the whole second sorts ABOVE every event in
+        // the second it names — `Z` (0x5A) is above `.` (0x2E) — and silently
+        // drops them. With the fraction present this holds by construction.
+        let latest_in_second = format!("{}.999Z", &bound[..19]);
+        assert!(
+            latest_in_second.as_str() >= bound,
+            "--since {probe} -> {bound}: excludes events inside its own second"
+        );
+        let ninety_nine_ms = format!("{}.099Z", &bound[..19]);
+        assert!(
+            ninety_nine_ms.as_str() >= bound || &bound[20..23] > "099",
+            "--since {probe} -> {bound}: excludes an event 99ms into its own second"
+        );
+    }
+
+    /// `Nh`, `Nd` and the date forms must all emit the same shape.
+    ///
+    /// The duration branches used to go through `Rfc3339`, which strips
+    /// trailing subsecond zeros and omits the fraction entirely at
+    /// nanos == 0 — rare, but a silently wrong answer when it hits.
+    #[test]
+    fn every_since_form_emits_a_millisecond_bound() {
+        for probe in [
+            "0h",
+            "1h",
+            "24h",
+            "1000000h",
+            "0d",
+            "7d",
+            "-1h",
+            "2026-05-20",
+            "2026-05-20T10:00:00Z",
+            "2026-05-20T10:00:00+05:00",
+            "2026-05-20T10:00:00.1Z",
+            "2026-05-20T10:00:00.123456789Z",
+        ] {
+            let bound = parse_since(probe).unwrap_or_else(|e| panic!("--since {probe}: {e}"));
+            assert_canonical(&bound, probe);
+        }
+    }
+
+    /// Normalisation is value-preserving.
+    ///
+    /// Offsets fold into UTC, sub-millisecond input truncates (widening the
+    /// window, never narrowing it), and a bare date means midnight UTC.
+    #[test]
+    fn date_forms_normalise_to_the_instant_they_name() {
+        let cases = [
+            ("2026-05-20", "2026-05-20T00:00:00.000Z"),
+            ("2026-05-20T10:00:00Z", "2026-05-20T10:00:00.000Z"),
+            ("2026-05-20T10:00:00+05:00", "2026-05-20T05:00:00.000Z"),
+            ("2026-05-20T10:00:00-05:00", "2026-05-20T15:00:00.000Z"),
+            ("2026-05-20T10:00:00.1Z", "2026-05-20T10:00:00.100Z"),
+            ("2026-05-20T10:00:00.123456789Z", "2026-05-20T10:00:00.123Z"),
+        ];
+        for (probe, want) in cases {
+            assert_eq!(parse_since(probe).unwrap(), want, "--since {probe}");
+        }
+    }
+
+    /// Reshaping the `Nh`/`Nd` bound must not move the instant it names.
+    ///
+    /// The only permitted difference from the old rendering is truncation
+    /// below the millisecond `event.ts` never records anyway.
+    #[test]
+    fn duration_forms_still_name_the_instant_they_used_to() {
+        for (probe, back_seconds) in [("1h", 3_600i64), ("24h", 86_400), ("7d", 604_800)] {
+            let before = OffsetDateTime::now_utc();
+            let bound = as_instant(&parse_since(probe).unwrap());
+            let after = OffsetDateTime::now_utc();
+            let d = time::Duration::seconds(back_seconds);
+            // Truncation can only move the bound EARLIER, by under a millisecond.
+            assert!(
+                bound <= after - d && bound >= before - d - time::Duration::milliseconds(1),
+                "--since {probe} -> {bound} is not now - {back_seconds}s"
+            );
+        }
+    }
+
+    /// Instants with no rendering in the canonical shape are rejected.
+    ///
+    /// They are not emitted as something that is not RFC3339, and not
+    /// silently clamped into range.
+    #[test]
+    fn unrepresentable_shifts_are_rejected() {
+        for probe in [
+            // A negative offset pushes past year 9999. `to_offset` panicked here.
+            "9999-12-31T23:59:59-00:01",
+            "9999-12-31T23:00:00-05:00",
+            // A positive offset pushes below year 0, which renders with a
+            // leading `-` and is not RFC3339.
+            "0000-01-01T00:00:00+05:00",
+            "0000-01-01T00:00:00+00:01",
+        ] {
+            let err = parse_since(probe).expect_err("must be rejected");
+            assert!(
+                err.to_string().contains("out of range"),
+                "--since {probe}: {err}"
+            );
+        }
+        // The other side of each edge still works.
+        for probe in [
+            "9999-12-31T23:59:59+00:01",
+            "0000-01-01T00:00:00Z",
+            "0000-01-01T00:00:00-05:00",
+        ] {
+            assert_canonical(&parse_since(probe).unwrap(), probe);
+        }
+    }
 }
