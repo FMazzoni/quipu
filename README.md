@@ -154,6 +154,55 @@ Each store stamps a `project_uuid` at `qp init`. Setting `--db`/`QP_DB` explicit
 while the working directory would have resolved to a *different* store triggers the
 mismatch warning above — the guard against filing tickets into the wrong project.
 
+## Attaching to a remote
+
+Optional, and off by default. A store with no remote configured behaves exactly
+as it always has: no network, no daemon, no external service.
+
+    qp remote set --authority ssh://host.example/srv/authority.git
+    qp remote set --ledger    ssh://host.example/srv/ledger.git
+    qp remote show
+    qp remote clear
+
+Two independent urls, either one omittable:
+
+- **authority** — where claims are refereed. A claim is a git ref push the far
+  end either accepts or rejects, and that rejection is the mutual exclusion.
+  Reachability matters here; ticket content never crosses this url.
+- **ledger** — where the exported event log syncs. Content crosses it, so only
+  machines you own need to reach it. It referees nothing.
+
+Setting one does not require the other. Authority-only is a referee over content
+that stays local; ledger-only is backup and sync with no referee. Both are
+supported configurations.
+
+`set` writes config and stops — a remote that happens to be down right now is
+still a remote you are allowed to configure. `--check` adds an opt-in
+`git ls-remote` probe and reports what it found; it never blocks the write.
+`qp remote show` is likewise local unless you pass `--check`.
+
+**`qp remote clear` is the escape hatch, not a convenience.** A configured but
+unreachable authority makes a claim fail rather than fall back, precisely
+because clearing exists as the deliberate way to get unblocked. Bare
+`qp remote clear` clears both urls; `--authority` or `--ledger` clears one.
+
+### ssh multiplexing
+
+Where the remote is reached over ssh, quipu sets `GIT_SSH_COMMAND` on the git
+child it spawns, enabling `ControlMaster` with a socket under the store's own
+directory. This is measured, not cosmetic: a claim costs ~2400 ms against a
+hosted remote without multiplexing and ~16 ms with it.
+
+The socket is keyed by the acting agent's id, which matters. Multiplexing helps
+*sequential* claims and breaks *bursts* — ten concurrent pushes through one
+shared master all fail, because sshd's `MaxSessions` counts the master
+alongside its channels. Keying by agent means one agent working through a queue
+reuses its own connection, while a wave of ten agents gets ten independent
+connections, which is the arrangement measured to work.
+
+To opt out: an existing `GIT_SSH_COMMAND` in the environment is never
+overwritten, and `QUIPU_SSH_MULTIPLEX=0` disables the injection entirely.
+
 ## Exporting the ledger
 
     qp export --out /path/to/ledger
@@ -204,8 +253,10 @@ title, description, tag and event in the store.
 ## Known MVP limitations
 
 - No liveness detection (no PID/heartbeat). Orchestrator runs `qp reclaim` on detected failures.
-- Single SQLite, single machine. Remote/sync is v2; `qp export` writes the
-  interchange format but nothing reads it back yet.
+- Single SQLite, single machine. `qp remote` records where a claim authority and
+  a ledger live, but nothing reads those urls yet: the claim-over-git path and
+  `qp sync` are still to come, and `qp export` writes the interchange format
+  that nothing reads back.
 - Display ID prefix is fixed at `qp init` and cannot be changed afterwards (`qp init --prefix ACME`; default `QP`). Re-running `init` with a different prefix warns and keeps the original.
 - Exit codes: `0` success, `1` invalid input, including argument-parse failures (and uncategorized internal failures), `2` conflict/not-owner/not-found/invariant, `3` wait timeout, `4` `wait --cohort-done` matched an empty cohort.
 

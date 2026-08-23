@@ -19,6 +19,7 @@ pub mod list;
 pub mod log;
 pub mod reclaim;
 pub mod relation;
+pub mod remote;
 pub mod render;
 pub mod report;
 pub mod show;

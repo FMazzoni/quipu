@@ -6,6 +6,7 @@ mod cmd;
 mod db;
 mod id;
 mod outcome;
+mod remote;
 mod store;
 mod time;
 
@@ -78,6 +79,8 @@ enum Cmd {
     Tag(cmd::tag::TagArgs),
     /// Manage relations between tasks
     Relation(cmd::relation::RelationArgs),
+    /// Attach this store to a claim authority / ledger, or detach to local-only
+    Remote(cmd::remote::RemoteArgs),
     /// Render the task DAG
     Tree(cmd::tree::TreeArgs),
     /// Show the event timeline (per-task or global)
@@ -171,6 +174,7 @@ fn wants_json(cmd: &Cmd) -> bool {
         Cmd::Report(a) => a.json,
         Cmd::Export(a) => a.json,
         Cmd::Relation(a) => a.json(),
+        Cmd::Remote(a) => a.json(),
         Cmd::Tree(a) => a.json,
         Cmd::Timeline(a) => a.json,
         Cmd::Wave(a) => a.json,
@@ -337,6 +341,7 @@ fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
         Cmd::Log(a) => cmd::log::run(&db_path, a),
         Cmd::Tag(a) => cmd::tag::run(&db_path, a),
         Cmd::Relation(a) => cmd::relation::run(&db_path, a),
+        Cmd::Remote(a) => cmd::remote::run(&db_path, a),
         Cmd::Timeline(a) => cmd::timeline::run(&db_path, a),
         Cmd::Decisions(a) => cmd::decisions::run(&db_path, a),
         Cmd::Tree(a) => cmd::tree::run(&db_path, a),
