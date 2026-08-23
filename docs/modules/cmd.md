@@ -52,6 +52,19 @@ With no `--as`, `log` attributes the entry to the open assignee only when the
 task is `running`; otherwise the event carries no agent. See
 [`log`](log/index.html) for why the rule is drawn there.
 
+## Store-scoped commands
+
+[`remote`](remote/index.html) and [`export`](export/index.html) are the two
+commands that act on the *store* rather than on a task. `remote` writes the
+optional authority and ledger urls into `meta`; `export` serialises the event
+log to disk. Neither appears in the table below, which is about task state,
+and neither writes an event — a store's attachment and its exports are
+properties of the store, not transitions in any task's history.
+
+Absent a configured remote, `remote` is the only module here that could reach
+the network and it still does not: the probe is opt-in behind `--check`, so a
+store that has never run `qp remote set` spawns nothing at all.
+
 ## Mutators and projections
 
 | | modules | risk |
