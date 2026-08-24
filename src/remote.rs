@@ -139,6 +139,24 @@ fn is_ssh_url(url: &str) -> bool {
     }
 }
 
+/// The filesystem directory a url names, when it names one at all.
+///
+/// `Some` only for a bare path or a `file://` url that exists as a directory —
+/// the two shapes quipu can act on as a repository rather than only talk to over
+/// a protocol. Everything else (ssh, http, git) is `None`: the far end is
+/// reachable but not touchable, and pretending otherwise means inventing remote
+/// shell commands on someone else's machine.
+pub fn local_path(url: &str) -> Option<PathBuf> {
+    let raw = match url.strip_prefix("file://") {
+        Some(rest) => rest,
+        None if url.contains("://") => return None,
+        None if is_ssh_url(url) => return None,
+        None => url,
+    };
+    let p = PathBuf::from(raw);
+    p.is_dir().then_some(p)
+}
+
 /// Directory holding quipu's ssh control sockets: `<store-dir>/ssh`.
 ///
 /// Under quipu's own directory rather than `~/.ssh`, so a stale socket is
@@ -275,6 +293,21 @@ mod tests {
         let b = ssh_command(&db, url, "agent-b").unwrap();
         assert_ne!(a, b, "two lanes must not share one ControlMaster");
         assert!(a.contains("ControlMaster=auto"));
+    }
+
+    #[test]
+    fn only_a_filesystem_url_names_a_directory_we_can_touch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_str().unwrap();
+        assert_eq!(local_path(dir).as_deref(), Some(tmp.path()));
+        assert_eq!(
+            local_path(&format!("file://{dir}")).as_deref(),
+            Some(tmp.path())
+        );
+        assert!(local_path("ssh://host.invalid/srv/ledger.git").is_none());
+        assert!(local_path("user@host.invalid:ledger.git").is_none());
+        assert!(local_path("https://host.invalid/ledger.git").is_none());
+        assert!(local_path("/no/such/directory/anywhere").is_none());
     }
 
     #[test]

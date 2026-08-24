@@ -8,7 +8,8 @@
 //! reading batches somebody else actually wrote.
 //!
 //! No hostname, url or account belonging to anyone appears here; the ledger is
-//! `git init --bare` in a temp directory.
+//! `git init --bare` in a temp directory, reached by path or by a `file://` url.
+//! Nothing in this file touches a network.
 
 use assert_cmd::Command;
 use serde_json::Value;
@@ -95,6 +96,16 @@ impl Machine {
             .collect();
         v
     }
+}
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .expect("spawn git");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 /// A store that has published one ticket, and the ledger clone holding it.
@@ -386,4 +397,153 @@ fn a_store_that_predates_the_key_is_healed_rather_than_bricked() {
     ok(&a.db, &["add", "after the upgrade"]);
     ok(&a.db, &["sync"]);
     assert_eq!(a.titles().len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// joining from a url, which is all a new machine has
+// ---------------------------------------------------------------------------
+
+#[test]
+fn joining_from_a_url_needs_no_clone_and_no_further_configuration() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (a, remote) = published_project(tmp.path());
+    let url = format!("file://{}", remote.display());
+
+    // Nothing local: no clone, no `qp remote set`, no `git` run by hand. This is
+    // the whole state a person has when they sit down at a second machine.
+    let b_db = tmp.path().join("b").join("db.sqlite");
+    std::fs::create_dir_all(b_db.parent().unwrap()).unwrap();
+    let out = json(&b_db, &["init", "--from", &url, "--json"]);
+    assert_eq!(out["identity"], "inherited");
+    let b = Machine { db: b_db };
+
+    assert_eq!(a.key(), b.key(), "joining by url must inherit the project");
+    assert_ne!(a.uuid(), b.uuid(), "and must still be its own store");
+
+    // The join recorded where it came from, so the machine is syncable at once.
+    let shown = ok(&b.db, &["remote", "show"]);
+    assert!(
+        shown.contains(&url),
+        "join must set the ledger remote: {shown}"
+    );
+
+    // And it did not leave the project's existing tickets behind: sync decides
+    // what is new by diffing its clone across a fetch, so a join that populated
+    // that clone and left it at that would never receive them at all.
+    assert_eq!(
+        a.titles(),
+        b.titles(),
+        "a join must carry the project history"
+    );
+
+    ok(&b.db, &["add", "written on the machine that joined"]);
+    ok(&b.db, &["sync"]);
+    ok(&a.db, &["sync"]);
+    assert_eq!(a.titles(), b.titles());
+    assert_eq!(a.titles().len(), 2);
+}
+
+#[test]
+fn a_bare_ledger_path_is_read_as_a_remote_not_as_a_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (a, remote) = published_project(tmp.path());
+
+    // A bare repository is BOTH an existing directory and a git url, and its
+    // batches are in `objects` rather than in a tree. Reading it as a directory
+    // finds nothing and reports an empty ledger about a full one.
+    let b_db = tmp.path().join("b").join("db.sqlite");
+    std::fs::create_dir_all(b_db.parent().unwrap()).unwrap();
+    let out = json(
+        &b_db,
+        &["init", "--from", remote.to_str().unwrap(), "--json"],
+    );
+    assert_eq!(out["identity"], "inherited");
+    assert_eq!(out["project_key"].as_str().unwrap(), a.key());
+    assert_eq!(Machine { db: b_db }.titles(), a.titles());
+}
+
+#[test]
+fn the_guard_fires_for_a_ledger_that_is_only_a_url() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_a, remote) = published_project(tmp.path());
+    let url = format!("file://{}", remote.display());
+
+    let b = tmp.path().join("b").join("db.sqlite");
+    std::fs::create_dir_all(b.parent().unwrap()).unwrap();
+    let assert = qp(&b)
+        .env("QUIPU_LEDGER", &url)
+        .arg("init")
+        .assert()
+        .failure();
+    let err = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        err.contains(&url),
+        "the refusal must name the ledger: {err}"
+    );
+    assert!(
+        err.contains("--from") && err.contains("--new-project"),
+        "{err}"
+    );
+    assert!(!b.exists(), "a refused init must not leave a store behind");
+}
+
+// ---------------------------------------------------------------------------
+// the branch the batches live on
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_plain_clone_of_a_published_ledger_lands_on_the_batches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (a, remote) = published_project(tmp.path());
+
+    // A bare repository's HEAD names `main`/`master`, and pushing a branch does
+    // NOT move it — so without quipu adopting it, this clone is an empty tree
+    // and every downstream message describes a full ledger as an empty one.
+    let clone = tmp.path().join("by-hand");
+    assert!(std::process::Command::new("git")
+        .args(["clone", "-q"])
+        .arg(&remote)
+        .arg(&clone)
+        .status()
+        .unwrap()
+        .success());
+
+    assert_eq!(
+        git(&clone, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "quipu-ledger"
+    );
+    assert!(
+        clone.join(a.uuid()).is_dir(),
+        "the clone must actually hold the batches"
+    );
+}
+
+#[test]
+fn a_ledger_with_no_batches_in_it_names_the_branch_rather_than_denying_the_project() {
+    let tmp = tempfile::tempdir().unwrap();
+    let empty = tmp.path().join("nothing-published.git");
+    assert!(std::process::Command::new("git")
+        .args(["init", "--bare", "-q"])
+        .arg(&empty)
+        .status()
+        .unwrap()
+        .success());
+    let clone = tmp.path().join("by-hand");
+    let _ = std::process::Command::new("git")
+        .args(["clone", "-q"])
+        .arg(&empty)
+        .arg(&clone)
+        .status();
+
+    let db = tmp.path().join("b").join("db.sqlite");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let assert = qp(&db)
+        .args(["init", "--from", clone.to_str().unwrap()])
+        .assert()
+        .failure();
+    let err = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    // The message a person hits after cloning a ledger by hand must point at the
+    // real cause. "No project here" alone sends them looking for a lost ledger.
+    assert!(err.contains("quipu-ledger"), "must name the branch: {err}");
+    assert!(err.contains("git clone"), "must name the cause: {err}");
 }

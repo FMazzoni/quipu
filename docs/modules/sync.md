@@ -83,6 +83,31 @@ derives from the filenames already on disk. With nothing new that scan finds
 nothing to write and no file is touched, so a "cache" would be caching a
 no-op. The batch files themselves are the cache, and they are the durable one.
 
+## The branch, and the empty clone
+
+Batches live on `quipu-ledger`. A bare repository is created with `HEAD` naming
+`main` or `master`, and pushing the first branch does **not** move it — measured,
+not assumed. So on a ledger nobody has touched by hand, `HEAD` names a branch
+that does not exist, and `git clone <ledger>` produces an EMPTY working tree with
+a `remote HEAD refers to nonexistent ref` warning most people scroll past. The
+batches are all there; everything downstream then reports "no project here"
+about a ledger that is full.
+
+So the first successful push points the ledger's `HEAD` at `quipu-ledger` — only
+when `HEAD` does not resolve (a repository whose `HEAD` is a real branch is being
+used for something else and is not quipu's to repoint), and only where the ledger
+is a directory this process can open. Git has no wire command for setting a
+remote's `HEAD`, so over ssh or https this cannot be done at all; there the
+message in `cmd/init.rs` carries the explanation instead. It is best effort
+throughout: failing to improve someone's clone ergonomics must never fail their
+sync.
+
+`materialise` is the same `ensure_repo`/`fetch`/`integrate` sequence exposed for
+`qp init --from <url>`, which needs to read a ledger before a store exists. It is
+deliberately not a second fetch path — the refspec is what keeps
+`refs/quipu/claims/*` out of reach, and one copy of it is the only number of
+copies that can be right.
+
 ## What sync must never touch
 
 `refs/quipu/claims/*`. Claims are the authority's business and move only

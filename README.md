@@ -165,21 +165,30 @@ carries the same one.
 `qp init` is the only moment those two intents can be told apart, so it does not
 guess:
 
-    qp init                        start a project here
-    qp init --from /path/ledger    join the project that ledger holds
-    qp init --new-project          start one even next to a populated ledger
+    qp init                                   start a project here
+    qp init --from ssh://host.example/ledger  join the project that ledger holds
+    qp init --new-project                     start one even next to a populated ledger
 
-Joining mints a fresh store uuid and inherits the project's key, display prefix
-and default tags; `qp sync` then brings the tickets. `qp init --from <dir>
---restore` is the other operation — it rebuilds *this store* as the one the
-ledger came from, uuid and all, for a machine that died.
+`--from` takes a git url or a local directory. A url is all a new machine has, so
+that is the whole setup: it fetches the ledger, inherits the project's key,
+display prefix and default tags, mints a store uuid of its own, folds the
+project's tickets in, and records the ledger — so the next command can be
+`qp sync` with nothing configured in between. `qp init --from <ledger> --restore`
+is the other operation: it rebuilds *this store* as the one the ledger came from,
+uuid and all, for a machine that died.
 
 Where a ledger it can see already holds projects — `--from`, or `$QUIPU_LEDGER`
-naming a clone — plain `qp init` refuses and names both choices. Starting a new
+naming a url or a clone — plain `qp init` refuses and names both choices. Starting a new
 project on a shared ledger stays possible; it is just never accidental. The
 failure that costs a week is the silent one: init, point at the team's ledger,
 sync, and discover days later that these tickets were a new project all along
 and never reached anybody.
+
+Batches live on the `quipu-ledger` branch, which is not a bare repository's
+default `HEAD`. quipu points a filesystem ledger's `HEAD` at it on first publish
+so a plain `git clone` lands on the batches; where it cannot — git has no wire
+command for setting a remote's `HEAD` — a ledger that looks empty says so by
+naming the branch, rather than claiming there is no project.
 
 A store written before project keys existed keeps working: it is backfilled, on
 the next command of any kind, as its own project. Batches written before them

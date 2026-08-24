@@ -18,7 +18,7 @@ use std::process::Command;
 /// Named rather than inherited from the remote's `HEAD` so a bare repo created
 /// with any default branch works, and so the refspecs below can be explicit —
 /// which is what keeps `refs/quipu/claims/*` out of reach.
-const LEDGER_BRANCH: &str = "quipu-ledger";
+pub const LEDGER_BRANCH: &str = "quipu-ledger";
 
 /// ssh multiplexing lane for every git child this command spawns.
 const LANE: &str = "ledger-sync";
@@ -158,12 +158,33 @@ pub fn run(db_path: &Path, a: SyncArgs) -> Result<()> {
     )
 }
 
+/// Brings a remote ledger onto this machine and reports where it landed.
+///
+/// The joining path (`qp init --from <url>`) and the guard that reads
+/// `$QUIPU_LEDGER` both need a ledger they can *read* before a store exists, and
+/// a url is what someone setting up a new machine actually has. This is that
+/// step, and it is deliberately the same `ensure_repo` / `fetch` / `integrate`
+/// the exchange below runs — a second fetch path would be a second set of
+/// refspecs to get wrong, and the refspec is what keeps `refs/quipu/claims/*`
+/// out of reach.
+///
+/// It never pushes and never writes to the store: reading a ledger is not
+/// joining one, and `qp init` decides that afterwards.
+pub fn materialise(db_path: &Path, url: &str) -> Result<PathBuf> {
+    remote::validate_url(url)?;
+    let dir = ledger_dir(db_path);
+    ensure_repo(&dir, url)?;
+    fetch(db_path, &dir, url)?;
+    integrate(&dir)?;
+    Ok(dir)
+}
+
 /// The ledger clone: `<store-dir>/ledger`, beside the database.
 ///
 /// Inside the store directory because that directory is already ignored by the
 /// project's git — a ledger that landed in the project tree would eventually be
 /// committed, which is the failure this placement exists to prevent.
-fn ledger_dir(db_path: &Path) -> PathBuf {
+pub fn ledger_dir(db_path: &Path) -> PathBuf {
     db_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -342,6 +363,7 @@ fn push(db_path: &Path, dir: &Path, url: &str) -> Result<bool> {
             "refs/heads/{LEDGER_BRANCH}:refs/heads/{LEDGER_BRANCH}"
         ));
         if git_ok(c) {
+            adopt_head(url);
             // Keep the remote-tracking ref honest, so the next sync's
             // already-in-sync check compares against what is really there.
             let mut u = git(None, dir, "");
@@ -362,6 +384,38 @@ fn push(db_path: &Path, dir: &Path, url: &str) -> Result<bool> {
         "the ledger remote kept moving while pushing; nothing local was lost, run \
          `qp sync` again"
     ))
+}
+
+/// Points a filesystem ledger's `HEAD` at the branch the batches are on.
+///
+/// A bare repository is created with `HEAD` on `main`/`master`, and pushing the
+/// first branch does NOT move it — measured, not assumed. So a ledger nobody has
+/// touched by hand has a `HEAD` naming a branch that does not exist, and
+/// `git clone <ledger>` yields an EMPTY working tree with a
+/// `remote HEAD refers to nonexistent ref` warning most people scroll past. The
+/// batches are all there, on `quipu-ledger`, and everything downstream then
+/// reports "no project here" about a ledger that is full.
+///
+/// Only ever fired when `HEAD` does not resolve — a repository whose `HEAD` is a
+/// real branch is being used for something else, and quipu does not get to
+/// repoint it. And only where the ledger is a directory this process can open:
+/// git has no wire command for setting a remote's `HEAD`, so over ssh or https
+/// this cannot be done at all and the message in `cmd/init.rs` carries the
+/// explanation instead.
+///
+/// Best effort throughout. Failing to improve someone's clone ergonomics must
+/// never fail their sync.
+fn adopt_head(url: &str) {
+    let Some(path) = remote::local_path(url) else {
+        return;
+    };
+    if rev_parse(&path, "HEAD").is_some() {
+        return;
+    }
+    let mut c = git(None, &path, "");
+    c.args(["symbolic-ref", "HEAD"])
+        .arg(format!("refs/heads/{LEDGER_BRANCH}"));
+    let _ = git_ok(c);
 }
 
 /// Every batch file in the clone that some other store wrote, as `<uuid>/<file>`.
