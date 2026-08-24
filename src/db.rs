@@ -512,7 +512,11 @@ fn add_missing_columns(conn: &Connection) -> Result<()> {
 /// Called from both `open()` (every command, so this MUST stay
 /// self-healing — a user who upgrades the binary and runs a read command
 /// before ever running `qp init` depends on this) and `init()`.
-fn migrate(conn: &Connection, prefix: Option<&str>) -> Result<Option<String>> {
+fn migrate(
+    conn: &Connection,
+    prefix: Option<&str>,
+    project_key: Option<&str>,
+) -> Result<Option<String>> {
     let meta_exists: bool = conn
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'",
@@ -533,17 +537,27 @@ fn migrate(conn: &Connection, prefix: Option<&str>) -> Result<Option<String>> {
     };
     if current.as_deref() != Some(SCHEMA_VERSION) {
         conn.execute_batch(SCHEMA).context("applying schema")?;
-        // Stamp project_uuid + schema_version + display_prefix on first init only.
-        // Subsequent init calls are idempotent — prefix is never mutated post-init
-        // (INSERT OR IGNORE swallows the duplicate key).
+        // Stamp project_uuid + schema_version + display_prefix + project_key on
+        // first init only. Subsequent init calls are idempotent — prefix is never
+        // mutated post-init (INSERT OR IGNORE swallows the duplicate key).
         let p = prefix.unwrap_or("QP").to_string();
         validate_prefix(&p)?;
+        // The key goes in the same statement as the uuid so a fresh store can
+        // never exist without one: a crash between two statements would leave a
+        // store that silently looks pre-identity and gets a derived key it does
+        // not deserve. A store that already exists keeps whatever it has —
+        // `project::backfill` below is what decides for those.
+        let key = match project_key {
+            Some(k) => k.to_string(),
+            None => crate::project::mint(),
+        };
         conn.execute(
             "INSERT OR IGNORE INTO meta(key, value) VALUES \
                 ('project_uuid', ?1), \
                 ('schema_version', ?2), \
-                ('display_prefix', ?3)",
-            rusqlite::params![uuid::Uuid::new_v4().to_string(), SCHEMA_VERSION, p],
+                ('display_prefix', ?3), \
+                ('project_key', ?4)",
+            rusqlite::params![uuid::Uuid::new_v4().to_string(), SCHEMA_VERSION, p, key],
         )?;
         // schema_version must advance even on existing stores being migrated forward.
         conn.execute(
@@ -555,6 +569,10 @@ fn migrate(conn: &Connection, prefix: Option<&str>) -> Result<Option<String>> {
     // version gate, so a store whose stamp is ahead of its schema still gets
     // healed instead of being skipped forever. See `add_missing_columns`.
     add_missing_columns(conn)?;
+    // Ungated for the same reason: every store that predates project identity
+    // is already stamped at a version this binary knows, so a gated backfill
+    // would never reach one.
+    crate::project::backfill(conn)?;
     Ok(current)
 }
 
@@ -567,19 +585,46 @@ fn migrate(conn: &Connection, prefix: Option<&str>) -> Result<Option<String>> {
 /// `no such table` / `no such column` error.
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = open_conn(path)?;
-    migrate(&conn, None)?;
+    migrate(&conn, None, None)?;
     Ok(conn)
 }
 
 /// Open a store, applying the one-time bookkeeping only `qp init` needs.
 ///
 /// Init-time concerns only: prefix validation (via `migrate`'s first-stamp
-/// path), the prefix-mismatch warning, and `--default-tag` seeding. Shares the
-/// actual DDL/version-check logic with `open` via `migrate` — this is not a
-/// separate migration path.
-pub fn init(path: &Path, prefix: Option<&str>, default_tags: &[String]) -> Result<Connection> {
+/// path), the prefix-mismatch warning, `--default-tag` seeding, and the project
+/// identity a joining store inherits. Shares the actual DDL/version-check logic
+/// with `open` via `migrate` — this is not a separate migration path.
+///
+/// `project_key` of `None` means "start a project": a fresh store mints its own.
+/// `Some` means "join one", and is refused rather than applied if this store
+/// already answers to a different key.
+pub fn init(
+    path: &Path,
+    prefix: Option<&str>,
+    default_tags: &[String],
+    project_key: Option<&str>,
+) -> Result<Connection> {
     let conn = open_conn(path)?;
-    let current = migrate(&conn, prefix)?;
+    let current = migrate(&conn, prefix, project_key)?;
+    // A store's project identity is set once, when the store is created. An
+    // `init` that asks for a different one is a person about to file into a
+    // project this store is not part of, so it fails rather than re-homing a
+    // store whose tickets are already published under the old key.
+    if let Some(want) = project_key {
+        let have = crate::project::require(&conn)?;
+        if have != want {
+            return Err(conflict(
+                "project_key_mismatch",
+                format!(
+                    "this store already belongs to project `{have}` and cannot join `{want}`. \
+                     A store's project is fixed at creation; initialise a new store to join \
+                     a different project."
+                ),
+                None,
+            ));
+        }
+    }
     if let (Some(cur), Some(user_p)) = (current.as_deref(), prefix) {
         if cur == SCHEMA_VERSION {
             let stored: Option<String> = conn
@@ -1315,7 +1360,7 @@ mod prefix_tests {
     fn display_prefix_honors_init_value() {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("db.sqlite");
-        let conn = init(&db, Some("ACME"), &[]).unwrap();
+        let conn = init(&db, Some("ACME"), &[], None).unwrap();
         assert_eq!(display_prefix(&conn).unwrap(), "ACME");
     }
 }

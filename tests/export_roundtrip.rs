@@ -134,11 +134,15 @@ fn the_envelope_carries_identity_and_the_schema_version() {
     let header = &batches[0].header;
     assert_eq!(header["format"], "quipu-export");
     assert_eq!(
-        header["format_version"], 1,
+        header["format_version"], 2,
         "every batch must say which format version wrote it, or a later format \
          change makes this one unreadable or silently misread"
     );
     assert_eq!(header["project_uuid"], uuid);
+    // The store that wrote it, and the project it belongs to. A reader that
+    // cannot tell those apart cannot tell a peer from a stranger.
+    assert!(header["project_key"].is_string());
+    assert_ne!(header["project_key"], header["project_uuid"]);
     assert_eq!(header["display_prefix"], PREFIX);
     assert_eq!(header["default_tags"][0], DEFAULT_TAG);
 

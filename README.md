@@ -154,6 +154,38 @@ Each store stamps a `project_uuid` at `qp init`. Setting `--db`/`QP_DB` explicit
 while the working directory would have resolved to a *different* store triggers the
 mismatch warning above — the guard against filing tickets into the wrong project.
 
+## Starting a project, or joining one
+
+A store carries two identities, and they answer different questions.
+`project_uuid` names *this store*: it is minted per `qp init`, it appears in
+every batch filename, and two machines of one project must have two of them or
+their batches collide. `project_key` names *the project*: every machine of it
+carries the same one.
+
+`qp init` is the only moment those two intents can be told apart, so it does not
+guess:
+
+    qp init                        start a project here
+    qp init --from /path/ledger    join the project that ledger holds
+    qp init --new-project          start one even next to a populated ledger
+
+Joining mints a fresh store uuid and inherits the project's key, display prefix
+and default tags; `qp sync` then brings the tickets. `qp init --from <dir>
+--restore` is the other operation — it rebuilds *this store* as the one the
+ledger came from, uuid and all, for a machine that died.
+
+Where a ledger it can see already holds projects — `--from`, or `$QUIPU_LEDGER`
+naming a clone — plain `qp init` refuses and names both choices. Starting a new
+project on a shared ledger stays possible; it is just never accidental. The
+failure that costs a week is the silent one: init, point at the team's ledger,
+sync, and discover days later that these tickets were a new project all along
+and never reached anybody.
+
+A store written before project keys existed keeps working: it is backfilled, on
+the next command of any kind, as its own project. Batches written before them
+mean the same thing — the store that wrote it, standing alone — never "whoever
+is asking".
+
 ## Attaching to a remote
 
 Optional, and off by default. A store with no remote configured behaves exactly
@@ -213,7 +245,8 @@ Serialises the store's event log to plain-text JSONL under
     <project_uuid>/<project_uuid>-0000000001-0000000128.jsonl
 
 Each file begins with a header record carrying the store's identity
-(`project_uuid`, `display_prefix`), the schema version it was written under, and
+(`project_uuid`, `display_prefix`), the project it belongs to (`project_key`),
+the schema version it was written under, and
 the range of event ids it holds; the remaining lines are the events themselves.
 
 Three properties are the point:

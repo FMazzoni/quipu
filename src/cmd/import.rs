@@ -81,6 +81,10 @@ impl Mode {
 /// One batch header, carrying the envelope its events are interpreted under.
 struct Header {
     project_uuid: String,
+    /// The project the writing store belongs to, or `None` on a batch written
+    /// before project identity existed. `project::effective_key` is the one
+    /// place that decides what `None` means; never read this field raw.
+    project_key: Option<String>,
     display_prefix: String,
     schema_version: String,
     default_tags: Vec<String>,
@@ -267,6 +271,11 @@ fn parse_header(raw: &Value, path: &Path) -> Result<Header> {
         .unwrap_or_default();
     Ok(Header {
         project_uuid: s("project_uuid")?,
+        project_key: raw
+            .get("project_key")
+            .and_then(Value::as_str)
+            .filter(|k| !k.is_empty())
+            .map(str::to_string),
         display_prefix: s("display_prefix")?,
         schema_version: s("schema_version").unwrap_or_default(),
         default_tags: raw
@@ -679,11 +688,20 @@ fn restore(
     let header = ledger
         .newest_header(uuid)
         .expect("a uuid in `stores` came from a header");
+    // A keyless batch is not an unknown project: it is the store that wrote it,
+    // standing alone. Restoring one under a freshly minted key would quietly
+    // rename the project every one of its already-published batches belongs to.
+    let project_key = crate::project::effective_key(header.project_key.as_deref(), uuid);
     tx.execute(
         "INSERT INTO meta(key, value) VALUES ('project_uuid', ?1), ('display_prefix', ?2),
-                                             ('schema_version', ?3)
+                                             ('schema_version', ?3), ('project_key', ?4)
            ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        rusqlite::params![uuid, header.display_prefix, header.schema_version],
+        rusqlite::params![
+            uuid,
+            header.display_prefix,
+            header.schema_version,
+            project_key
+        ],
     )?;
     for t in &header.default_tags {
         tx.execute("INSERT OR IGNORE INTO default_tag(name) VALUES (?)", [t])?;
