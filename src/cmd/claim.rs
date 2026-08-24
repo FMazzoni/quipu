@@ -3,7 +3,7 @@
 #![doc = include_str!("../../docs/modules/claim.md")]
 
 use crate::outcome::{emit, Outcome};
-use crate::{db, id};
+use crate::{claimref, db, id};
 use anyhow::Result;
 use clap::Args;
 use serde::Serialize;
@@ -33,7 +33,10 @@ pub fn run(db_path: &std::path::Path, a: ClaimArgs) -> Result<()> {
     let mut conn = db::open(db_path)?;
     let resolved = id::resolve_full(&conn, &a.task)?;
     let task_id = resolved.id;
-    db::with_tx(&mut conn, |tx| {
+    // The authority answers before anything local moves, and `--as` is the ssh
+    // lane. A local-only store gets one extra `SELECT` and no subprocess.
+    let held = claimref::acquire_for(db_path, &conn, task_id, &resolved.display_id, &a.agent)?;
+    let local = db::with_tx(&mut conn, |tx| {
         // Latest open assignment must be (a) for this agent (b) un-claimed.
         let Some(open) = db::current_assignment(tx, task_id)? else {
             return Err(db::conflict(
@@ -88,8 +91,20 @@ pub fn run(db_path: &std::path::Path, a: ClaimArgs) -> Result<()> {
             Some(&a.agent),
             &[],
         )?;
+        if let Some(h) = &held {
+            h.remember(tx)?;
+        }
         Ok(())
-    })?;
+    });
+    // Every local rejection above happens with the ref already held. Give it
+    // back, or the ticket stays locked on the authority by a store that never
+    // started the work.
+    if let Err(e) = local {
+        if let Some(h) = &held {
+            h.roll_back();
+        }
+        return Err(e);
+    }
     emit(
         a.json,
         &Claimed {
