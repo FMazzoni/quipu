@@ -54,16 +54,19 @@ task is `running`; otherwise the event carries no agent. See
 
 ## Store-scoped commands
 
-[`remote`](remote/index.html) and [`export`](export/index.html) are the two
-commands that act on the *store* rather than on a task. `remote` writes the
-optional authority and ledger urls into `meta`; `export` serialises the event
-log to disk. Neither appears in the table below, which is about task state,
-and neither writes an event — a store's attachment and its exports are
-properties of the store, not transitions in any task's history.
+[`remote`](remote/index.html), [`export`](export/index.html),
+[`import`](import/index.html) and [`sync`](sync/index.html) act on the *store*
+rather than on a task. `remote` writes the optional authority and ledger urls
+into `meta`; `export` serialises the event log to disk; `import` replays a
+ledger back; `sync` is the two of them with a wire between. None appears in the
+table below, which is about task state, and none writes an event of its own — a
+store's attachment and its exports are properties of the store, not transitions
+in any task's history.
 
-Absent a configured remote, `remote` is the only module here that could reach
-the network and it still does not: the probe is opt-in behind `--check`, so a
-store that has never run `qp remote set` spawns nothing at all.
+[`sync`](sync/index.html) is the only module here that reaches the network, and
+only when a person runs it. `remote`'s own probe is opt-in behind `--check`, so
+a store that has never run `qp remote set` spawns nothing at all — and no
+command grows a network dependency because `sync` exists.
 
 ## Mutators and projections
 

@@ -88,16 +88,20 @@ struct OriginRecord {
     origin_task_id: i64,
 }
 
+/// What one export did, or did not, write.
+///
+/// Public because `qp sync` composes export rather than reimplementing it, and
+/// reports the same numbers rather than counting its own.
 #[derive(Serialize)]
-struct ExportOutcome {
-    project_uuid: String,
-    dir: String,
-    file: Option<String>,
-    first_event_id: Option<i64>,
-    last_event_id: Option<i64>,
-    event_count: usize,
-    format_version: u32,
-    schema_version: String,
+pub struct ExportOutcome {
+    pub project_uuid: String,
+    pub dir: String,
+    pub file: Option<String>,
+    pub first_event_id: Option<i64>,
+    pub last_event_id: Option<i64>,
+    pub event_count: usize,
+    pub format_version: u32,
+    pub schema_version: String,
 }
 
 impl Outcome for ExportOutcome {
@@ -114,6 +118,15 @@ impl Outcome for ExportOutcome {
 }
 
 pub fn run(db_path: &Path, a: ExportArgs) -> Result<()> {
+    let out = export(db_path, &a.out)?;
+    crate::outcome::emit(a.json, &out)
+}
+
+/// Writes at most one batch under `out_root/<project_uuid>/` and reports it.
+///
+/// Split from [`run`] so a caller that is not the CLI — `qp sync` — gets the
+/// batch and the numbers without a second copy of the serialiser.
+pub fn export(db_path: &Path, out_root: &Path) -> Result<ExportOutcome> {
     let conn = db::open(db_path)?;
     let project_uuid = meta(&conn, "project_uuid")?
         .ok_or_else(|| db::invalid_input("store has no project_uuid; run `qp init` first"))?;
@@ -121,7 +134,7 @@ pub fn run(db_path: &Path, a: ExportArgs) -> Result<()> {
     let display_prefix = db::display_prefix(&conn)?;
     let default_tags = db::default_tags(&conn)?;
 
-    let dir = a.out.join(&project_uuid);
+    let dir = out_root.join(&project_uuid);
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating export directory {}", dir.display()))?;
 
@@ -139,7 +152,7 @@ pub fn run(db_path: &Path, a: ExportArgs) -> Result<()> {
         schema_version: schema_version.clone(),
     };
     if events.is_empty() {
-        return crate::outcome::emit(a.json, &out);
+        return Ok(out);
     }
 
     let lo = events.first().unwrap().id;
@@ -164,7 +177,7 @@ pub fn run(db_path: &Path, a: ExportArgs) -> Result<()> {
     out.file = Some(path.display().to_string());
     out.first_event_id = Some(lo);
     out.last_event_id = Some(hi);
-    crate::outcome::emit(a.json, &out)
+    Ok(out)
 }
 
 /// The batch filename: origin store, then the event range it closes over.

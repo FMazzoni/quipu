@@ -290,6 +290,43 @@ sides last agreed, and the ticket is tagged `needs-resolution`. Picking a winner
 by timestamp would silently discard a real edit, because the two clocks are not
 comparable.
 
+## Syncing with a remote
+
+    qp remote set --ledger <url>
+    qp sync
+
+`qp sync` is the whole cross-machine loop in one command: fetch the remote
+ledger, merge it with what this machine has, export this store's new events into
+it, push, and read back whatever arrived. It owns no format of its own — it is
+`qp export` and `qp import --merge` with a wire between them.
+
+**It never runs by itself.** No write syncs, nothing refreshes in the
+background, and no other command grows a network dependency because this one
+exists. Every other `qp` operation stays a couple of milliseconds against a
+local file, which is the reason the tool exists rather than a hosted tracker.
+
+**Divergence is the normal case.** Two machines that both worked offline both
+hold work the other has not seen, and that needs no conflict policy: batch files
+are named after the store that wrote them and are never rewritten, so two
+ledgers only ever *add* files relative to each other and the union merges with
+nothing to reconcile. If a peer pushes in between, the push is rejected and
+`sync` re-fetches, re-merges and retries.
+
+**It is idempotent.** A second sync with nothing new pushes nothing, fetches
+nothing, and skips the merge entirely.
+
+**It never touches `refs/quipu/claims/*`.** Claims are the authority's business
+and travel by the claim path. That is why the authority and the ledger are two
+separate urls: `sync` is given the ledger one and denied the other. Mirroring
+claim refs would create a second referee, and mutual exclusion with two referees
+is not mutual exclusion.
+
+The remote ledger is cloned to `<store-dir>/ledger` — inside the directory your
+project already ignores, so a sync never leaves a file you could accidentally
+commit. Any git url your `git` can reach works; an ssh one is multiplexed like
+the claim path. As with an export, keep the destination somewhere you control:
+the ledger contains every ticket title, description, tag and event in the store.
+
 ## Install skills into Claude Code
 
     qp install-skills                          # symlinks skills/* into ~/.claude/skills/qp-*
@@ -307,11 +344,10 @@ comparable.
 ## Known MVP limitations
 
 - No liveness detection (no PID/heartbeat). Orchestrator runs `qp reclaim` on detected failures.
-- Single SQLite, single machine. `qp export` and `qp import` are the interchange
-  format and its reader, and `qp remote` records where a claim authority and a
-  ledger live — but nothing reads those urls yet: nothing fetches or publishes a
-  ledger for you, the claim-over-git path is still to come, and there is no
-  command yet to settle a marked conflict.
+- Single SQLite per machine. `qp export`, `qp import` and `qp sync` are the
+  interchange format, its reader and the transfer between machines. The claim
+  authority url is still unused — the claim-over-git path is to come, and there
+  is no command yet to settle a marked conflict.
 - A ledger containing pre-fidelity history (any store written before the event
   log recorded every write) cannot be fully restored — permanently, not pending
   a fix, and the shortfall cannot even be enumerated. `qp import` warns on every
