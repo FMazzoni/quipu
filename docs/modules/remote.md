@@ -28,6 +28,9 @@ correct configuration.
 With neither url set, quipu does exactly what it always did — no network, no
 daemon, no subprocess, no external service. `qp remote show` on a fresh store
 prints `local-only — no authority, no ledger` and reads one row out of `meta`.
+It prints this store's `project_key` and `project_uuid` above that either way:
+this is the command that answers "who am I to the other machines", and two
+stores of one project differ in the second and agree in the first.
 
 `qp remote clear` is load-bearing rather than a convenience. A configured but
 unreachable authority makes `qp claim` fail, by design, and `clear` is the

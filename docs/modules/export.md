@@ -39,7 +39,7 @@ A batch file is named by its **origin store** — the `project_uuid` stamped at
 therefore never produce the same filename, which is what makes merging two
 ledgers a set union of files rather than a three-way merge of one file.
 
-`project_uuid` and `display_prefix` are **identity**: nothing in the store ever
+`project_uuid`, `project_key` and `display_prefix` are **identity**: nothing in the store ever
 mutates them, so there is no change for an event log to record. They belong to
 the envelope, carried in the batch header and in the filename. `schema_version`
 and the default-tag set are **state** — they do change — and are carried in the
@@ -53,8 +53,8 @@ Every batch begins with one header record, so a batch is interpretable on its
 own with no index, catalog or sibling file:
 
 ```text
-{"record":"header","format":"quipu-export","format_version":1,
- "schema_version":"5","project_uuid":"...","display_prefix":"QP",
+{"record":"header","format":"quipu-export","format_version":2,
+ "schema_version":"5","project_uuid":"...","project_key":"...","display_prefix":"QP",
  "default_tags":[...],"task_origins":[...],"first_event_id":1,
  "last_event_id":128,"event_count":128,"exported_at":"..."}
 ```
@@ -65,6 +65,16 @@ store minted them. The events in the batch carry rowids as they are *here*, so a
 peer needs this to recognise a ticket it already knows under a different number
 — without it, one ticket merges as two. Its absence is unambiguous rather than
 unknown: a store that never imported created every task it holds.
+
+`project_uuid` names the store that wrote the batch; `project_key` names the
+project that store belongs to, and every machine of one project writes the same
+one. A reader with only the first cannot tell a peer of its own project from an
+unrelated project sharing the ledger — which is why adding the second moved
+`format_version` to `2` rather than sliding in as a field older readers would
+ignore. A `qp` that predates the key refuses a version-2 batch outright, and
+upgrading every machine on a shared ledger is the price of the ledger being
+shared. Batches at version 1 stay readable forever, and mean the store that
+wrote them standing alone — see `docs/modules/project.md`.
 
 `format_version` versions this file layout; `schema_version` versions the store
 that produced it. Both are present because they can move independently, and a

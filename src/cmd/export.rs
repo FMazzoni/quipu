@@ -15,7 +15,16 @@ use std::path::{Path, PathBuf};
 /// Bump only when a reader written against the previous number would
 /// misinterpret a batch. Every batch header carries it.
 pub const FORMAT: &str = "quipu-export";
-pub const FORMAT_VERSION: u32 = 1;
+
+/// `2` adds `project_key`: the identity a set of stores share.
+///
+/// A reader stuck on `1` sees no key at all and cannot tell a peer of its own
+/// project from an unrelated project sharing the ledger — the exact
+/// misinterpretation this number exists to stop, so it is a bump rather than a
+/// silently-ignored new field. The cost is that an older `qp` refuses batches a
+/// newer one wrote; upgrading every machine on a shared ledger is the price of
+/// the ledger being shared.
+pub const FORMAT_VERSION: u32 = 2;
 
 #[derive(Args, Debug)]
 pub struct ExportArgs {
@@ -29,9 +38,10 @@ pub struct ExportArgs {
 
 /// First line of every batch: the envelope.
 ///
-/// Store identity (`project_uuid`, `display_prefix`) lives here rather than in
-/// the log because it is never mutated — it names the store instead of
-/// recording a change to it.
+/// Store identity (`project_uuid`, `display_prefix`) and project identity
+/// (`project_key`) live here rather than in the log because neither is ever
+/// mutated — they name the store and the project it belongs to instead of
+/// recording a change to either.
 #[derive(Serialize)]
 struct Header {
     record: &'static str,
@@ -39,6 +49,9 @@ struct Header {
     format_version: u32,
     schema_version: String,
     project_uuid: String,
+    /// The project these events belong to. Shared by every machine of it, and
+    /// different from `project_uuid`, which names only the store that wrote it.
+    project_key: String,
     display_prefix: String,
     default_tags: Vec<String>,
     /// Local rowid -> canonical name, for every task this store did not mint.
@@ -95,6 +108,7 @@ struct OriginRecord {
 #[derive(Serialize)]
 pub struct ExportOutcome {
     pub project_uuid: String,
+    pub project_key: String,
     pub dir: String,
     pub file: Option<String>,
     pub first_event_id: Option<i64>,
@@ -130,6 +144,7 @@ pub fn export(db_path: &Path, out_root: &Path) -> Result<ExportOutcome> {
     let conn = db::open(db_path)?;
     let project_uuid = meta(&conn, "project_uuid")?
         .ok_or_else(|| db::invalid_input("store has no project_uuid; run `qp init` first"))?;
+    let project_key = crate::project::require(&conn)?;
     let schema_version = meta(&conn, "schema_version")?.unwrap_or_default();
     let display_prefix = db::display_prefix(&conn)?;
     let default_tags = db::default_tags(&conn)?;
@@ -143,6 +158,7 @@ pub fn export(db_path: &Path, out_root: &Path) -> Result<ExportOutcome> {
 
     let mut out = ExportOutcome {
         project_uuid: project_uuid.clone(),
+        project_key: project_key.clone(),
         dir: dir.display().to_string(),
         file: None,
         first_event_id: None,
@@ -163,6 +179,7 @@ pub fn export(db_path: &Path, out_root: &Path) -> Result<ExportOutcome> {
         format_version: FORMAT_VERSION,
         schema_version,
         project_uuid: project_uuid.clone(),
+        project_key: project_key.clone(),
         display_prefix,
         default_tags,
         task_origins: task_origins(&conn)?,

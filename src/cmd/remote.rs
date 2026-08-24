@@ -128,6 +128,11 @@ impl Outcome for RemoteSet {
 
 #[derive(Serialize)]
 struct RemoteShow {
+    /// This store's own id, and the project it belongs to. Shown here because
+    /// this is the command that answers "who am I to the other machines" — and
+    /// two stores of one project differ in the first and agree in the second.
+    project_uuid: String,
+    project_key: String,
     authority: Option<String>,
     ledger: Option<String>,
     /// True when neither url is set. The default state, and a supported one.
@@ -137,16 +142,21 @@ struct RemoteShow {
 }
 impl Outcome for RemoteShow {
     fn human(&self) -> String {
-        if self.local_only {
-            return "local-only — no authority, no ledger".to_string();
-        }
         let mut out = vec![
+            format!("project:   {}", self.project_key),
+            format!("store:     {}", self.project_uuid),
+        ];
+        if self.local_only {
+            out.push("local-only — no authority, no ledger".to_string());
+            return out.join("\n");
+        }
+        out.extend([
             format!(
                 "authority: {}",
                 self.authority.as_deref().unwrap_or("(unset)")
             ),
             format!("ledger:    {}", self.ledger.as_deref().unwrap_or("(unset)")),
-        ];
+        ]);
         out.extend(self.checked.lines());
         out.join("\n")
     }
@@ -218,6 +228,8 @@ pub fn run(db_path: &std::path::Path, a: RemoteArgs) -> Result<()> {
             emit(
                 json,
                 &RemoteShow {
+                    project_uuid: crate::claimref::project_uuid(&conn)?,
+                    project_key: crate::project::require(&conn)?,
                     local_only: now.local_only(),
                     authority: now.authority,
                     ledger: now.ledger,

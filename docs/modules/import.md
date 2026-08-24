@@ -15,14 +15,20 @@ skipped.
 ## Two modes, and why neither is inferred
 
 **`--restore`** rebuilds an *empty* store as the one the ledger came from. It
-adopts the envelope — `project_uuid`, `display_prefix`, `schema_version`, the
-default-tag set and the origin map — so the result **is** the original store
+adopts the envelope — `project_uuid`, `project_key`, `display_prefix`,
+`schema_version`, the default-tag set and the origin map — so the result **is** the original store
 rather than a new store holding the same tickets. The events go back into
 `event` under their original ids, so the next `qp export` resumes exactly where
 the lost one stopped. It refuses to run when any projection table holds a row.
 
 **`--merge`** folds other stores' batches into a populated store. This is the
 receiving side of sync.
+
+A batch written before project identity existed carries no `project_key`. It is
+restored under the key its own store is understood to have rather than under a
+freshly minted one, because minting would quietly rename the project that every
+batch that store already published belongs to. `project::effective_key` is the
+single place that decision is made.
 
 The mode is never guessed from whether the store looks empty. The two do
 opposite things to identity — one overwrites it, one preserves it — and a store

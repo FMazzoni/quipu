@@ -8,13 +8,12 @@ mod db;
 mod id;
 mod merge;
 mod outcome;
+mod project;
 mod remote;
 mod store;
 mod time;
 
 use clap::{Parser, Subcommand};
-use outcome::Outcome;
-use serde::Serialize;
 
 /// Top-level parse target: the global `--db` override plus the chosen subcommand.
 ///
@@ -41,24 +40,14 @@ struct Cli {
 /// `cmd::<name>::run`.
 ///
 /// The `///` line on each variant is clap's help text, not internal
-/// documentation: editing one changes what `qp --help` prints. `Init` is the
-/// only variant that carries its arguments inline rather than in a
-/// `cmd::<name>::*Args` struct, because it is the only command that runs
-/// before a store exists and so has no `cmd` module to own them.
+/// documentation: editing one changes what `qp --help` prints. Every variant
+/// delegates its arguments to a `cmd::<name>::*Args` struct, `Init` included:
+/// it runs before a store exists, but the decision it makes — start a project
+/// or join one — is large enough to own a module rather than sit inline here.
 #[derive(Subcommand)]
 enum Cmd {
     /// Initialize a store in the current directory
-    Init {
-        /// Display-id prefix (2–5 uppercase letters). Configurable at first init only. Default: QP.
-        #[arg(long)]
-        prefix: Option<String>,
-        /// Tag auto-applied to every `qp add` in this store. Repeatable; additive across re-inits.
-        #[arg(long = "default-tag", value_name = "NAME")]
-        default_tag: Vec<String>,
-        /// Emit JSON instead of human-readable text.
-        #[arg(long)]
-        json: bool,
-    },
+    Init(cmd::init::InitArgs),
     /// Add a new task
     Add(cmd::add::AddArgs),
     /// Assign a ready task to an agent (orchestrator only)
@@ -119,26 +108,6 @@ enum Cmd {
     Show(cmd::show::ShowArgs),
 }
 
-/// Success output for `qp init`.
-///
-/// The one command whose `Outcome` lives here rather than in a `cmd` module.
-///
-/// `prefix` is read back out of the store after `db::init` rather than echoing
-/// `--prefix`, because re-initializing an existing store keeps the original
-/// prefix and ignores the flag — echoing the argument would report a rename
-/// that did not happen.
-#[derive(Serialize)]
-struct InitOutcome {
-    db_path: String,
-    prefix: String,
-    schema_version: String,
-}
-impl Outcome for InitOutcome {
-    fn human(&self) -> String {
-        format!("initialized at {}", self.db_path)
-    }
-}
-
 /// Whether `--json` was passed for this invocation.
 ///
 /// `real_main()` returns `anyhow::Result<()>`, so by the time an error
@@ -162,7 +131,7 @@ impl Outcome for InitOutcome {
 /// its `--json` story is decided.
 fn wants_json(cmd: &Cmd) -> bool {
     match cmd {
-        Cmd::Init { json, .. } => *json,
+        Cmd::Init(a) => a.json,
         Cmd::Add(a) => a.json,
         Cmd::Assign(a) => a.json,
         Cmd::Claim(a) => a.json,
@@ -324,20 +293,7 @@ fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
     // error envelope on the following line unparseable. See QP-120.
     db::warn_on_project_mismatch(&cli.db, json)?;
     match cli.cmd {
-        Cmd::Init {
-            prefix,
-            default_tag,
-            json,
-        } => {
-            let conn = db::init(&db_path, prefix.as_deref(), &default_tag)?;
-            let prefix = db::display_prefix(&conn)?;
-            let outcome = InitOutcome {
-                db_path: db_path.display().to_string(),
-                prefix,
-                schema_version: db::SCHEMA_VERSION.to_string(),
-            };
-            outcome::emit(json, &outcome)
-        }
+        Cmd::Init(a) => cmd::init::run(&db_path, a),
         Cmd::Add(a) => cmd::add::run(&db_path, a),
         Cmd::Assign(a) => cmd::assign::run(&db_path, a),
         Cmd::Claim(a) => cmd::claim::run(&db_path, a),

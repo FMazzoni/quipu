@@ -334,7 +334,14 @@ decision to whatever directory happens to sit above it, which is a silent
 wrong-project write rather than an error. Bounding it also preserves a
 deliberately nested store, which reordering the tiers alone would not.
 
-Each store stamps a `project_uuid` at `qp init`. Passing `--db`/`QP_DB`
+Each store stamps two identities at `qp init`: a `project_uuid` naming the store
+itself, and a `project_key` naming the project it belongs to. A machine that
+*joins* an existing project mints the first and inherits the second, which is
+what makes "a peer of my project" distinguishable from "an unrelated project
+sharing a ledger" — see [`project.rs`](https://github.com/FMazzoni/quipu/blob/main/src/project.rs)
+and [`cmd/init.rs`](https://github.com/FMazzoni/quipu/blob/main/src/cmd/init.rs).
+
+Passing `--db`/`QP_DB`
 explicitly while a bare `qp` would have resolved to a *different* store emits a
 mismatch warning — the guard against filing into the wrong project. Because that
 only fires under an explicit path, its audience is automation, which is why under
