@@ -50,7 +50,11 @@ pub struct SyncOutcome {
     /// Whether this run wrote to the remote. False on a second sync with nothing new.
     pushed: bool,
     export: export::ExportOutcome,
-    /// Batch files that arrived from other stores on this run, `<uuid>/<file>`.
+    /// Batch files that arrived from this project's other stores, `<uuid>/<file>`.
+    ///
+    /// Batches belonging to other projects on the same ledger are fetched into
+    /// the clone as well — everyone holds the whole repository — but they are
+    /// not this store's to replay and are not counted here.
     fetched: Vec<String>,
     /// Absent when nothing new arrived — the merge is skipped rather than replayed for nothing.
     import: Option<import::ImportOutcome>,
@@ -105,6 +109,7 @@ pub fn run(db_path: &Path, a: SyncArgs) -> Result<()> {
         .optional()?;
     let uuid =
         uuid.ok_or_else(|| db::invalid_input("store has no project_uuid; run `qp init` first"))?;
+    let key = crate::project::require(&conn)?;
     drop(conn);
     remote::validate_url(&url)?;
 
@@ -116,7 +121,7 @@ pub fn run(db_path: &Path, a: SyncArgs) -> Result<()> {
     // immutable files this store already wrote.
     commit_pending(&dir)?;
 
-    let before = peer_batches(&dir, &uuid)?;
+    let before = peer_batches(&dir, &uuid, &key)?;
     fetch(db_path, &dir, &url)?;
     integrate(&dir)?;
 
@@ -126,7 +131,7 @@ pub fn run(db_path: &Path, a: SyncArgs) -> Result<()> {
 
     // After the push, not before: a lost race re-fetches, and the batches that
     // arrived on the retry are as new to this store as the first fetch's were.
-    let after = peer_batches(&dir, &uuid)?;
+    let after = peer_batches(&dir, &uuid, &key)?;
     let fetched: Vec<String> = after.difference(&before).cloned().collect();
 
     let imported = if fetched.is_empty() {
@@ -418,12 +423,18 @@ fn adopt_head(url: &str) {
     let _ = git_ok(c);
 }
 
-/// Every batch file in the clone that some other store wrote, as `<uuid>/<file>`.
+/// Every batch in the clone that another store of THIS project wrote, as `<uuid>/<file>`.
 ///
 /// Our own batches are excluded because they are already in this store's log;
 /// re-importing them is work with no effect. The difference between two of
 /// these sets across a fetch is exactly the set of events worth replaying.
-fn peer_batches(dir: &Path, own_uuid: &str) -> Result<BTreeSet<String>> {
+///
+/// Other projects' batches are excluded too, and that is the point of the key
+/// argument: one ledger holds many projects, every store fetches all of it, and
+/// only this project's half is ours to replay. Without the filter the arrival of
+/// an unrelated project's batch would read as "something new for me" and send
+/// sync into a merge that has nothing to merge.
+fn peer_batches(dir: &Path, own_uuid: &str, own_key: &str) -> Result<BTreeSet<String>> {
     let mut out = BTreeSet::new();
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -438,9 +449,13 @@ fn peer_batches(dir: &Path, own_uuid: &str) -> Result<BTreeSet<String>> {
         for f in std::fs::read_dir(entry.path())? {
             let f = f?;
             let fname = f.file_name().to_string_lossy().to_string();
-            if fname.ends_with(".jsonl") {
-                out.insert(format!("{name}/{fname}"));
+            if !fname.ends_with(".jsonl") {
+                continue;
             }
+            if crate::project::batch_key(&f.path()).as_deref() != Some(own_key) {
+                continue;
+            }
+            out.insert(format!("{name}/{fname}"));
         }
     }
     Ok(out)
@@ -456,18 +471,70 @@ mod tests {
         assert_eq!(dir, Path::new("/somewhere/.quipu/ledger"));
     }
 
+    /// A header line as a batch's first line, enough for `project::batch_key`.
+    fn header(uuid: &str, key: &str) -> String {
+        format!(
+            r#"{{"record":"header","format":"{}","project_uuid":"{uuid}","project_key":"{key}"}}"#,
+            crate::cmd::export::FORMAT
+        )
+    }
+
     #[test]
     fn peer_batches_ignores_our_own_and_the_git_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         for d in ["mine", "theirs", ".git"] {
             std::fs::create_dir(root.join(d)).unwrap();
-            std::fs::write(root.join(d).join("a.jsonl"), "").unwrap();
+            std::fs::write(root.join(d).join("a.jsonl"), header(d, "ours")).unwrap();
         }
-        let seen = peer_batches(root, "mine").unwrap();
+        let seen = peer_batches(root, "mine", "ours").unwrap();
         assert_eq!(
             seen.into_iter().collect::<Vec<_>>(),
             vec!["theirs/a.jsonl".to_string()]
+        );
+    }
+
+    #[test]
+    fn peer_batches_ignores_another_project_on_the_same_ledger() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join("peer")).unwrap();
+        std::fs::write(root.join("peer").join("a.jsonl"), header("peer", "ours")).unwrap();
+        std::fs::create_dir(root.join("stranger")).unwrap();
+        std::fs::write(
+            root.join("stranger").join("a.jsonl"),
+            header("stranger", "theirs"),
+        )
+        .unwrap();
+
+        let seen = peer_batches(root, "mine", "ours").unwrap();
+        assert_eq!(
+            seen.into_iter().collect::<Vec<_>>(),
+            vec!["peer/a.jsonl".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_keyless_batch_belongs_to_the_store_that_wrote_it_and_no_one_else() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join("old")).unwrap();
+        std::fs::write(
+            root.join("old").join("a.jsonl"),
+            format!(
+                r#"{{"record":"header","format":"{}","project_uuid":"old"}}"#,
+                crate::cmd::export::FORMAT
+            ),
+        )
+        .unwrap();
+
+        assert!(peer_batches(root, "mine", "ours").unwrap().is_empty());
+        assert_eq!(
+            peer_batches(root, "mine", &crate::project::legacy_key("old"))
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec!["old/a.jsonl".to_string()]
         );
     }
 }

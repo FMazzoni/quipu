@@ -68,11 +68,27 @@ struct Machine {
 }
 
 impl Machine {
+    /// A machine that STARTS a project: its own uuid and its own fresh key.
     fn new(root: &Path, name: &str, ledger: &Path) -> Self {
+        Self::init(root, name, ledger, &["init"])
+    }
+
+    /// A machine that JOINS the project `key` — a second machine of one project.
+    ///
+    /// Still its own `qp init`, never a copy: a copied store would share the
+    /// original's uuid, mint the same display ids and write to the same batch
+    /// paths, so it could not observe anything a real second machine can. What
+    /// it does not do is mint a second project, which is what plain `qp init`
+    /// does and what makes two stores strangers that merely share a ledger.
+    fn joining(root: &Path, name: &str, ledger: &Path, key: &str) -> Self {
+        Self::init(root, name, ledger, &["init", "--project-key", key])
+    }
+
+    fn init(root: &Path, name: &str, ledger: &Path, args: &[&str]) -> Self {
         let dir = root.join(name);
         std::fs::create_dir_all(&dir).unwrap();
         let db = dir.join("db.sqlite");
-        ok(&db, &["init"]);
+        ok(&db, args);
         ok(
             &db,
             &["remote", "set", "--ledger", ledger.to_str().unwrap()],
@@ -80,14 +96,18 @@ impl Machine {
         Self { db }
     }
 
-    fn uuid(&self) -> String {
+    fn meta(&self, key: &str) -> String {
         let conn = rusqlite::Connection::open(&self.db).unwrap();
-        conn.query_row(
-            "SELECT value FROM meta WHERE key = 'project_uuid'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap()
+        conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .unwrap_or_else(|e| panic!("meta `{key}`: {e}"))
+    }
+
+    fn uuid(&self) -> String {
+        self.meta("project_uuid")
+    }
+
+    fn key(&self) -> String {
+        self.meta("project_key")
     }
 
     fn sync(&self) -> Value {
@@ -172,11 +192,12 @@ fn two_machines_exchange_their_tickets_through_the_ledger() {
     let tmp = tempfile::tempdir().unwrap();
     let remote = bare_repo(tmp.path(), "ledger");
     let a = Machine::new(tmp.path(), "a", &remote);
-    let b = Machine::new(tmp.path(), "b", &remote);
+    let b = Machine::joining(tmp.path(), "b", &remote, &a.key());
 
     // Genuinely distinct peers, which is what makes the rest of this test mean
     // anything. A copied store would fail here.
     assert_ne!(a.uuid(), b.uuid(), "two `qp init`s must mint two uuids");
+    assert_eq!(a.key(), b.key(), "these two are meant to be one project");
 
     ok(&a.db, &["add", "written on machine a"]);
     ok(&a.db, &["add", "also on machine a"]);
@@ -204,7 +225,7 @@ fn a_second_sync_with_nothing_new_changes_nothing() {
     let tmp = tempfile::tempdir().unwrap();
     let remote = bare_repo(tmp.path(), "ledger");
     let a = Machine::new(tmp.path(), "a", &remote);
-    let b = Machine::new(tmp.path(), "b", &remote);
+    let b = Machine::joining(tmp.path(), "b", &remote, &a.key());
 
     ok(&a.db, &["add", "from a"]);
     ok(&b.db, &["add", "from b"]);
@@ -237,7 +258,7 @@ fn sync_never_puts_a_claim_ref_on_the_ledger_remote() {
     let tmp = tempfile::tempdir().unwrap();
     let remote = bare_repo(tmp.path(), "ledger");
     let a = Machine::new(tmp.path(), "a", &remote);
-    let b = Machine::new(tmp.path(), "b", &remote);
+    let b = Machine::joining(tmp.path(), "b", &remote, &a.key());
 
     ok(&a.db, &["add", "claimed work"]);
     ok(&a.db, &["assign", "QP-1", "--to", "agent-one"]);
@@ -294,7 +315,7 @@ fn sync_never_rewrites_a_batch_another_store_wrote() {
     let tmp = tempfile::tempdir().unwrap();
     let remote = bare_repo(tmp.path(), "ledger");
     let a = Machine::new(tmp.path(), "a", &remote);
-    let b = Machine::new(tmp.path(), "b", &remote);
+    let b = Machine::joining(tmp.path(), "b", &remote, &a.key());
 
     ok(&a.db, &["add", "a first"]);
     ok(&b.db, &["add", "b first"]);
@@ -430,5 +451,127 @@ fn a_sync_leaves_nothing_for_the_project_repo_to_commit() {
         git(&project, &["status", "--porcelain"]),
         "",
         "a sync left something the project repo would commit"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// one ledger, several projects
+// ---------------------------------------------------------------------------
+
+/// Three stores on one ledger: two machines of one project, and a stranger.
+///
+/// Both halves of the property in one fixture on purpose. Scoping alone is
+/// satisfied by a filter that merges nothing, and convergence alone is satisfied
+/// by the absorbing merge this scoping exists to stop; only a fixture that
+/// demands both at once can tell a correct filter from either mistake.
+#[test]
+fn one_ledger_holds_several_projects_without_mixing_them() {
+    let tmp = tempfile::tempdir().unwrap();
+    let remote = bare_repo(tmp.path(), "ledger");
+    let a1 = Machine::new(tmp.path(), "a1", &remote);
+    let a2 = Machine::joining(tmp.path(), "a2", &remote, &a1.key());
+    let b = Machine::new(tmp.path(), "b", &remote);
+
+    assert_eq!(a1.key(), a2.key(), "a1 and a2 are one project");
+    assert_ne!(a1.key(), b.key(), "b is a different project");
+    assert_ne!(a1.uuid(), a2.uuid(), "peers are separate stores");
+
+    ok(&a1.db, &["add", "first machine of the first project"]);
+    ok(&a2.db, &["add", "second machine of the first project"]);
+    ok(&b.db, &["add", "the other project entirely"]);
+
+    // Two rounds each, so everyone has both published and fetched.
+    for _ in 0..2 {
+        a1.sync();
+        a2.sync();
+        b.sync();
+    }
+    a1.sync();
+
+    let project_a = vec![
+        "first machine of the first project".to_string(),
+        "second machine of the first project".to_string(),
+    ];
+    assert_eq!(a1.titles(), project_a, "a1 did not converge with its peer");
+    assert_eq!(a2.titles(), project_a, "a2 did not converge with its peer");
+    assert_eq!(
+        b.titles(),
+        vec!["the other project entirely".to_string()],
+        "b absorbed another project's tickets"
+    );
+
+    // The other project's batches ARE in everyone's clone. Scoping the import is
+    // the fix; scoping the fetch is not, and a ledger anyone can clone whole is
+    // what a global read across projects depends on.
+    let files = ledger_files(&a1.ledger_dir());
+    assert!(
+        files.keys().any(|k| k.starts_with(&b.uuid())),
+        "the stranger's batches were never fetched, so this proves the wrong thing"
+    );
+
+    // The merge itself, aimed straight at the whole ledger the way sync aims
+    // it. Asserted separately because sync also declines to call it when
+    // nothing of ours arrived: with only that check in place, an unscoped merge
+    // would still absorb the ledger the moment anything else invoked one.
+    let out = ok(
+        &a1.db,
+        &[
+            "import",
+            "--from",
+            a1.ledger_dir().to_str().unwrap(),
+            "--merge",
+            "--json",
+        ],
+    );
+    let out: Value = serde_json::from_str(&out).unwrap();
+    assert!(
+        out["foreign_batches"].as_u64().unwrap() > 0,
+        "the merge saw no other project at all, so this proves the wrong thing"
+    );
+    assert_eq!(
+        a1.titles(),
+        project_a,
+        "a merge pointed at the ledger root absorbed another project"
+    );
+}
+
+/// The stranger's arrival must not read as "something new for me".
+#[test]
+fn another_projects_batches_are_not_something_this_store_has_to_merge() {
+    let tmp = tempfile::tempdir().unwrap();
+    let remote = bare_repo(tmp.path(), "ledger");
+    let a = Machine::new(tmp.path(), "a", &remote);
+    let b = Machine::new(tmp.path(), "b", &remote);
+
+    ok(&a.db, &["add", "mine"]);
+    a.sync();
+    ok(&b.db, &["add", "theirs"]);
+    b.sync();
+
+    let before = a.snapshot();
+    let out = a.sync();
+    assert_eq!(
+        out["fetched"],
+        Value::Array(vec![]),
+        "another project's batch counted as a peer batch"
+    );
+    assert_eq!(
+        out["import"],
+        Value::Null,
+        "a merge ran with nothing to merge"
+    );
+    assert_eq!(
+        a.snapshot(),
+        before,
+        "a stranger's push disturbed this store"
+    );
+
+    // And it really did arrive in the clone — otherwise the assertions above
+    // would hold for a store that simply fetched nothing.
+    assert!(
+        ledger_files(&a.ledger_dir())
+            .keys()
+            .any(|k| k.starts_with(&b.uuid())),
+        "b's batch never reached a's clone"
     );
 }

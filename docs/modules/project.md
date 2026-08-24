@@ -36,9 +36,10 @@ you which era it came from.
 Every batch written before format version 2 has no `project_key` field. Such a
 batch is **not** "unknown project", and must never be treated as matching
 whoever is asking — that would restore the absorb-everything behaviour under a
-new name. It is the store that wrote it, standing alone, under the legacy key
-above. `effective_key` is the single place that decision is made; readers call
-it rather than looking at the raw field.
+new name, for every ledger written before the key existed. It is the store that
+wrote it, standing alone, under the legacy key above. `effective_key` is the
+single place that decision is made; readers call it rather than looking at the
+raw field, and `batch_key` is that reading applied to one file on disk.
 
 The reverse direction is a hard break, on purpose: format version 2 batches are
 refused by a `qp` old enough to predate the key, because such a reader would

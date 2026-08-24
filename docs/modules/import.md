@@ -22,7 +22,14 @@ rather than a new store holding the same tickets. The events go back into
 the lost one stopped. It refuses to run when any projection table holds a row.
 
 **`--merge`** folds other stores' batches into a populated store. This is the
-receiving side of sync.
+receiving side of sync. It reads only the batches belonging to **this store's
+project**: one ledger holds many projects, and a merge that read every directory
+it found would fold every other project's tickets into this store — which is
+what happened before project identity existed, and what scoping the merge fixes.
+The store's own key is the scope, read from `project::require`; a restore is
+unscoped, because the store it rebuilds into is empty and the ledger is what
+tells it which project it is. Batches left alone are counted in
+`foreign_batches`, and a non-zero count is the healthy shape of a shared ledger.
 
 A batch written before project identity existed carries no `project_key`. It is
 restored under the key its own store is understood to have rather than under a

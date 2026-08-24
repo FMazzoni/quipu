@@ -108,6 +108,28 @@ deliberately not a second fetch path — the refspec is what keeps
 `refs/quipu/claims/*` out of reach, and one copy of it is the only number of
 copies that can be right.
 
+## One ledger, several projects
+
+A ledger repository is shared on purpose: many projects' batches sit side by
+side in it, and every store fetches all of them. What is scoped is the **import**.
+Step 5 merges only the batches whose project key matches this store's; the rest
+are left in the clone, fetched and untouched.
+
+Scoping the fetch instead — a partial clone, a sparse checkout, a branch per
+project — was rejected. Bandwidth was never the problem; a ledger holding every
+project on a machine is a fraction of a megabyte. Keeping the repository plain
+and whole is what lets anyone clone it, and what a read across every project on
+it depends on.
+
+Sync also stops counting another project's batches as "something arrived": the
+diff that decides whether a merge runs at all is taken over this project's peer
+batches only. Otherwise an unrelated project's push would read as news and send
+this store into a merge with nothing to merge.
+
+The comparison is against `project::effective_key`, never the raw header field,
+so a batch written before the key existed matches only the store it belongs to
+rather than whoever happens to ask. See `docs/modules/project.md`.
+
 ## What sync must never touch
 
 `refs/quipu/claims/*`. Claims are the authority's business and move only

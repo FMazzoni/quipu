@@ -357,6 +357,15 @@ nothing to reconcile. If a peer pushes in between, the push is rejected and
 **It is idempotent.** A second sync with nothing new pushes nothing, fetches
 nothing, and skips the merge entirely.
 
+**It syncs one project, from a ledger that may hold several.** Sharing a ledger
+repository between projects is fine and intended — everyone fetches the whole
+thing, because that is what keeps it a plain git repo anyone can clone and read
+across. Only the merge is scoped: a sync folds in the batches carrying this
+store's project key and leaves every other project's where they are. Batches
+written before project keys existed are matched as the store that wrote them,
+never as a wildcard, so an old ledger still reaches its own machines and nobody
+else's.
+
 **It never touches `refs/quipu/claims/*`.** Claims are the authority's business
 and travel by the claim path. That is why the authority and the ledger are two
 separate urls: `sync` is given the ledger one and denied the other. Mirroring
