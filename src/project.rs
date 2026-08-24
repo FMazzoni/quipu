@@ -211,6 +211,43 @@ pub fn scan(root: &Path) -> Result<Vec<LedgerProject>> {
     Ok(best.into_values().map(|(_, p)| p).collect())
 }
 
+/// Every batch file under `root`, grouped by the project its header declares.
+///
+/// The grouping is per FILE, never per directory: a store that predates project
+/// identity and has since been stamped has both keyless and keyed batches in
+/// one directory, and those belong to two different projects — [`legacy_key`]
+/// and the minted one. Grouping by directory would silently file the older half
+/// under the newer project.
+///
+/// Shares [`collect`] and [`first_line`] with [`scan`] so there is one notion of
+/// what a batch file is and one place that reads a header to decide its project.
+pub fn batches_by_project(root: &Path) -> Result<BTreeMap<String, Vec<PathBuf>>> {
+    let mut files = Vec::new();
+    collect(root, true, &mut files)?;
+    files.sort();
+
+    let mut out: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+    for path in files {
+        let Some(raw) = first_line(&path) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        if v.get("record").and_then(Value::as_str) != Some("header")
+            || v.get("format").and_then(Value::as_str) != Some(crate::cmd::export::FORMAT)
+        {
+            continue;
+        }
+        let Some(uuid) = v.get("project_uuid").and_then(Value::as_str) else {
+            continue;
+        };
+        let key = effective_key(v.get("project_key").and_then(Value::as_str), uuid);
+        out.entry(key).or_default().push(path);
+    }
+    Ok(out)
+}
+
 /// Gathers `*.jsonl` paths from `dir`, descending one level when `deep`.
 fn collect(dir: &Path, deep: bool, out: &mut Vec<PathBuf>) -> Result<()> {
     let entries =

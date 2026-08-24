@@ -17,6 +17,7 @@ pub mod export;
 pub mod import;
 pub mod init;
 pub mod install_skills;
+pub mod ledger;
 pub mod list;
 pub mod log;
 pub mod reclaim;
