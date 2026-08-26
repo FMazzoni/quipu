@@ -678,10 +678,28 @@ fn bare_repo(root: &Path, name: &str) -> String {
 
 /// A fresh store in its own directory, attached to `authority`.
 fn store(root: &Path, name: &str, authority: &str) -> PathBuf {
+    store_of(root, name, authority, None)
+}
+
+/// The project the peers below are two machines of.
+///
+/// A merge is scoped to a project, so two plain `qp init`s would be two
+/// projects sharing a directory and `peers` would hand back stores that never
+/// exchanged the ticket they are supposed to contend over. Naming the project
+/// is what keeps them peers; they are still separate `qp init` calls, and their
+/// `project_uuid`s still differ, which is what the assertion in `peers` checks.
+const PROJECT: &str = "one-project-under-test";
+
+fn store_of(root: &Path, name: &str, authority: &str, key: Option<&str>) -> PathBuf {
     let dir = root.join(name);
     std::fs::create_dir_all(&dir).unwrap();
     let db = dir.join("db.sqlite");
-    qp(&db).arg("init").assert().success();
+    let mut init = qp(&db);
+    init.arg("init");
+    if let Some(key) = key {
+        init.args(["--project-key", key]);
+    }
+    init.assert().success();
     qp(&db)
         .args(["remote", "set", "--authority", authority])
         .assert()
@@ -724,8 +742,8 @@ fn replica(src: &Path, root: &Path, name: &str, authority: &str, agent: &str) ->
 /// its own first, so the shared ticket lands on `QP-3` there against `QP-1` in
 /// `A` — which is the normal case, and the one a display-id-keyed ref breaks on.
 fn peers(root: &Path, authority: &str) -> (PathBuf, PathBuf) {
-    let a = store(root, "a", authority);
-    let b = store(root, "b", authority);
+    let a = store_of(root, "a", authority, Some(PROJECT));
+    let b = store_of(root, "b", authority, Some(PROJECT));
     qp(&a).args(["add", "shared work item"]).assert().success();
     qp(&b).args(["add", "local noise"]).assert().success();
     qp(&b).args(["add", "more noise"]).assert().success();

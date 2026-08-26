@@ -373,6 +373,65 @@ fn a_keyless_ledger_can_still_be_joined_and_named() {
     assert_ne!(out["project_uuid"], uuid, "joining still mints a new store");
 }
 
+/// A keyless ledger is one project's, not everyone's.
+///
+/// The half that matters for a shared ledger: a batch with no key must merge
+/// into the store whose own key is the one that batch is understood to carry,
+/// and into nothing else. Treating keyless as a wildcard would reintroduce the
+/// absorption bug for every ledger written before the key existed — which is to
+/// say, for every ledger that already exists.
+#[test]
+fn a_keyless_ledger_merges_into_its_own_project_and_no_one_elses() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (a, _remote) = published_project(tmp.path());
+    let uuid = a.uuid();
+    strip_keys(&a.ledger_clone());
+    let ledger = a.ledger_clone();
+
+    // The store that wrote it, as a joiner sees it: the join derives
+    // `legacy-<uuid>` and folds the pre-join history in under that key.
+    let b_db = tmp.path().join("b").join("db.sqlite");
+    std::fs::create_dir_all(b_db.parent().unwrap()).unwrap();
+    let out = json(
+        &b_db,
+        &["init", "--from", ledger.to_str().unwrap(), "--json"],
+    );
+    assert_eq!(out["project_key"], format!("legacy-{uuid}"));
+    assert_eq!(
+        Machine { db: b_db }.titles(),
+        a.titles(),
+        "a machine that joined the keyless project was left without its history"
+    );
+
+    // An unrelated project reading the same directory gets nothing from it.
+    let s_db = tmp.path().join("s").join("db.sqlite");
+    std::fs::create_dir_all(s_db.parent().unwrap()).unwrap();
+    ok(&s_db, &["init", "--new-project"]);
+    ok(&s_db, &["add", "the stranger's own ticket"]);
+    let merged = json(
+        &s_db,
+        &[
+            "import",
+            "--from",
+            ledger.to_str().unwrap(),
+            "--merge",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        merged["events_new"], 0,
+        "a keyless batch was treated as matching whoever asked"
+    );
+    assert!(
+        merged["foreign_batches"].as_u64().unwrap() > 0,
+        "the batches were never even seen, so this proves the wrong thing"
+    );
+    assert_eq!(
+        Machine { db: s_db }.titles(),
+        vec!["the stranger's own ticket".to_string()]
+    );
+}
+
 #[test]
 fn a_store_that_predates_the_key_is_healed_rather_than_bricked() {
     let tmp = tempfile::tempdir().unwrap();

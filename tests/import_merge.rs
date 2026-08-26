@@ -166,8 +166,29 @@ fn canonical_dump(db: &Path) -> String {
     lines.join("\n")
 }
 
+/// The project every store in this file is a machine of.
+///
+/// A merge folds a PEER's batches in, and since project identity landed a peer
+/// is a store carrying the same project key — not merely one that was handed
+/// the same directory. Two plain `qp init`s are two projects, and a scoped
+/// merge declines to fold one into the other, which would leave every fixture
+/// here quietly merging nothing while still passing. Stores that are strangers
+/// on purpose are exercised in `tests/sync.rs`.
+const PROJECT: &str = "one-project-under-test";
+
 fn init(db: &Path, prefix: &str) {
-    ok(db, &["init", "--prefix", prefix]);
+    ok(db, &["init", "--prefix", prefix, "--project-key", PROJECT]);
+}
+
+/// A store joining the project `of` already belongs to, keeping its own prefix.
+fn init_peer_of(db: &Path, prefix: &str, of: &Path) {
+    let key: String = Connection::open(of)
+        .unwrap()
+        .query_row("SELECT value FROM meta WHERE key='project_key'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    ok(db, &["init", "--prefix", prefix, "--project-key", &key]);
 }
 
 fn export(db: &Path, ledger: &Path) {
@@ -569,7 +590,7 @@ fn merging_a_whole_store_into_an_empty_peer_reproduces_its_projection() {
 
     // Same prefix, so `display_id` compares too: the peer has minted nothing of
     // its own, so every foreign task lands on the rowid it already had.
-    init(&dst, common::PREFIX);
+    init_peer_of(&dst, common::PREFIX, &src);
     merge(&dst, &dir_of(&ledger, &src));
 
     let report = diff_projections(&src, &dst);

@@ -110,6 +110,8 @@ struct LedgerEvent {
 /// Everything a `--from` directory holds, deduplicated.
 struct Ledger {
     batches: usize,
+    /// Batches skipped because they belong to another project on this ledger.
+    foreign: usize,
     headers: Vec<Header>,
     events: BTreeMap<(String, i64), LedgerEvent>,
 }
@@ -146,13 +148,30 @@ impl Ledger {
 /// A `--from` pointing at a ledger root and one pointing at a single store's
 /// batch directory both work, because the header names its own store and the
 /// filename is checked against it rather than against the directory.
-fn read_ledger(root: &Path) -> Result<Ledger> {
+///
+/// `scope` is the project key a batch must belong to. One ledger holds many
+/// projects on purpose — they share a git repository and everyone fetches the
+/// whole thing — so a merge that read every directory it found would fold every
+/// other project's tickets into this store. That absorption was measured before
+/// project identity existed. `None` reads everything, which is what a restore
+/// wants: an empty store has no key yet to be scoped by.
+///
+/// The comparison is against `project::effective_key`, never against the raw
+/// header field, so a keyless batch is matched as the store that wrote it
+/// standing alone rather than as a wildcard that matches whoever asks.
+///
+/// Scoping happens before the filename check below, so a batch another project
+/// hand-edited no longer refuses this store's merge. That is deliberate: a file
+/// this store will never read is not this store's to police, and the alternative
+/// is one project being able to wedge every other project's sync.
+fn read_ledger(root: &Path, scope: Option<&str>) -> Result<Ledger> {
     let mut files = Vec::new();
     collect_batches(root, true, &mut files)?;
     files.sort();
 
     let mut ledger = Ledger {
         batches: 0,
+        foreign: 0,
         headers: Vec::new(),
         events: BTreeMap::new(),
     };
@@ -168,6 +187,14 @@ fn read_ledger(root: &Path) -> Result<Ledger> {
             continue;
         }
         let header = parse_header(&raw, &path)?;
+        if let Some(scope) = scope {
+            let key =
+                crate::project::effective_key(header.project_key.as_deref(), &header.project_uuid);
+            if key != scope {
+                ledger.foreign += 1;
+                continue;
+            }
+        }
 
         // The filename is what the exporter's high-water scan trusts, so a
         // batch whose name and header disagree is a renamed or hand-edited
@@ -357,6 +384,10 @@ pub struct ImportOutcome {
     pub mode: &'static str,
     pub from: String,
     pub batches: usize,
+    /// Batches on this ledger that belong to another project and were left
+    /// alone. Non-zero is the normal, healthy shape of a shared ledger.
+    #[serde(default)]
+    pub foreign_batches: usize,
     pub stores: Vec<String>,
     pub events_read: usize,
     pub events_new: usize,
@@ -403,6 +434,12 @@ impl Outcome for ImportOutcome {
                 self.tasks
             ),
         };
+        if self.foreign_batches > 0 {
+            s.push_str(&format!(
+                "\n{} batch(es) belonging to other projects on this ledger were left alone.",
+                self.foreign_batches
+            ));
+        }
         if self.best_effort {
             s.push_str(&format!(
                 "\nWRITTEN DESPITE {} anomal{}, each one reported above. This rebuild is \
@@ -491,13 +528,24 @@ pub fn import(db_path: &Path, a: &ImportArgs) -> Result<ImportOutcome> {
             ))
         }
     };
-    let ledger = read_ledger(&a.from)?;
+    let mut conn = db::open(db_path)?;
+    // A merge writes into a store that already has an identity, so the project
+    // to scope by is never in doubt and is never guessed: it is this store's
+    // own key, read from the one place that answers that question. A restore
+    // reads everything, because the store it is rebuilding into is empty and
+    // has no key yet — the ledger is what tells it which project it is.
+    let scope = match mode {
+        Mode::Merge => Some(crate::project::require(&conn)?),
+        Mode::Restore => None,
+    };
+    let ledger = read_ledger(&a.from, scope.as_deref())?;
     let stores = ledger.uuids();
     if ledger.events.is_empty() {
         return Ok(ImportOutcome {
             mode: mode.as_str(),
             from: a.from.display().to_string(),
             batches: ledger.batches,
+            foreign_batches: ledger.foreign,
             stores,
             events_read: 0,
             events_new: 0,
@@ -516,13 +564,13 @@ pub fn import(db_path: &Path, a: &ImportArgs) -> Result<ImportOutcome> {
         });
     }
 
-    let mut conn = db::open(db_path)?;
     let mut out = db::with_tx(&mut conn, |tx| match mode {
         Mode::Restore => restore(tx, a, &ledger, &stores),
         Mode::Merge => merge(tx, a, &ledger, &stores),
     })?;
     out.from = a.from.display().to_string();
     out.batches = ledger.batches;
+    out.foreign_batches = ledger.foreign;
     out.events_read = ledger.events.len();
 
     for line in &out.anomalies {
@@ -767,6 +815,7 @@ fn restore(
         mode: "restore",
         from: String::new(),
         batches: 0,
+        foreign_batches: 0,
         stores: stores.to_vec(),
         events_read: 0,
         events_new: writable.len(),
@@ -910,6 +959,7 @@ fn merge(
         mode: "merge",
         from: String::new(),
         batches: 0,
+        foreign_batches: 0,
         stores: stores.to_vec(),
         events_read: 0,
         events_new,
