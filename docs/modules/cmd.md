@@ -55,25 +55,29 @@ task is `running`; otherwise the event carries no agent. See
 ## Store-scoped commands
 
 [`remote`](remote/index.html), [`export`](export/index.html),
-[`import`](import/index.html) and [`sync`](sync/index.html) act on the *store*
-rather than on a task. `remote` writes the optional authority and ledger urls
-into `meta`; `export` serialises the event log to disk; `import` replays a
-ledger back; `sync` is the two of them with a wire between. None appears in the
-table below, which is about task state, and none writes an event of its own — a
-store's attachment and its exports are properties of the store, not transitions
-in any task's history.
+[`import`](import/index.html), [`sync`](sync/index.html) and
+[`ledger`](ledger/index.html) act on the *store* rather than on a task. `remote`
+writes the optional authority and ledger urls into `meta`; `export` serialises
+the event log to disk; `import` replays a ledger back; `sync` is the two of them
+with a wire between; `ledger` reads every project the shared ledger holds into a
+throwaway projection and writes nothing at all. None appears in the table below,
+which is about task state, and none writes an event of its own — a store's
+attachment and its exports are properties of the store, not transitions in any
+task's history.
 
-[`sync`](sync/index.html) is the only module here that reaches the network, and
-only when a person runs it. `remote`'s own probe is opt-in behind `--check`, so
-a store that has never run `qp remote set` spawns nothing at all — and no
-command grows a network dependency because `sync` exists.
+[`sync`](sync/index.html) and [`ledger`](ledger/index.html) are the only modules
+here that reach the network, and only when a person runs one; `ledger` fetches
+through `sync::materialise` rather than a path of its own, and never pushes.
+`remote`'s own probe is opt-in behind `--check`, so a store that has never run
+`qp remote set` spawns nothing at all — and no command grows a network
+dependency because these two exist.
 
 ## Mutators and projections
 
 | | modules | risk |
 |---|---|---|
 | **Mutators** | `add`, `assign`, `claim`, `complete`, `abandon`, `reclaim`, `cancel`, `block`, `depends`, `edit`, `tag`, `log`, `relation` | all of it |
-| **Projections** | `list`, `tree`, `show`, `status`, `wave`, `timeline`, `decisions`, `watch`, `report`, `wait` | none — read-only |
+| **Projections** | `list`, `tree`, `show`, `status`, `wave`, `timeline`, `decisions`, `watch`, `report`, `wait`, `ledger` | none — read-only |
 
 Risk runs opposite to file size. [`report`](report/index.html) is the largest
 module in this directory and cannot corrupt anything: it opens the database,

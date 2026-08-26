@@ -378,6 +378,35 @@ commit. Any git url your `git` can reach works; an ssh one is multiplexed like
 the claim path. As with an export, keep the destination somewhere you control:
 the ledger contains every ticket title, description, tag and event in the store.
 
+## Reading every project on the ledger
+
+    qp ledger
+    qp ledger --json --state ready
+
+One ledger can hold several projects, and a store only ever syncs its own one
+in — so the full set exists in exactly one place, the ledger. `qp ledger` is the
+read over it: it fetches the ledger the same way `qp sync` does, replays each
+project's batches into a **throwaway** database under the system temp directory,
+prints, and deletes it.
+
+**It writes nothing to your store.** Not a row, not a `meta` key, not a schema
+change. Answering a question about other projects must never widen the board you
+are answerable for, and a separate verb — rather than a `--global` flag on
+`qp list` — is what keeps the widest possible answer from looking like the
+narrowest at the call site. The output says the same thing twice more: the human
+header names the ledger and states that nothing local was written, and the JSON
+carries `"source": "ledger"` beside the url.
+
+It never pushes, and it shows the ledger **as of this fetch** — anything you have
+not synced is not in it.
+
+Every project numbers its tickets from 1, so several projects each hold a `QP-1`.
+Output is grouped by project, and the id shown is the one the ticket's own store
+shows; where two machines of a single project each minted the same number, the
+id carries the head of the origin store's uuid. `--json` carries the project key
+and the full origin pair on every row, so a dashboard over the whole ledger can
+attribute a ticket without guessing.
+
 ## Install skills into Claude Code
 
     qp install-skills                          # symlinks skills/* into ~/.claude/skills/qp-*

@@ -106,6 +106,8 @@ enum Cmd {
     Sync(cmd::sync::SyncArgs),
     /// Show a single-ticket detail view (human or JSON)
     Show(cmd::show::ShowArgs),
+    /// Read every project on the shared ledger (read-only; writes nothing local)
+    Ledger(cmd::ledger::LedgerArgs),
 }
 
 /// Whether `--json` was passed for this invocation.
@@ -150,6 +152,7 @@ fn wants_json(cmd: &Cmd) -> bool {
         Cmd::Export(a) => a.json,
         Cmd::Import(a) => a.json,
         Cmd::Sync(a) => a.json,
+        Cmd::Ledger(a) => a.json,
         Cmd::Relation(a) => a.json(),
         Cmd::Remote(a) => a.json(),
         Cmd::Tree(a) => a.json,
@@ -323,6 +326,7 @@ fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
         Cmd::Import(a) => cmd::import::run(&db_path, a),
         Cmd::Sync(a) => cmd::sync::run(&db_path, a),
         Cmd::Show(a) => cmd::show::run(&db_path, a),
+        Cmd::Ledger(a) => cmd::ledger::run(&db_path, a),
         #[allow(unreachable_patterns)]
         _ => {
             eprintln!("not implemented yet");
