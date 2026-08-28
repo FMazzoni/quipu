@@ -4,13 +4,13 @@ The synopsis is fenced deliberately: outside a code block, rustdoc parses
 ```text
 qp sync [--json]
 
-Requires a ledger url:  qp remote set --ledger <url>
+Requires an object-store ledger:  qp remote set --ledger s3://<host>/<bucket>[/<prefix>]
 
-  1. fetch the remote ledger branch into <store-dir>/ledger
-  2. merge it with whatever this machine has
-  3. export this store's new events into that clone
-  4. push the branch back
-  5. import the batches that arrived, if any
+  1. LIST this project's prefix
+  2. account for the objects this store wrote itself
+  3. export this store's new events and PUT them as one object
+  4. GET the objects this store has not seen
+  5. import them, if any
 ```
 
 ## It is a composition, not a format
@@ -21,7 +21,7 @@ out to. A second copy of the batch reader or of the replay order would drift
 from the first, and the copy that drifts is the one whose guarantees then hold
 only on paper.
 
-What `sync` adds is the wire and the decision of when to run each half.
+What `sync` adds is the transport and the decision of when to run each half.
 
 ## Never implicit
 
@@ -34,118 +34,108 @@ nobody asked for.
 
 ## One command, both directions
 
-Publishing without fetching leaves a machine confidently stale, and fetching
+Publishing without reading leaves a machine confidently stale, and reading
 without publishing leaves its work invisible to every peer. In practice the two
 halves are always wanted together, so splitting them into `push`/`pull` would
 mostly produce people typing both — and occasionally forgetting the second.
 Each half is separately a no-op when there is nothing to do, so the combined
 command costs nothing on the side that has no work.
 
+## Why the ledger is not a git branch
+
+Measured, not assumed. A git fetch takes a whole branch; there is no way to ask
+for part of one. So every project's store carried every other project's ledger,
+and total local storage grew as the square of the number of projects — fine at a
+handful, tens of gigabytes per machine at a few hundred. Partial clone was tested
+against a real daemon and the filter was ignored outright; sparse checkout only
+hides objects the pack still holds; `git archive --remote` is commonly disabled.
+The behaviour is not configurable away.
+
+A GET names one prefix. So the ledger became objects, laid out project-first:
+
+```text
+<url prefix>/<project key>/<store uuid>/<store uuid>-<lo>-<hi>.jsonl
+```
+
+A store reads its own project and nothing else, and a project nobody has touched
+in a year costs nothing. Everything the git ledger needed to make a shared branch
+safe — a working tree, a merge, a commit, a push, a retry when a peer got there
+first — went with it, because a PUT to a key nobody else can name is not a race.
+
+**Claims did not move.** The claim authority is still git, because the atomic ref
+compare-and-swap is what makes a claim a claim and claim refs are tiny. `qp
+remote set` takes `--authority` and `--ledger` as independent urls, which is what
+let the ledger move without touching the claim path at all.
+
 ## Divergence is the normal case
 
-Two machines that both worked offline both hold commits the other has not seen.
+Two machines that both worked offline both hold events the other has not seen.
 That is the expected shape of a sync, not an error, and it needs no conflict
 policy — because the ledger's own invariants remove the conflict:
 
-- a batch file is named after the store that wrote it, so two stores can never
-  write the same path;
-- a batch is immutable, so no file is ever rewritten.
+- an object key names the store that wrote it, so two stores can never write the
+  same key;
+- a batch is immutable, so no object is ever rewritten, and there is no DELETE.
 
-Two ledgers therefore only ever *add* files relative to each other, and a union
-of adds merges with nothing to reconcile. `sync` merges with
-`--allow-unrelated-histories` because on a fresh remote each machine roots its
-own history, and it merges with no strategy option at all because the union is
-already unambiguous. A conflict means one of the two invariants above broke, so
-it aborts and changes nothing rather than picking a side.
+Two ledgers therefore only ever *add* objects relative to each other, and a union
+of adds has nothing to reconcile.
 
-If a peer pushes between this machine's fetch and its push, the push is
-rejected; `sync` re-fetches, re-merges and retries a bounded number of times.
+## There is no local mirror, and that is the point
 
-## Where the fetched ledger lives
+Nothing is cached on disk. A sync downloads what is new into a temp directory
+that removes itself, merges it, and is done. Keeping a copy of even this store's
+own project would reintroduce in miniature the local mirror the transport change
+deleted — and this store's own batches are already in its log.
 
-`<store-dir>/ledger` — beside the database, inside the directory the project's
-git already ignores. The requirement is that a sync must never leave anything
-in the project tree that a person could commit; putting the clone under the
-store directory satisfies it without depending on a new ignore rule being added
-and kept. The test for it is direct: after a sync, `git status` in the project
-repo shows nothing new.
-
-A bare clone was considered, on the grounds that quipu reads the ledger
-programmatically. It was rejected: export writes files and import reads files,
-so a bare repo would need blobs written and extracted through git plumbing —
-more code, more failure modes, and no additional safety over a checkout in an
-already-ignored directory.
+The one thing that does persist is the answer to *what have I already seen*: the
+`ledger_object` table, one row per object key this store published or merged. It
+lives in the store because the store is already the durable, transactional thing
+on this machine, and it stays prefix-scoped, so a store only ever records keys
+under its own project. Losing a row is safe and costs one redundant download —
+re-merging a batch is a no-op, since `foreign_event` is keyed by the origin store
+and its event id. Recording one too early is not, which is why a key is written
+only after the merge that read it has committed.
 
 ## The export is regenerated, never cached
 
-Every sync calls `export`, which writes only events above the watermark it
-derives from the filenames already on disk. With nothing new that scan finds
-nothing to write and no file is touched, so a "cache" would be caching a
-no-op. The batch files themselves are the cache, and they are the durable one.
+Every sync calls `export`, which writes only events above a watermark. `qp
+export` derives that watermark from the filenames in the directory it is writing
+to; a sync cannot, because it writes into a scratch directory that is deleted
+moments later. So the sync derives it from the object keys this store owns — the
+same fact, from the only place that still holds it.
 
-## The branch, and the empty clone
-
-Batches live on `quipu-ledger`. A bare repository is created with `HEAD` naming
-`main` or `master`, and pushing the first branch does **not** move it — measured,
-not assumed. So on a ledger nobody has touched by hand, `HEAD` names a branch
-that does not exist, and `git clone <ledger>` produces an EMPTY working tree with
-a `remote HEAD refers to nonexistent ref` warning most people scroll past. The
-batches are all there; everything downstream then reports "no project here"
-about a ledger that is full.
-
-So the first successful push points the ledger's `HEAD` at `quipu-ledger` — only
-when `HEAD` does not resolve (a repository whose `HEAD` is a real branch is being
-used for something else and is not quipu's to repoint), and only where the ledger
-is a directory this process can open. Git has no wire command for setting a
-remote's `HEAD`, so over ssh or https this cannot be done at all; there the
-message in `cmd/init.rs` carries the explanation instead. It is best effort
-throughout: failing to improve someone's clone ergonomics must never fail their
-sync.
-
-`materialise` is the same `ensure_repo`/`fetch`/`integrate` sequence exposed for
-`qp init --from <url>`, which needs to read a ledger before a store exists. It is
-deliberately not a second fetch path — the refspec is what keeps
-`refs/quipu/claims/*` out of reach, and one copy of it is the only number of
-copies that can be right.
+That is also why the LIST comes before the export rather than after. A store
+whose database was rebuilt from the ledger discovers what it already published
+before deciding what to publish, instead of republishing its whole history under
+new names.
 
 ## One ledger, several projects
 
-A ledger repository is shared on purpose: many projects' batches sit side by
-side in it, and every store fetches all of them. What is scoped is the **import**.
-Step 5 merges only the batches whose project key matches this store's; the rest
-are left in the clone, fetched and untouched.
+A bucket is shared on purpose: many projects sit side by side in it. What changed
+is that a store no longer has to see the others in order to ignore them — `qp
+sync` lists exactly one prefix, and another project's batches never reach it.
 
-Scoping the fetch instead — a partial clone, a sparse checkout, a branch per
-project — was rejected. Bandwidth was never the problem; a ledger holding every
-project on a machine is a fraction of a megabyte. Keeping the repository plain
-and whole is what lets anyone clone it, and what a read across every project on
-it depends on.
+The **import** is still scoped by project key as well, and that belt-and-braces
+is deliberate: a prefix says where an object was filed, and a header says what it
+is. The header wins. The comparison is against `project::effective_key`, never
+the raw field, so a batch written before the key existed matches only the store
+it belongs to rather than whoever happens to ask. See `docs/modules/project.md`.
 
-Sync also stops counting another project's batches as "something arrived": the
-diff that decides whether a merge runs at all is taken over this project's peer
-batches only. Otherwise an unrelated project's push would read as news and send
-this store into a merge with nothing to merge.
-
-The comparison is against `project::effective_key`, never the raw header field,
-so a batch written before the key existed matches only the store it belongs to
-rather than whoever happens to ask. See `docs/modules/project.md`.
+`qp ledger` is the one command that reads across projects, and so the one that
+lists the whole bucket. That is the exception, it is a read-only query, and it
+writes nothing local.
 
 ## What sync must never touch
 
-`refs/quipu/claims/*`. Claims are the authority's business and move only
-through the claim path. The claim authority and the ledger are configured as
-two separate urls precisely so that this command can be given one and denied
-the other: `sync` reads `remote.ledger` and never `remote.authority`.
-
-The refspecs are explicit in both directions — `refs/heads/*` inbound, the one
-ledger branch outbound — and there is no `--mirror`, `--all` or tag-following
-flag anywhere in the module. Mirroring claim refs would create a second referee,
-and mutual exclusion with two referees is not mutual exclusion.
+`refs/quipu/claims/*`. Claims are the authority's business and move only through
+the claim path — which is now a different transport entirely, so the old hazard
+of a widened refspec carrying claim refs onto the ledger cannot arise at all.
+`sync` reads `remote.ledger` and never `remote.authority`.
 
 ## Idempotence
 
-A second sync with nothing new on either side pushes nothing, fetches nothing
-new, and skips the import entirely — the merge runs only when the fetch
-actually brought in a batch this store had not seen. That property is what the
+A second sync with nothing new on either side writes no object, downloads
+nothing, and skips the import entirely — the merge runs only when the listing
+turned up a batch this store had not accounted for. That property is what the
 whole design leans on: a sync is safe to run at any time, from any machine, in
 any order.

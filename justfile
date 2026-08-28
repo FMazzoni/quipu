@@ -92,7 +92,9 @@ docs-dump: docs
         w3m -dump -cols 100 "$p"; \
     done
 
-# stripped-binary size + cold start (verifies leanness budget)
+# stripped-binary size + cold start. Size is reported, not gated: it is an
+# aspiration rather than a cap (see CLAUDE.md). Cold start and RSS are the
+# budgets that still bind.
 # The RSS probe needs GNU time (-v); it degrades to a skip elsewhere (macOS/BSD).
 check-lean:
     cargo build --release

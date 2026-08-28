@@ -3,8 +3,8 @@ The synopsis below is fenced deliberately: outside a code block, rustdoc parses
 argument placeholder.
 
 ```text
-qp remote set --authority <url> [--ledger <url>] [--check] [--json]
-qp remote set --ledger <url>    [--check] [--json]
+qp remote set --authority <url> [--ledger s3://<host>/<bucket>[/<prefix>]] [--check] [--json]
+qp remote set --ledger s3://<host>/<bucket>[/<prefix>] [--check] [--json]
 qp remote show   [--check] [--json]
 qp remote clear  [--authority] [--ledger] [--all] [--json]
 ```
@@ -14,10 +14,14 @@ qp remote clear  [--authority] [--ledger] [--all] [--json]
 - **authority** — where claims are refereed. A claim is a git ref push that the
   far end either accepts or rejects; that rejection is the mutual exclusion.
   Reachability matters. Ticket content never crosses this url.
-- **ledger** — where the exported event log syncs. Content crosses it, so only
-  machines you own need to reach it. Nothing about it referees anything.
+- **ledger** — where the exported event log syncs. An object-store url, and only
+  an object-store url: a git ledger fetched every project onto every machine and
+  no transport option turned that off (see `docs/modules/sync.md`). Content
+  crosses it, so only machines you own need to reach it. Nothing about it
+  referees anything.
 
-They are separate because the two jobs are separate. Authority-only is a
+They are separate because the two jobs are separate, and this separation is what
+let the ledger change transport without touching the claim path at all. Authority-only is a
 referee over content that stays local. Ledger-only is backup and sync with no
 referee. Both are coherent, both are supported, and neither requires the other:
 `qp remote set --ledger <url>` on a store with no authority is a complete,
@@ -43,8 +47,17 @@ one that works.
 
 `set` writes config and stops. A remote that is down right now is still a
 remote you are allowed to configure, so a failed probe never fails the write.
-`--check` adds an opt-in `git ls-remote` and reports the result alongside the
-config; the exit code reflects the write, not the probe.
+`--check` adds an opt-in probe and reports the result alongside the config; the
+exit code reflects the write, not the probe. The two urls are probed differently
+because they are different things: the authority gets a `git ls-remote`, and the
+ledger gets a LIST of its own prefix — the cheapest question that exercises
+credentials, trust, the bucket and the policy in one round trip.
+
+A ledger probe reports the object store's own diagnosis rather than a flat
+"unreachable", and that distinction is the value of the probe: absent
+credentials, rejected credentials, a missing bucket, a prefix outside your
+policy, a TLS trust failure and a skewed clock all want different fixes, and they
+are indistinguishable once flattened.
 
 `show` is likewise local unless `--check` is passed, which keeps the governing
 rule intact: exactly one command talks to the network synchronously, and it is

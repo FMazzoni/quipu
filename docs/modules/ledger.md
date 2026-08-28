@@ -27,7 +27,7 @@ was written, and the JSON carries `"source": "ledger"` next to the url, so a
 consumer that flattens the projects still cannot lose the one fact that matters.
 
 The reverse also holds — this is not a replacement for `qp list`. It shows the
-ledger as of this fetch, so anything not yet synced is absent, and the header
+ledger as of this read, so anything not yet synced is absent, and the header
 says that too.
 
 ## Colliding display ids
@@ -52,8 +52,11 @@ in the JSON.
 
 ## Reuse, not a second implementation
 
-Fetching is `sync::materialise` (ensure_repo → fetch → integrate), so there is one
-refspec, `refs/quipu/claims/*` stays out of reach, and this path cannot push.
+Downloading is `sync::materialise`, the same LIST-then-GET the exchange uses, into
+a temp directory that removes itself. This is the ONE command that passes it no
+project scope: everything else reads a single prefix, and reading across projects
+is the whole point of this verb. It only ever GETs — a global read must not be
+able to write to a ledger it does not belong to.
 Grouping is `project::batches_by_project`, which decides a batch's project through
 `project::effective_key` — per file, never per directory, because a store stamped
 with an identity after the fact has keyless batches belonging to a different
@@ -83,7 +86,12 @@ project in the view. Every anomaly is still reported on stderr.
 ## Cost
 
 Measured: a store's whole event log exports to a small fraction of a megabyte, so
-fetching everything and replaying it per query is a rounding error. There is
-deliberately no partial fetch, no sparse checkout, no index and no cache — each
-would be a second source of truth about the ledger's contents, bought with
-nothing.
+downloading a bucket and replaying it per query is affordable for the one command
+that has to. Nothing is cached and no index is kept — either would be a second
+source of truth about the ledger's contents, bought with nothing, and this
+command's whole promise is that answering it leaves nothing behind.
+
+That this command reads everything is exactly why `qp sync` must not. Local
+storage is the scarce thing, not bandwidth: a per-query download is transient,
+while a per-store mirror of every project is permanent and grows with the square
+of the number of projects. See `docs/modules/sync.md`.

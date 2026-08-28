@@ -402,7 +402,7 @@ fn read_project_uuid(path: &Path) -> Result<Option<String>> {
 /// `execute_batch(SCHEMA)` is enough once the stamp moves; without the bump
 /// they would reach freshly-initialised stores only, and the first real store
 /// anyone tried to merge into would fail on `no such table`.
-pub const SCHEMA_VERSION: &str = "5";
+pub const SCHEMA_VERSION: &str = "6";
 
 /// Open the connection and set pragmas.
 ///

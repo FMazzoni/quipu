@@ -44,7 +44,8 @@ tracks a checkout or a snapshot that will only change when they upgrade `qp`.
 
 Embedding rather than fetching at install time is what keeps the binary
 standalone — no network, no second artifact, no version skew between a release
-and the skills it expects — at a cost of about 12 KB against the 5 MB budget.
+and the skills it expects — at a cost of about 12 KB, negligible against the
+binary at any size.
 Per-project copies and packaging the skills as a Claude Code plugin were both
 weighed and rejected; the plugin route is the better long-term answer but
 deferred to v2, since it costs marketplace publishing or a git-clone-and-install

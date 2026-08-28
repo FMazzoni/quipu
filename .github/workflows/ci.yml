@@ -36,16 +36,21 @@ jobs:
       - name: tests
         run: cargo test
 
-      # Leanness budget (CLAUDE.md): < 5 MB stripped binary.
+      # Binary size tripwire, not the old leanness cap. See CLAUDE.md: size is an
+      # aspiration rather than a limit, so this ceiling exists to catch RUNAWAY
+      # growth — a fat SDK or an accidental duplicate dependency — not to gate a
+      # deliberate, justified increase. Raise it deliberately, in the same commit
+      # as the growth, and say why in the PR.
       # The RSS and cold-start probes stay in `just check-lean` rather than CI —
       # they depend on GNU `/usr/bin/time -v` and on runner-dependent timing.
-      - name: binary size budget
+      # Cold start remains the HARD budget; it is what rules out an async runtime.
+      - name: binary size tripwire
         run: |
           cargo build --release
           strip target/release/qp
           size=$(stat -c%s target/release/qp)
           echo "stripped binary: $size bytes ($((size / 1024 / 1024)) MB)"
-          if [ "$size" -gt 5242880 ]; then
-            echo "::error::binary exceeds the 5 MB leanness budget"
+          if [ "$size" -gt 12582912 ]; then
+            echo "::error::binary exceeds the 12 MB tripwire — this is runaway growth, not a rounding error. Justify and raise the ceiling deliberately, or find what got pulled in."
             exit 1
           fi

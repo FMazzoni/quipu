@@ -37,7 +37,9 @@ Measured, on real hardware: a claim against a hosted remote costs **2424 ms**
 without ssh multiplexing and **16 ms** with it; against a LAN host, 552 ms
 versus 21 ms. That is a 150x difference, and it is far too large to leave to
 whether a user happened to edit `~/.ssh/config`. So quipu sets
-`GIT_SSH_COMMAND` on the git children it spawns:
+`GIT_SSH_COMMAND` on the git children it spawns. Those are the claim authority's
+children and nothing else: the ledger is object storage over HTTPS and spawns no
+process at all.
 
 ```text
 ssh -o ControlMaster=auto -o ControlPath=<store-dir>/ssh/m-<url>-<lane> -o ControlPersist=60

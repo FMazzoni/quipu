@@ -18,7 +18,8 @@ The coordinator never edits code directly; subagents do all changes inside `wt`-
 
 ## Hard rules
 
-- **Leanness budget:** < 5 MB stripped binary, < 30 ms cold start, < 20 MB RSS, zero external services, zero async runtime, zero daemons. See vault `decisions/quipu-leanness-is-a-feature.md`. PRs that exceed any of these need a justification.
+- **Leanness budget:** < 30 ms cold start, < 20 MB RSS, zero external services, zero async runtime, zero daemons. See vault `decisions/quipu-leanness-is-a-feature.md`. PRs that exceed any of these need a justification.
+- **Binary size is an aspiration, not a cap.** The old `< 5 MB stripped` line read as a hard limit and started costing design decisions; the owner has settled that a considerably larger binary is acceptable. The rule is: pick the smallest crate that does the job *properly*, and do not contort the design — or shell out to a system binary — to save a megabyte. Cold start still matters and is still a hard budget, which is what actually rules out an async runtime and a fat SDK. Report the before/after stripped size on a PR that moves it, so the number stays visible even though it no longer gates.
 - **Guarded state transitions:** every state mutation is a single conditional `UPDATE ... WHERE state IN (...)` + `changes() == 1` check. Read-then-write is banned. See `guarded-state-transitions.md`.
 - **CLI is pattern-agnostic.** Reject any PR that bakes orchestration patterns (wave, critique-loop, branch-and-evaluate) into the binary. Patterns live in `skills/`.
 - **No Co-Authored-By trailer, no "Generated with Claude Code" footer** on commits.

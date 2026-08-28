@@ -22,7 +22,7 @@ pub enum RemoteOp {
         /// Where claims are refereed. Reachability matters; ticket content never crosses it.
         #[arg(long, value_name = "URL")]
         authority: Option<String>,
-        /// Where the ledger syncs. Content crosses it; only your own machines need reach it.
+        /// Object-store url the ledger lives at: `s3://<host>/<bucket>[/<prefix>]`.
         #[arg(long, value_name = "URL")]
         ledger: Option<String>,
         /// Also probe the url. Reports reachability; never blocks the write.
@@ -84,17 +84,18 @@ struct Checked {
 }
 
 impl Checked {
-    fn line(label: &str, r: Option<Reach>) -> Option<String> {
+    fn line(label: &str, r: Option<&Reach>) -> Option<String> {
         match r? {
             Reach::Ok => Some(format!("{label}: reachable")),
             Reach::Unreachable => Some(format!("{label}: UNREACHABLE")),
             Reach::NoGit => Some(format!("{label}: could not run git")),
+            Reach::Fault(why) => Some(format!("{label}: UNUSABLE — {why}")),
         }
     }
     fn lines(&self) -> Vec<String> {
         [
-            Self::line("authority", self.authority_reachable),
-            Self::line("ledger", self.ledger_reachable),
+            Self::line("authority", self.authority_reachable.as_ref()),
+            Self::line("ledger", self.ledger_reachable.as_ref()),
         ]
         .into_iter()
         .flatten()
@@ -206,7 +207,7 @@ pub fn run(db_path: &std::path::Path, a: RemoteArgs) -> Result<()> {
                 changed.push("authority");
             }
             if let Some(url) = &ledger {
-                remote::validate_url(url)?;
+                remote::validate_ledger_url(url)?;
                 remote::set(&conn, remote::KEY_LEDGER, url)?;
                 changed.push("ledger");
             }

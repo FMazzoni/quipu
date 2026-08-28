@@ -141,6 +141,26 @@ pub fn run(db_path: &Path, a: ExportArgs) -> Result<()> {
 /// Split from [`run`] so a caller that is not the CLI — `qp sync` — gets the
 /// batch and the numbers without a second copy of the serialiser.
 pub fn export(db_path: &Path, out_root: &Path) -> Result<ExportOutcome> {
+    export_since(db_path, out_root, None)
+}
+
+/// Exports the events after `watermark`, or after whatever is already on disk.
+///
+/// `qp sync` passes a watermark explicitly and `qp export` does not, and the
+/// difference is the whole reason this parameter exists. A sync writes its batch
+/// into a scratch directory that is deleted moments later, so "what have I
+/// already published" cannot be read back off the disk the way `qp export`'s
+/// accumulating directory allows — the ledger is remote and there is no local
+/// clone. The watermark then comes from the object keys this store has recorded
+/// as its own, which is the same fact from the only place that still holds it.
+///
+/// Passing `None` keeps the on-disk scan, which is what makes `qp export` into a
+/// directory twice write only what is new.
+pub fn export_since(
+    db_path: &Path,
+    out_root: &Path,
+    watermark: Option<i64>,
+) -> Result<ExportOutcome> {
     let conn = db::open(db_path)?;
     let project_uuid = meta(&conn, "project_uuid")?
         .ok_or_else(|| db::invalid_input("store has no project_uuid; run `qp init` first"))?;
@@ -153,7 +173,10 @@ pub fn export(db_path: &Path, out_root: &Path) -> Result<ExportOutcome> {
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating export directory {}", dir.display()))?;
 
-    let watermark = watermark(&dir, &project_uuid)?;
+    let watermark = match watermark {
+        Some(w) => w,
+        None => disk_watermark(&dir, &project_uuid)?,
+    };
     let events = read_events(&conn, watermark)?;
 
     let mut out = ExportOutcome {
@@ -209,7 +232,7 @@ pub fn batch_name(project_uuid: &str, lo: i64, hi: i64) -> String {
 ///
 /// Derived from the immutable filenames rather than from a state file, so
 /// there is nothing to fall out of sync with the batches themselves.
-fn watermark(dir: &Path, project_uuid: &str) -> Result<i64> {
+fn disk_watermark(dir: &Path, project_uuid: &str) -> Result<i64> {
     let mut max = 0i64;
     for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let name = entry?.file_name();

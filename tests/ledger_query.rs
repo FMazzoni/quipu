@@ -1,45 +1,49 @@
 //! `qp ledger` — reading every project on a shared ledger without writing locally.
 //!
-//! Each project here is a SEPARATE `qp init` against one bare repository, never
-//! a copy: a copied store shares the original's `project_uuid` and its project
-//! key, so it cannot observe the thing this command exists for — several
-//! independent projects on one ledger, each numbering its tickets from 1.
+//! Each project here is a SEPARATE `qp init` against one bucket, never a copy:
+//! a copied store shares the original's `project_uuid` and its project key, so
+//! it cannot observe the thing this command exists for — several independent
+//! projects on one ledger, each numbering its tickets from 1.
 //!
-//! The remote is `git init --bare` in a temp dir. No hostname, url or account
-//! belonging to anyone appears in this file — the repo is public.
+//! The remote is an in-process S3 stub on a loopback port. Nothing reaches the
+//! network, and no hostname, bucket or account belonging to anyone appears in
+//! this file — the repo is public.
+//!
+//! `qp ledger` is the one command that reads ACROSS projects, so it is the one
+//! that lists the whole bucket rather than a single prefix. That is deliberate
+//! and is the exception, not the rule: `qp sync` never leaves its own prefix.
+
+mod common;
 
 use assert_cmd::Command;
+use common::objstore::ObjectStore;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-fn qp(db: &Path) -> Command {
+/// Each test gets its OWN stub, never a shared one.
+///
+/// A shared bucket across tests running in parallel would put other tests'
+/// projects into every global view — and this file's whole subject is how many
+/// projects a ledger holds, so that contamination reads as a product bug.
+fn qp(db: &Path, store: &ObjectStore) -> Command {
     let mut c = Command::cargo_bin("qp").unwrap();
     c.env("QP_DB", db);
     // Otherwise an ambient ledger on the developer's machine reaches the store
     // under test through `qp init`.
     c.env_remove("QUIPU_LEDGER");
+    for (k, v) in store.env() {
+        c.env(k, v);
+    }
     c
 }
 
-fn ok(db: &Path, args: &[&str]) -> String {
-    let out = qp(db)
+fn ok(db: &Path, store: &ObjectStore, args: &[&str]) -> String {
+    let out = qp(db, store)
         .args(args)
         .assert()
         .try_success()
         .unwrap_or_else(|e| panic!("`qp {}` failed: {e}", args.join(" ")));
     String::from_utf8_lossy(&out.get_output().stdout).to_string()
-}
-
-fn bare_repo(root: &Path) -> String {
-    let path = root.join("ledger.git");
-    let ok = std::process::Command::new("git")
-        .args(["init", "--bare", "-q"])
-        .arg(&path)
-        .status()
-        .expect("spawn git")
-        .success();
-    assert!(ok, "git init --bare failed");
-    format!("file://{}", path.display())
 }
 
 /// One project: its own store directory, its own `qp init`, its own key.
@@ -48,19 +52,19 @@ struct Project {
 }
 
 impl Project {
-    fn new(root: &Path, name: &str, ledger: &str) -> Self {
+    fn new(root: &Path, name: &str, store: &ObjectStore) -> Self {
         let db = root.join(name).join("db.sqlite");
-        ok(&db, &["init"]);
-        ok(&db, &["remote", "set", "--ledger", ledger]);
+        ok(&db, store, &["init"]);
+        ok(&db, store, &["remote", "set", "--ledger", &store.url()]);
         Self { db }
     }
 
     /// A second machine of an EXISTING project: same key, its own uuid, its own
     /// numbering starting at 1 again.
-    fn joining(root: &Path, name: &str, ledger: &str, key: &str) -> Self {
+    fn joining(root: &Path, name: &str, store: &ObjectStore, key: &str) -> Self {
         let db = root.join(name).join("db.sqlite");
-        ok(&db, &["init", "--project-key", key]);
-        ok(&db, &["remote", "set", "--ledger", ledger]);
+        ok(&db, store, &["init", "--project-key", key]);
+        ok(&db, store, &["remote", "set", "--ledger", &store.url()]);
         Self { db }
     }
 
@@ -123,35 +127,36 @@ impl Project {
 }
 
 /// Three projects on one ledger, each with tickets of its own.
-fn three_projects(root: &Path) -> (String, Project, Project, Project) {
-    let ledger = bare_repo(root);
-    let a = Project::new(root, "alpha", &ledger);
-    let b = Project::new(root, "beta", &ledger);
-    let c = Project::new(root, "gamma", &ledger);
+fn three_projects(root: &Path, store: &ObjectStore) -> (String, Project, Project, Project) {
+    let ledger = store.url();
+    let a = Project::new(root, "alpha", store);
+    let b = Project::new(root, "beta", store);
+    let c = Project::new(root, "gamma", store);
     for (p, titles) in [
         (&a, ["alpha one", "alpha two"]),
         (&b, ["beta one", "beta two"]),
         (&c, ["gamma one", "gamma two"]),
     ] {
         for t in titles {
-            ok(&p.db, &["add", t]);
+            ok(&p.db, store, &["add", t]);
         }
-        ok(&p.db, &["sync"]);
+        ok(&p.db, store, &["sync"]);
     }
     (ledger, a, b, c)
 }
 
-fn ledger_json(db: &Path) -> Value {
-    serde_json::from_str(&ok(db, &["ledger", "--json"])).unwrap()
+fn ledger_json(db: &Path, store: &ObjectStore) -> Value {
+    serde_json::from_str(&ok(db, store, &["ledger", "--json"])).unwrap()
 }
 
 /// The whole point: one store sees every project, correctly attributed.
 #[test]
 fn a_query_from_one_project_returns_every_project_on_the_ledger() {
     let tmp = tempfile::tempdir().unwrap();
-    let (ledger, a, b, c) = three_projects(tmp.path());
+    let store = ObjectStore::start();
+    let (ledger, a, b, c) = three_projects(tmp.path(), &store);
 
-    let v = ledger_json(&a.db);
+    let v = ledger_json(&a.db, &store);
     assert_eq!(
         v["source"], "ledger",
         "the answer must name where it came from"
@@ -219,17 +224,18 @@ fn a_query_from_one_project_returns_every_project_on_the_ledger() {
 #[test]
 fn a_global_query_writes_nothing_to_the_local_store() {
     let tmp = tempfile::tempdir().unwrap();
-    let (_, a, _, _) = three_projects(tmp.path());
+    let store = ObjectStore::start();
+    let (_, a, _, _) = three_projects(tmp.path(), &store);
 
     let before = a.fingerprint();
-    let v = ledger_json(&a.db);
+    let v = ledger_json(&a.db, &store);
     assert_eq!(
         v["projects"].as_array().unwrap().len(),
         3,
         "nothing was read"
     );
     // Twice: an idempotence bug would otherwise hide behind a single run.
-    ok(&a.db, &["ledger"]);
+    ok(&a.db, &store, &["ledger"]);
     let after = a.fingerprint();
 
     assert_eq!(before, after, "`qp ledger` mutated the store it read from");
@@ -240,9 +246,10 @@ fn a_global_query_writes_nothing_to_the_local_store() {
 #[test]
 fn colliding_display_ids_across_projects_stay_distinguishable() {
     let tmp = tempfile::tempdir().unwrap();
-    let (_, a, b, c) = three_projects(tmp.path());
+    let store = ObjectStore::start();
+    let (_, a, b, c) = three_projects(tmp.path(), &store);
 
-    let v = ledger_json(&a.db);
+    let v = ledger_json(&a.db, &store);
     let mut ones = Vec::new();
     for g in v["projects"].as_array().unwrap() {
         for t in g["tasks"].as_array().unwrap() {
@@ -266,7 +273,7 @@ fn colliding_display_ids_across_projects_stay_distinguishable() {
     );
 
     // In prose, the group header is what disambiguates, so it has to be there.
-    let text = ok(&a.db, &["ledger"]);
+    let text = ok(&a.db, &store, &["ledger"]);
     for p in [&a, &b, &c] {
         assert!(
             text.contains(&format!("project {}", p.key())),
@@ -283,14 +290,15 @@ fn colliding_display_ids_across_projects_stay_distinguishable() {
 #[test]
 fn a_store_with_no_ledger_refuses_and_changes_nothing() {
     let tmp = tempfile::tempdir().unwrap();
+    let store = ObjectStore::start();
     let lonely = Project {
         db: tmp.path().join("lonely").join("db.sqlite"),
     };
-    ok(&lonely.db, &["init"]);
-    ok(&lonely.db, &["add", "a local ticket"]);
+    ok(&lonely.db, &store, &["init"]);
+    ok(&lonely.db, &store, &["add", "a local ticket"]);
 
     let before = lonely.fingerprint();
-    let out = qp(&lonely.db).arg("ledger").assert().failure();
+    let out = qp(&lonely.db, &store).arg("ledger").assert().failure();
     let stderr = String::from_utf8_lossy(&out.get_output().stderr).to_string();
     assert!(
         stderr.contains("no ledger remote"),
@@ -308,18 +316,24 @@ fn a_store_with_no_ledger_refuses_and_changes_nothing() {
 #[test]
 fn two_stores_in_one_project_that_both_minted_a_qp_1_are_disambiguated() {
     let tmp = tempfile::tempdir().unwrap();
-    let (ledger, a, b, _) = three_projects(tmp.path());
-    let second = Project::joining(tmp.path(), "alpha-machine-two", &ledger, &a.key());
+    let store = ObjectStore::start();
+    let (ledger, a, b, _) = three_projects(tmp.path(), &store);
+    let _ = &ledger;
+    let second = Project::joining(tmp.path(), "alpha-machine-two", &store, &a.key());
     assert_eq!(
         second.key(),
         a.key(),
         "the second machine joined another project"
     );
-    ok(&second.db, &["add", "alpha from the second machine"]);
-    ok(&second.db, &["sync"]);
+    ok(
+        &second.db,
+        &store,
+        &["add", "alpha from the second machine"],
+    );
+    ok(&second.db, &store, &["sync"]);
 
     // Queried from a DIFFERENT project, so nothing local can be supplying it.
-    let v = ledger_json(&b.db);
+    let v = ledger_json(&b.db, &store);
     let group = v["projects"]
         .as_array()
         .unwrap()

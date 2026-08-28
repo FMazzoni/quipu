@@ -115,27 +115,6 @@ pub fn effective_key(header_key: Option<&str>, project_uuid: &str) -> String {
     }
 }
 
-/// The project a single batch file belongs to, keyless batches included.
-///
-/// `None` for anything that is not a batch — a ledger clone legitimately holds
-/// a `.git` directory, a README, and other people's leftovers, and a reader
-/// that treated an unreadable file as "no project" would be answering a
-/// different question than the one asked.
-pub fn batch_key(path: &Path) -> Option<String> {
-    let raw = first_line(path)?;
-    let v = serde_json::from_str::<Value>(&raw).ok()?;
-    if v.get("record").and_then(Value::as_str) != Some("header")
-        || v.get("format").and_then(Value::as_str) != Some(crate::cmd::export::FORMAT)
-    {
-        return None;
-    }
-    let uuid = v.get("project_uuid").and_then(Value::as_str)?;
-    Some(effective_key(
-        v.get("project_key").and_then(Value::as_str),
-        uuid,
-    ))
-}
-
 /// One project as a ledger directory describes it.
 pub struct LedgerProject {
     pub project_key: String,

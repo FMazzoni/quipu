@@ -42,26 +42,32 @@ legitimate inits across the existing suites. A guard that fires on innocent
 layouts is one people learn to pass a flag past, which spends its credibility
 exactly where it is needed.
 
-A url in `$QUIPU_LEDGER` is fetched, which is the one place `qp init` touches the
-network at all, and only when that variable is set. An unreachable ledger is
+A url in `$QUIPU_LEDGER` is listed, which is the one place `qp init` touches the
+network at all — one delimited LIST, no downloads, because the project key is the
+first key segment and so the server's answer IS the project list — and only when that variable is set. An unreachable ledger is
 treated as no ledger rather than as an error: someone on a plane initialising a
 store must not be blocked by a guard that cannot see what it is guarding. A store
 that already exists is never guarded either — re-running `qp init` to add a
 `--default-tag` must stay idempotent.
 
-## What `--from` accepts, and in what order it asks
+## What `--from` accepts
 
-A url or a directory. The order of the questions is load-bearing, and the obvious
-order is wrong: the most ordinary local ledger — a bare repository — is BOTH an
-existing directory and a git url, and reading it as a directory finds nothing,
-because its batches are in `objects` rather than in a tree. So the first question
-is about content, not shape:
+Two shapes and no guessing:
 
-1. Does this directory hold batches? Then read it in place.
-2. Is it a git repository anyway? Then fetch from it — a bare ledger, or a clone
-   sitting on the wrong branch, and both are answered the same way.
-3. Otherwise it is a url: clone it into `<store-dir>/ledger` with the same code
-   `qp sync` fetches with, never a second refspec.
+1. An `s3://<host>/<bucket>[/<prefix>]` url — the ledger proper.
+2. A directory that exists — a dump `qp export` wrote, or a copied disk. This is
+   the disaster-recovery path: no credentials, no network, and it has to keep
+   working, because it is what someone has when the object store is the thing
+   that is gone.
+
+Anything else is refused with the url form spelled out, rather than probed as
+some other transport. There is deliberately no git case any more; see
+`docs/modules/sync.md` for the measurement that removed it.
+
+Enumerating comes before downloading, which is what the object store made
+possible. Choosing a project costs one listing, and only the chosen project is
+ever transferred. The git ledger had to fetch everything before it could tell you
+what was in it.
 
 A join named by url ends with `remote.ledger` set to it. Someone joining from a
 url has just said where the ledger is, and making them repeat it to
@@ -73,28 +79,29 @@ to remove.
 Joining folds the project's batches into the new store — the same `--merge` a
 sync runs, not a second merge path.
 
-It has to, and not for convenience: `qp sync` decides what is new by diffing the
-batch files in its clone across a fetch, so batches already sitting in that clone
-when it starts are "already seen" forever. A join that fetched into that clone
-and stopped would leave a store that never receives a single ticket its peers
-wrote before it arrived — and its own board looks perfectly healthy, which is
-what makes that expensive. Measured, not reasoned about: the first version of
-this path did exactly that.
+It has to, and not for convenience. A join that recorded the url and left the
+history for the first sync would leave a store that never receives a single
+ticket its peers wrote before it arrived — and its own board looks perfectly
+healthy, which is what makes that expensive. Measured, not reasoned about: the
+first version of this path did exactly that.
+
+The join also records the object keys it read, in the same `ledger_object` table
+`qp sync` keeps. Without that the first sync would download and re-merge the
+entire project it has just folded in: idempotent, and a full re-fetch of history
+the store is already holding.
 
 If the merge refuses — a ledger `import` cannot legally replay — the refusal is
 import's own, with its own diagnosis, and the store keeps the identity it just
 established.
 
-## The branch nobody was told about
+## An empty answer has two causes
 
-Batches live on `quipu-ledger`, which is not a bare repository's default `HEAD`,
-so `git clone <ledger>` by hand can land on a branch that does not exist and
-produce an empty tree. `qp sync` points a filesystem ledger's `HEAD` at the right
-branch on first publish (see `docs/modules/sync.md`), which fixes it for people;
-over ssh or https git offers no way to do that, so the "no batches here" message
-names the branch and the trap rather than reporting an empty ledger. Both,
-because the first is the fix and the second is what happens when the first could
-not run.
+A listing scoped outside your credentials' policy is not refused — it comes back
+empty, exactly like a bucket nobody has written to. So "no batches here" would
+send someone looking for a lost ledger when the real fault is a key that cannot
+see it. The message names both, and names the environment variables the
+credentials come from, because the usual cause is that they were exported into a
+different shell.
 
 ## Joining versus restoring
 

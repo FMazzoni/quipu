@@ -35,7 +35,7 @@ Common workflows are wrapped in a [`justfile`](./justfile):
     just test           # run the test suite, one target at a time
     just lint           # formatting + rustdoc + clippy gates, then `just test`
     just docs           # build browsable rustdoc
-    just check-lean     # verify stripped-binary size + RSS budget
+    just check-lean     # report stripped-binary size, cold start and RSS
 
 Raw `cargo install --path .` works too; the `justfile` is just a shortcut layer.
 
@@ -165,30 +165,30 @@ carries the same one.
 `qp init` is the only moment those two intents can be told apart, so it does not
 guess:
 
-    qp init                                   start a project here
-    qp init --from ssh://host.example/ledger  join the project that ledger holds
-    qp init --new-project                     start one even next to a populated ledger
+    qp init                                     start a project here
+    qp init --from s3://minio.host.example/qp   join the project that ledger holds
+    qp init --new-project                       start one even next to a populated ledger
 
-`--from` takes a git url or a local directory. A url is all a new machine has, so
-that is the whole setup: it fetches the ledger, inherits the project's key,
-display prefix and default tags, mints a store uuid of its own, folds the
-project's tickets in, and records the ledger — so the next command can be
-`qp sync` with nothing configured in between. `qp init --from <ledger> --restore`
-is the other operation: it rebuilds *this store* as the one the ledger came from,
-uuid and all, for a machine that died.
+`--from` takes a ledger url or a local directory of exported batches. A url is
+all a new machine has, so that is the whole setup: it lists the projects,
+inherits the chosen project's key, display prefix and default tags, mints a store
+uuid of its own, folds that project's tickets in, and records the ledger — so the
+next command can be `qp sync` with nothing configured in between. Only the chosen
+project is downloaded. `qp init --from <ledger> --restore` is the other
+operation: it rebuilds *this store* as the one the ledger came from, uuid and
+all, for a machine that died.
 
 Where a ledger it can see already holds projects — `--from`, or `$QUIPU_LEDGER`
-naming a url or a clone — plain `qp init` refuses and names both choices. Starting a new
+naming a url or a directory — plain `qp init` refuses and names both choices. Starting a new
 project on a shared ledger stays possible; it is just never accidental. The
 failure that costs a week is the silent one: init, point at the team's ledger,
 sync, and discover days later that these tickets were a new project all along
 and never reached anybody.
 
-Batches live on the `quipu-ledger` branch, which is not a bare repository's
-default `HEAD`. quipu points a filesystem ledger's `HEAD` at it on first publish
-so a plain `git clone` lands on the batches; where it cannot — git has no wire
-command for setting a remote's `HEAD` — a ledger that looks empty says so by
-naming the branch, rather than claiming there is no project.
+A ledger that answers with nothing has two possible causes and they need
+different fixes: the bucket really is empty, or the credentials in this
+environment cannot see into the prefix that holds it — a listing scoped outside
+your policy is not refused, it comes back empty. The message names both.
 
 A store written before project keys existed keeps working: it is backfilled, on
 the next command of any kind, as its own project. Batches written before them
@@ -201,7 +201,7 @@ Optional, and off by default. A store with no remote configured behaves exactly
 as it always has: no network, no daemon, no external service.
 
     qp remote set --authority ssh://host.example/srv/authority.git
-    qp remote set --ledger    ssh://host.example/srv/ledger.git
+    qp remote set --ledger    s3://minio.host.example/quipu-ledger
     qp remote show
     qp remote clear
 
@@ -210,16 +210,26 @@ Two independent urls, either one omittable:
 - **authority** — where claims are refereed. A claim is a git ref push the far
   end either accepts or rejects, and that rejection is the mutual exclusion.
   Reachability matters here; ticket content never crosses this url.
-- **ledger** — where the exported event log syncs. Content crosses it, so only
+- **ledger** — where the exported event log syncs, as objects in a bucket:
+  `s3://<host>/<bucket>[/<prefix>]`, https implied. Content crosses it, so only
   machines you own need to reach it. It referees nothing.
+
+Credentials come from the standard `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` environment variables, plus `AWS_SESSION_TOKEN` when
+they are temporary. quipu never writes a credential to disk and has no config
+file for one; when they are absent it names the variables it looked for.
 
 Setting one does not require the other. Authority-only is a referee over content
 that stays local; ledger-only is backup and sync with no referee. Both are
 supported configurations.
 
 `set` writes config and stops — a remote that happens to be down right now is
-still a remote you are allowed to configure. `--check` adds an opt-in
-`git ls-remote` probe and reports what it found; it never blocks the write.
+still a remote you are allowed to configure. `--check` adds an opt-in probe and
+reports what it found; it never blocks the write. The authority is probed with
+`git ls-remote` and the ledger with a listing of its own prefix, and a ledger
+probe reports the object store's own diagnosis rather than a flat "unreachable":
+absent credentials, rejected credentials, a missing bucket, a prefix outside your
+policy, a TLS trust failure and a skewed clock all want different fixes.
 `qp remote show` is likewise local unless you pass `--check`.
 
 **`qp remote clear` is the escape hatch, not a convenience.** A configured but
@@ -229,8 +239,9 @@ because clearing exists as the deliberate way to get unblocked. Bare
 
 ### ssh multiplexing
 
-Where the remote is reached over ssh, quipu sets `GIT_SSH_COMMAND` on the git
-child it spawns, enabling `ControlMaster` with a socket under the store's own
+This concerns the claim authority alone — it is the only git remote left, since
+the ledger moved to object storage. Where the authority is reached over ssh,
+quipu sets `GIT_SSH_COMMAND` on the git child it spawns, enabling `ControlMaster` with a socket under the store's own
 directory. This is measured, not cosmetic: a claim costs ~2400 ms against a
 hosted remote without multiplexing and ~16 ms with it.
 
@@ -334,13 +345,24 @@ comparable.
 
 ## Syncing with a remote
 
-    qp remote set --ledger <url>
+    qp remote set --ledger s3://minio.host.example/quipu-ledger
     qp sync
 
-`qp sync` is the whole cross-machine loop in one command: fetch the remote
-ledger, merge it with what this machine has, export this store's new events into
-it, push, and read back whatever arrived. It owns no format of its own — it is
-`qp export` and `qp import --merge` with a wire between them.
+`qp sync` is the whole cross-machine loop in one command: list this project's
+prefix on the object store, upload this store's new events as one immutable
+object, download the objects it has not seen, and merge them. It owns no format
+of its own — it is `qp export` and `qp import --merge` with a wire between them.
+
+**The ledger is object storage, not a git remote, and the reason is measured.**
+A git fetch takes a whole branch; there is no way to ask for part of one. So
+every project's store carried every other project's ledger, and total local
+storage grew as the square of the number of projects — a handful is nothing, a
+few hundred is tens of gigabytes per machine. Partial clone was tested against a
+real daemon and the filter was ignored; sparse checkout only hides objects the
+pack still holds. A GET names one prefix, so a store reads its own project and a
+project nobody has touched in a year costs nothing. Claims did **not** move: the
+authority is still git, because the atomic ref compare-and-swap is what makes a
+claim a claim.
 
 **It never runs by itself.** No write syncs, nothing refreshes in the
 background, and no other command grows a network dependency because this one
@@ -348,23 +370,22 @@ exists. Every other `qp` operation stays a couple of milliseconds against a
 local file, which is the reason the tool exists rather than a hosted tracker.
 
 **Divergence is the normal case.** Two machines that both worked offline both
-hold work the other has not seen, and that needs no conflict policy: batch files
-are named after the store that wrote them and are never rewritten, so two
-ledgers only ever *add* files relative to each other and the union merges with
-nothing to reconcile. If a peer pushes in between, the push is rejected and
-`sync` re-fetches, re-merges and retries.
+hold work the other has not seen, and that needs no conflict policy: an object
+key is named after the store that wrote it and is never rewritten, so two ledgers
+only ever *add* objects relative to each other and the union merges with nothing
+to reconcile. There is no DELETE, and no retry-on-rejection either — a PUT to a
+key nobody else can name is not a race.
 
-**It is idempotent.** A second sync with nothing new pushes nothing, fetches
+**It is idempotent.** A second sync with nothing new writes nothing, downloads
 nothing, and skips the merge entirely.
 
-**It syncs one project, from a ledger that may hold several.** Sharing a ledger
-repository between projects is fine and intended — everyone fetches the whole
-thing, because that is what keeps it a plain git repo anyone can clone and read
-across. Only the merge is scoped: a sync folds in the batches carrying this
-store's project key and leaves every other project's where they are. Batches
-written before project keys existed are matched as the store that wrote them,
-never as a wildcard, so an old ledger still reaches its own machines and nobody
-else's.
+**It syncs one project, from a bucket that may hold several.** Sharing a bucket
+between projects is fine and intended. A sync lists exactly one prefix, so
+another project's batches never reach it at all; the merge is scoped by project
+key as well, because a prefix says where an object was filed and a header says
+what it is — and the header wins. Batches written before project keys existed are
+matched as the store that wrote them, never as a wildcard, so an old ledger still
+reaches its own machines and nobody else's.
 
 **It never touches `refs/quipu/claims/*`.** Claims are the authority's business
 and travel by the claim path. That is why the authority and the ledger are two
@@ -372,11 +393,12 @@ separate urls: `sync` is given the ledger one and denied the other. Mirroring
 claim refs would create a second referee, and mutual exclusion with two referees
 is not mutual exclusion.
 
-The remote ledger is cloned to `<store-dir>/ledger` — inside the directory your
-project already ignores, so a sync never leaves a file you could accidentally
-commit. Any git url your `git` can reach works; an ssh one is multiplexed like
-the claim path. As with an export, keep the destination somewhere you control:
-the ledger contains every ticket title, description, tag and event in the store.
+**Nothing is mirrored locally.** A sync downloads what is new into a temp
+directory that removes itself, so it never leaves a file you could accidentally
+commit. What it does keep is one row per object key it has already published or
+merged, inside the store — that is how it knows what is new without a clone to
+diff. As with an export, keep the bucket somewhere you control: the ledger
+contains every ticket title, description, tag and event in the store.
 
 ## Reading every project on the ledger
 
@@ -385,9 +407,9 @@ the ledger contains every ticket title, description, tag and event in the store.
 
 One ledger can hold several projects, and a store only ever syncs its own one
 in — so the full set exists in exactly one place, the ledger. `qp ledger` is the
-read over it: it fetches the ledger the same way `qp sync` does, replays each
-project's batches into a **throwaway** database under the system temp directory,
-prints, and deletes it.
+read over it, and the one command that lists the whole bucket rather than a
+single prefix: it replays each project's batches into a **throwaway** database
+under the system temp directory, prints, and deletes it.
 
 **It writes nothing to your store.** Not a row, not a `meta` key, not a schema
 change. Answering a question about other projects must never widen the board you
@@ -397,8 +419,8 @@ narrowest at the call site. The output says the same thing twice more: the human
 header names the ledger and states that nothing local was written, and the JSON
 carries `"source": "ledger"` beside the url.
 
-It never pushes, and it shows the ledger **as of this fetch** — anything you have
-not synced is not in it.
+It only ever reads, and it shows the ledger **as of this read** — anything you
+have not synced is not in it.
 
 Every project numbers its tickets from 1, so several projects each hold a `QP-1`.
 Output is grouped by project, and the id shown is the one the ticket's own store

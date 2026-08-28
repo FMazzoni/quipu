@@ -1,9 +1,12 @@
 //! `qp remote` — the config surface, and the local-only state it exists to leave and return to.
 //!
-//! Every remote here is a bare repository created in a temp dir. That is not a
+//! The authority here is a bare repository created in a temp dir. That is not a
 //! stand-in for a hosted remote: `git init --bare` exercises identical ref and
-//! transport semantics, and it is the topology the design actually settled on.
-//! No hostname, url or account belonging to anyone appears in this file, which
+//! transport semantics, and it is the topology the design actually settled on —
+//! claims stay on git, because the atomic ref compare-and-swap is what makes a
+//! claim a claim. The ledger is an object-store url, and these are config-only
+//! tests: nothing here contacts it. Every name is RFC 2606, no credential is
+//! real, and no host or account belonging to anyone appears in this file, which
 //! is deliberate — the repo is public.
 //!
 //! The load-bearing tests here are the ones about *absence*. Local-only is the
@@ -23,7 +26,7 @@ fn set_show_round_trips_both_urls() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     let authority = bare_repo(tmp.path(), "authority");
-    let ledger = bare_repo(tmp.path(), "ledger");
+    let ledger = ledger_url();
     init(&db);
 
     qp(&db)
@@ -85,7 +88,7 @@ fn authority_only_is_a_complete_configuration() {
 fn ledger_only_is_a_complete_configuration() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
-    let ledger = bare_repo(tmp.path(), "ledger");
+    let ledger = ledger_url();
     init(&db);
 
     qp(&db)
@@ -192,7 +195,7 @@ fn bare_clear_returns_the_store_to_local_only() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     let authority = bare_repo(tmp.path(), "authority");
-    let ledger = bare_repo(tmp.path(), "ledger");
+    let ledger = ledger_url();
     init(&db);
     qp(&db)
         .args([
@@ -238,7 +241,7 @@ fn clearing_one_url_leaves_the_other_alone() {
     let tmp = tempfile::tempdir().unwrap();
     let db = tmp.path().join("db.sqlite");
     let authority = bare_repo(tmp.path(), "authority");
-    let ledger = bare_repo(tmp.path(), "ledger");
+    let ledger = ledger_url();
     init(&db);
     qp(&db)
         .args([
@@ -431,6 +434,14 @@ fn an_empty_url_is_rejected_and_writes_nothing() {
 // helpers
 // ---------------------------------------------------------------------------
 
+/// A ledger url that is well-formed and belongs to nobody.
+///
+/// Config-only: `remote set` writes the url and validates its shape without
+/// contacting anything, so this never resolves and never needs to.
+fn ledger_url() -> String {
+    "s3://minio.host.example/quipu-ledger".to_string()
+}
+
 /// A real bare repository in the test's temp dir.
 ///
 /// Identical git semantics to a remote reached over ssh, and it belongs to
@@ -474,5 +485,52 @@ fn qp(db: &std::path::Path) -> Command {
     let mut c = Command::cargo_bin("qp").unwrap();
     c.env_remove("QP_DB");
     c.env("QP_DB", db);
+    // The ledger probe reads credentials from the environment, so a developer
+    // with real ones exported would otherwise get a different answer from CI.
+    for k in [
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+    ] {
+        c.env_remove(k);
+    }
     c
+}
+
+/// A ledger probe reports the object store's own diagnosis, not "unreachable".
+///
+/// The distinction is the whole value of the probe: absent credentials and an
+/// unreachable endpoint want completely different fixes, and a follow-up
+/// `qp remote doctor` can only tell apart causes this surface preserved.
+#[test]
+fn checking_a_ledger_reports_the_cause_rather_than_a_flat_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    init(&db);
+
+    let out = qp(&db)
+        .args([
+            "remote",
+            "set",
+            "--ledger",
+            &ledger_url(),
+            "--check",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "a failed probe must not fail the write"
+    );
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let why = v["ledger_reachable"]["fault"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no fault reported: {v}"));
+    assert!(
+        why.contains("AWS_ACCESS_KEY_ID"),
+        "the probe flattened a credential problem into something unactionable: {why}"
+    );
+    // And the config was still written: a probe reports, it never blocks.
+    assert_eq!(show_json(&db, &[])["ledger"], Value::from(ledger_url()));
 }

@@ -10,6 +10,7 @@ mod merge;
 mod outcome;
 mod project;
 mod remote;
+mod s3;
 mod store;
 mod time;
 
