@@ -391,7 +391,7 @@ echo — never the raw argument the user typed.
 Agents branch on these, so they are a contract. They come from two places:
 `QuipuError::exit_code` in [`db.rs`](https://github.com/FMazzoni/quipu/blob/main/src/db.rs) maps the error taxonomy to
 0/1/2, and [`main.rs`](https://github.com/FMazzoni/quipu/blob/main/src/main.rs) applies it; `wait` exits 3 and 4
-directly.
+directly, and `remote doctor` exits 5.
 
 | code | meaning |
 |---|---|
@@ -400,6 +400,13 @@ directly.
 | 2 | `conflict`, `not_owner`, `not_found`, `invariant` — the state of the store refused the operation |
 | 3 | `wait` timed out |
 | 4 | `wait --cohort-done` matched an empty cohort |
+| 5 | `remote doctor` found a fault in a configured remote |
+
+Code 5 is not an error envelope. `remote doctor` succeeded at what it was asked
+— it diagnosed the remote — and its report goes to stdout in the requested format
+either way; the code is what a setup script branches on. It is deliberately not 2:
+a skill that retries on 2 would loop forever against a remote that will never come
+good on its own.
 
 Code 2 is the interesting one: it is the *expected* outcome of losing a race, not
 a failure. That is what makes the 1-vs-2 boundary load-bearing: only 2 means "the

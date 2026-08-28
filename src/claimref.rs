@@ -162,7 +162,7 @@ fn auth_err(detail: &str) -> anyhow::Error {
 ///
 /// A miss falls to `unreachable`, never to "already claimed": the 1-vs-128
 /// split is the only classification allowed to decide whether a ticket is held.
-fn looks_like_auth(stderr: &str) -> bool {
+pub fn looks_like_auth(stderr: &str) -> bool {
     let s = stderr.to_ascii_lowercase();
     [
         "permission denied",
@@ -316,6 +316,57 @@ impl Arbiter {
         }
     }
 
+    /// Creates and then deletes a probe ref, proving the namespace is writable.
+    ///
+    /// A read probe proves nothing here. `git ls-remote` succeeds against a
+    /// repository whose refs the caller may not write, and against one served
+    /// read-only — and a claim is a ref CREATION, so a store that passes a read
+    /// check can still fail every claim it ever makes. This is the only probe
+    /// that exercises the operation `claim` performs.
+    ///
+    /// Deliberately not routed through `acquire`/`release`: those are the claim
+    /// path and answer in the claim vocabulary ("already claimed"), which is
+    /// the wrong sentence for a diagnostic. The failure this must report is
+    /// "the namespace refused a write", and the leftover case — created but not
+    /// removed — has to be named rather than swallowed, because it leaves
+    /// something behind on someone else's host.
+    pub fn probe_namespace(&self, refname: &str) -> WriteProbe {
+        let repo = match ensure_repo(&self.db_path) {
+            Ok(r) => r,
+            Err(e) => return WriteProbe::CreateFailed(e.to_string()),
+        };
+        let sha = match self.write_blob(&repo, "qp-remote-doctor") {
+            Ok(s) => s,
+            Err(e) => return WriteProbe::CreateFailed(e.to_string()),
+        };
+        let created = self
+            .git(&repo)
+            .arg("push")
+            .arg(format!("--force-with-lease={refname}:"))
+            .arg(&self.url)
+            .arg(format!("{sha}:{refname}"))
+            .output();
+        match created {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                return WriteProbe::CreateFailed(
+                    first_line(&String::from_utf8_lossy(&o.stderr)).to_string(),
+                )
+            }
+            Err(e) => return WriteProbe::CreateFailed(format!("could not run git: {e}")),
+        }
+        // Unleased: this process created the ref one round trip ago and is the
+        // only thing that has ever known its name, so a lease here would only
+        // add a way to leave litter behind.
+        if self.release(refname, None) {
+            WriteProbe::Ok
+        } else {
+            WriteProbe::Leftover {
+                refname: refname.to_string(),
+            }
+        }
+    }
+
     /// Deletes `refname`, freeing the ticket for the next claimant.
     ///
     /// Best-effort by design, and it runs *after* the local release has
@@ -340,6 +391,18 @@ impl Arbiter {
         c.arg(&self.url).arg(format!(":{refname}"));
         matches!(c.output(), Ok(o) if o.status.success())
     }
+}
+
+/// What a namespace write probe found. `Leftover` is a failure with a mess attached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteProbe {
+    Ok,
+    /// The ref could not be created. Carries git's own first line.
+    CreateFailed(String),
+    /// Created but not removed — the caller must name the ref so a human can.
+    Leftover {
+        refname: String,
+    },
 }
 
 fn first_line(s: &str) -> &str {

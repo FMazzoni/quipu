@@ -7,6 +7,7 @@ qp remote set --authority <url> [--ledger s3://<host>/<bucket>[/<prefix>]] [--ch
 qp remote set --ledger s3://<host>/<bucket>[/<prefix>] [--check] [--json]
 qp remote show   [--check] [--json]
 qp remote clear  [--authority] [--ledger] [--all] [--json]
+qp remote doctor [--json]
 ```
 
 ## Two urls, independently settable, either omittable
@@ -58,6 +59,11 @@ A ledger probe reports the object store's own diagnosis rather than a flat
 credentials, rejected credentials, a missing bucket, a prefix outside your
 policy, a TLS trust failure and a skewed clock all want different fixes, and they
 are indistinguishable once flattened.
+
+`--check` answers "is it there". `qp remote doctor` answers "why is it not",
+which is a different and much larger question — see `doctor` for the checks, the
+order they run in, and the failures they exist to name. It is the only command
+here that writes anything to a remote, and what it writes it removes.
 
 `show` is likewise local unless `--check` is passed, which keeps the governing
 rule intact: exactly one command talks to the network synchronously, and it is

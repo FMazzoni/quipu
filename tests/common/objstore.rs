@@ -56,6 +56,17 @@ struct State {
     seen: Vec<Seen>,
     /// Forced onto every response when set, so error handling can be exercised.
     fail: Option<(u16, String)>,
+    /// Forced onto LISTs whose prefix starts with this, and nothing else.
+    ///
+    /// This is what a prefix-scoped key looks like from the client: the bucket
+    /// root answers, one prefix inside it does not. A blanket `fail_with`
+    /// cannot produce that, and the distinction between "no such bucket" and
+    /// "your key is not scoped here" is undiagnosable without it.
+    deny_prefix: Option<String>,
+    /// Seconds added to the `Date` header, so a clock can be put out of true.
+    date_skew: i64,
+    /// Denied for this HTTP method only — a key that may read and not write.
+    deny_method: Option<String>,
 }
 
 /// A running stub. Dropping it stops the listener thread.
@@ -153,6 +164,25 @@ impl ObjectStore {
         self.state.lock().unwrap().fail = Some((status, code.to_string()));
     }
 
+    /// Denies only requests at or under `prefix`, the way a scoped key does.
+    pub fn deny_prefix(&self, prefix: &str) {
+        self.state.lock().unwrap().deny_prefix = Some(prefix.to_string());
+    }
+
+    /// Denies one HTTP method and serves the rest, the way a read-only key does.
+    pub fn deny_method(&self, method: &str) {
+        self.state.lock().unwrap().deny_method = Some(method.to_string());
+    }
+
+    /// Offsets the `Date` header every response carries, in seconds.
+    ///
+    /// The store keeps SERVING — a skew is only refused once it passes the
+    /// signer's tolerance, and a doctor that can see the header should name the
+    /// clock before the store ever refuses anything.
+    pub fn skew_clock(&self, seconds: i64) {
+        self.state.lock().unwrap().date_skew = seconds;
+    }
+
     /// The environment a `qp` child needs to talk to this store.
     ///
     /// Credentials are obvious fakes. Nothing here can reach a real endpoint:
@@ -216,25 +246,39 @@ fn serve(mut stream: TcpStream, state: &Arc<Mutex<State>>, page: usize) -> std::
         reader.read_exact(&mut body)?;
     }
 
-    let (status, content) = {
+    let (status, content, skew) = {
         let mut st = state.lock().unwrap();
         st.seen.push(Seen {
             method: method.clone(),
             target: target.clone(),
             headers: headers.clone(),
         });
-        if let Some((code, name)) = st.fail.clone() {
-            (code, error_xml(&name, "forced by the test harness"))
+        let skew = st.date_skew;
+        let denied = st.deny_prefix.as_ref().is_some_and(|p| denies(&target, p))
+            || st
+                .deny_method
+                .as_ref()
+                .is_some_and(|m| m.eq_ignore_ascii_case(&method));
+        if denied {
+            (
+                403,
+                error_xml("AccessDenied", "denied by the test harness"),
+                skew,
+            )
+        } else if let Some((code, name)) = st.fail.clone() {
+            (code, error_xml(&name, "forced by the test harness"), skew)
         } else {
-            handle(&method, &target, body, &mut st, page)
+            let (c, b) = handle(&method, &target, body, &mut st, page);
+            (c, b, skew)
         }
     };
 
     let head = format!(
         "HTTP/1.1 {status} {}\r\nContent-Length: {}\r\nContent-Type: application/xml\r\n\
-         Connection: close\r\n\r\n",
+         Date: {}\r\nConnection: close\r\n\r\n",
         reason(status),
-        content.len()
+        content.len(),
+        http_date(skew)
     );
     stream.write_all(head.as_bytes())?;
     stream.write_all(&content)?;
@@ -350,6 +394,25 @@ fn list(st: &State, query: &BTreeMap<String, String>, page: usize) -> (u16, Vec<
     }
     xml.push_str("</ListBucketResult>");
     (200, xml.into_bytes())
+}
+
+/// Whether this request addresses `prefix` — a LIST of it, or an object under it.
+///
+/// Matched against the decoded target so both the `prefix=` query a LIST sends
+/// and the key path a GET/PUT sends are covered by one knob.
+fn denies(target: &str, prefix: &str) -> bool {
+    let decoded = decode(target);
+    let encoded_prefix = prefix.replace('/', "%2F");
+    decoded.contains(prefix) || target.contains(&encoded_prefix)
+}
+
+/// The `Date` header, offset by `skew` seconds. RFC 9110 IMF-fixdate.
+fn http_date(skew: i64) -> String {
+    let t = time::OffsetDateTime::now_utc() + time::Duration::seconds(skew);
+    let fmt = time::macros::format_description!(
+        "[weekday repr:short], [day] [month repr:short] [year] [hour]:[minute]:[second] GMT"
+    );
+    t.format(fmt).expect("IMF-fixdate formats")
 }
 
 fn error_xml(code: &str, message: &str) -> Vec<u8> {
