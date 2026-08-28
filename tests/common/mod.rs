@@ -15,6 +15,8 @@
 
 #![allow(dead_code)]
 
+pub mod objstore;
+
 use assert_cmd::Command;
 use rusqlite::types::ValueRef;
 use rusqlite::Connection;

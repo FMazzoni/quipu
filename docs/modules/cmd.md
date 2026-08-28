@@ -66,8 +66,8 @@ attachment and its exports are properties of the store, not transitions in any
 task's history.
 
 [`sync`](sync/index.html) and [`ledger`](ledger/index.html) are the only modules
-here that reach the network, and only when a person runs one; `ledger` fetches
-through `sync::materialise` rather than a path of its own, and never pushes.
+here that reach the network, and only when a person runs one; `ledger` downloads
+through `sync::materialise` rather than a path of its own, and only ever GETs.
 `remote`'s own probe is opt-in behind `--check`, so a store that has never run
 `qp remote set` spawns nothing at all — and no command grows a network
 dependency because these two exist.

@@ -3,7 +3,7 @@
 #![doc = include_str!("../../docs/modules/ledger.md")]
 
 use crate::outcome::{emit, Outcome};
-use crate::{db, project, remote, store};
+use crate::{db, project, remote, s3, store};
 use anyhow::{Context, Result};
 use clap::Args;
 use rusqlite::Connection;
@@ -114,10 +114,14 @@ pub fn run(db_path: &Path, a: LedgerArgs) -> Result<()> {
     let local_key = project::read(&conn)?;
     drop(conn);
 
-    // The same ensure_repo / fetch / integrate `qp sync` runs, deliberately: a
-    // second fetch path would be a second set of refspecs to get wrong, and the
-    // refspec is what keeps `refs/quipu/claims/*` out of reach. It never pushes.
-    let dir = crate::cmd::sync::materialise(db_path, &url)?;
+    // The one command that reads across projects, so the one that lists the
+    // whole bucket rather than a single prefix. It downloads into a throwaway
+    // directory and writes nothing local — reading the ledger is not joining it.
+    let client = s3::Client::open(&url)?;
+    let scratch = s3::Scratch::new("ledger")?;
+    let dir = scratch.path().join("ledger");
+    std::fs::create_dir_all(&dir)?;
+    crate::cmd::sync::materialise(&client, None, &dir)?;
 
     let scanned = project::scan(&dir)?;
     let prefixes: HashMap<&str, &str> = scanned
@@ -126,7 +130,7 @@ pub fn run(db_path: &Path, a: LedgerArgs) -> Result<()> {
         .collect();
     let grouped = project::batches_by_project(&dir)?;
 
-    let scratch = Scratch::new()?;
+    let projections = s3::Scratch::new("projection")?;
     let filter = store::TaskFilter {
         state: a.state.map(|s| s.as_str()),
         assigned_to_glob: a.assigned_to.as_deref(),
@@ -137,7 +141,7 @@ pub fn run(db_path: &Path, a: LedgerArgs) -> Result<()> {
     let mut projects = Vec::new();
     for (n, (key, files)) in grouped.iter().enumerate() {
         let prefix = prefixes.get(key.as_str()).copied().unwrap_or("QP");
-        let tasks = replay_project(&scratch, n, files, key, prefix, &filter)?;
+        let tasks = replay_project(&projections, n, files, key, prefix, &filter)?;
         projects.push(ProjectView {
             project_key: key.clone(),
             display_prefix: prefix.to_string(),
@@ -185,14 +189,14 @@ pub fn run(db_path: &Path, a: LedgerArgs) -> Result<()> {
 /// nothing downstream can tell apart — both render as a project with no tickets,
 /// exit 0, and look exactly like a ledger nobody has written to.
 fn replay_project(
-    scratch: &Scratch,
+    scratch: &s3::Scratch,
     n: usize,
     files: &[PathBuf],
     project_key: &str,
     prefix: &str,
     filter: &store::TaskFilter,
 ) -> Result<Vec<TaskView>> {
-    let root = scratch.0.join(n.to_string());
+    let root = scratch.path().join(n.to_string());
     let batches = root.join("batches");
     for f in files {
         // Under `<origin uuid>/<original name>`: a batch is named by the range
@@ -311,28 +315,4 @@ fn origins(conn: &Connection) -> Result<HashMap<i64, (String, i64)>> {
 /// Enough of a uuid to tell two stores apart in a terminal.
 fn short(uuid: &str) -> String {
     uuid.chars().take(8).collect()
-}
-
-/// A temp directory that removes itself, projections and staged batches and all.
-///
-/// The whole point of this command is that answering it writes nothing anyone
-/// keeps. It lives under the system temp directory rather than beside the store
-/// so a crash cannot leave a half-built projection inside `.quipu/`, where the
-/// next reader would find something that looks like state.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new() -> Result<Self> {
-        let nonce = crate::time::now_rfc3339().replace([':', '.', '-'], "");
-        let dir = std::env::temp_dir().join(format!("quipu-ledger-{}-{nonce}", std::process::id()));
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("creating scratch directory {}", dir.display()))?;
-        Ok(Self(dir))
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
 }

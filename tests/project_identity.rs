@@ -4,28 +4,41 @@
 //! "second machine" made by copying a store is worthless for this file: a copy
 //! shares the original's `project_uuid` AND would trivially share its key, so it
 //! cannot tell apart the two things these tests exist to distinguish. The join
-//! path is the real one — a bare git repository, a sync, and `qp init --from`
-//! reading batches somebody else actually wrote.
+//! path is the real one — an object store, a sync, and `qp init --from` reading
+//! batches somebody else actually wrote.
 //!
 //! No hostname, url or account belonging to anyone appears here; the ledger is
-//! `git init --bare` in a temp directory, reached by path or by a `file://` url.
-//! Nothing in this file touches a network.
+//! an in-process S3 stub on a loopback port, and every credential is an obvious
+//! fake. Nothing in this file reaches a network.
+
+mod common;
 
 use assert_cmd::Command;
+use common::objstore::ObjectStore;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-fn qp(db: &Path) -> Command {
-    let mut c = Command::cargo_bin("qp").unwrap();
-    c.env("QP_DB", db);
+/// Each test gets its own stub: a shared bucket would leak one test's projects
+/// into another's, and how many projects a ledger holds is what several of
+/// these tests are about.
+fn qp_env(c: &mut Command, store: &ObjectStore) {
     // The guard reads this; an ambient value from the developer's shell would
     // make these tests describe that machine instead of the fixture.
     c.env_remove("QUIPU_LEDGER");
+    for (k, v) in store.env() {
+        c.env(k, v);
+    }
+}
+
+fn qp(db: &Path, store: &ObjectStore) -> Command {
+    let mut c = Command::cargo_bin("qp").unwrap();
+    c.env("QP_DB", db);
+    qp_env(&mut c, store);
     c
 }
 
-fn ok(db: &Path, args: &[&str]) -> String {
-    let out = qp(db)
+fn ok(db: &Path, store: &ObjectStore, args: &[&str]) -> String {
+    let out = qp(db, store)
         .args(args)
         .assert()
         .try_success()
@@ -33,19 +46,8 @@ fn ok(db: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.get_output().stdout).to_string()
 }
 
-fn json(db: &Path, args: &[&str]) -> Value {
-    serde_json::from_str(&ok(db, args)).expect("json output")
-}
-
-fn bare_repo(root: &Path) -> PathBuf {
-    let path = root.join("ledger.git");
-    assert!(std::process::Command::new("git")
-        .args(["init", "--bare", "-q"])
-        .arg(&path)
-        .status()
-        .expect("spawn git")
-        .success());
-    path
+fn json(db: &Path, store: &ObjectStore, args: &[&str]) -> Value {
+    serde_json::from_str(&ok(db, store, args)).expect("json output")
 }
 
 /// One machine: its own directory, its own `qp init`, its own uuid.
@@ -55,14 +57,11 @@ struct Machine {
 
 impl Machine {
     /// A machine that STARTS a project.
-    fn started(root: &Path, name: &str, remote: &Path) -> Self {
+    fn started(root: &Path, name: &str, store: &ObjectStore) -> Self {
         let db = root.join(name).join("db.sqlite");
         std::fs::create_dir_all(db.parent().unwrap()).unwrap();
-        ok(&db, &["init"]);
-        ok(
-            &db,
-            &["remote", "set", "--ledger", remote.to_str().unwrap()],
-        );
+        ok(&db, store, &["init"]);
+        ok(&db, store, &["remote", "set", "--ledger", &store.url()]);
         Self { db }
     }
 
@@ -80,8 +79,15 @@ impl Machine {
         self.meta("project_key")
     }
 
-    fn ledger_clone(&self) -> PathBuf {
-        self.db.parent().unwrap().join("ledger")
+    /// This store's batches as a plain directory, the shape `qp export` writes.
+    ///
+    /// There is no ledger clone any more — the whole point of the object-store
+    /// transport is that nothing is mirrored locally — so a test that needs
+    /// batch FILES asks for them the supported way. Identical bytes to what the
+    /// sync published; only the transport differs.
+    fn export_to(&self, dir: &Path, store: &ObjectStore) -> PathBuf {
+        ok(&self.db, store, &["export", "--out", dir.to_str().unwrap()]);
+        dir.to_path_buf()
     }
 
     fn titles(&self) -> Vec<String> {
@@ -98,23 +104,12 @@ impl Machine {
     }
 }
 
-fn git(dir: &Path, args: &[&str]) -> String {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .expect("spawn git");
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
-
 /// A store that has published one ticket, and the ledger clone holding it.
-fn published_project(root: &Path) -> (Machine, PathBuf) {
-    let remote = bare_repo(root);
-    let a = Machine::started(root, "a", &remote);
-    ok(&a.db, &["add", "written where the project started"]);
-    ok(&a.db, &["sync"]);
-    (a, remote)
+fn published_project(root: &Path, store: &ObjectStore) -> Machine {
+    let a = Machine::started(root, "a", store);
+    ok(&a.db, store, &["add", "written where the project started"]);
+    ok(&a.db, store, &["sync"]);
+    a
 }
 
 // ---------------------------------------------------------------------------
@@ -124,9 +119,9 @@ fn published_project(root: &Path) -> (Machine, PathBuf) {
 #[test]
 fn two_separate_inits_are_two_different_projects() {
     let tmp = tempfile::tempdir().unwrap();
-    let remote = bare_repo(tmp.path());
-    let a = Machine::started(tmp.path(), "a", &remote);
-    let b = Machine::started(tmp.path(), "b", &remote);
+    let store = ObjectStore::start();
+    let a = Machine::started(tmp.path(), "a", &store);
+    let b = Machine::started(tmp.path(), "b", &store);
 
     assert_ne!(a.uuid(), b.uuid(), "two `qp init`s must mint two stores");
     assert_ne!(
@@ -140,20 +135,13 @@ fn two_separate_inits_are_two_different_projects() {
 #[test]
 fn a_joined_store_shares_the_project_key_and_not_the_store_uuid() {
     let tmp = tempfile::tempdir().unwrap();
-    let (a, remote) = published_project(tmp.path());
+    let store = ObjectStore::start();
+    let a = published_project(tmp.path(), &store);
 
-    // The real join path: b reads batches a actually wrote, through a's clone.
+    // The real join path: b reads batches a actually wrote, from the ledger.
     let b_db = tmp.path().join("b").join("db.sqlite");
     std::fs::create_dir_all(b_db.parent().unwrap()).unwrap();
-    let out = json(
-        &b_db,
-        &[
-            "init",
-            "--from",
-            a.ledger_clone().to_str().unwrap(),
-            "--json",
-        ],
-    );
+    let out = json(&b_db, &store, &["init", "--from", &store.url(), "--json"]);
     assert_eq!(out["identity"], "inherited");
     let b = Machine { db: b_db };
 
@@ -175,11 +163,11 @@ fn a_joined_store_shares_the_project_key_and_not_the_store_uuid() {
     // And it behaves like a peer, not just like a matching row.
     ok(
         &b.db,
-        &["remote", "set", "--ledger", remote.to_str().unwrap()],
+        &store,
+        &["add", "written on the machine that joined"],
     );
-    ok(&b.db, &["add", "written on the machine that joined"]);
-    ok(&b.db, &["sync"]);
-    ok(&a.db, &["sync"]);
+    ok(&b.db, &store, &["sync"]);
+    ok(&a.db, &store, &["sync"]);
     assert_eq!(
         a.titles(),
         b.titles(),
@@ -191,16 +179,21 @@ fn a_joined_store_shares_the_project_key_and_not_the_store_uuid() {
 #[test]
 fn restoring_keeps_both_identities() {
     let tmp = tempfile::tempdir().unwrap();
-    let (a, _remote) = published_project(tmp.path());
+    let store = ObjectStore::start();
+    let a = published_project(tmp.path(), &store);
 
     let d = tmp.path().join("d").join("db.sqlite");
     std::fs::create_dir_all(d.parent().unwrap()).unwrap();
     let out = json(
         &d,
+        &store,
         &[
             "init",
             "--from",
-            a.ledger_clone().join(a.uuid()).to_str().unwrap(),
+            a.export_to(&tmp.path().join("dump"), &store)
+                .join(a.uuid())
+                .to_str()
+                .unwrap(),
             "--restore",
             "--json",
         ],
@@ -222,12 +215,16 @@ fn restoring_keeps_both_identities() {
 #[test]
 fn plain_init_beside_a_populated_ledger_refuses_and_names_both_choices() {
     let tmp = tempfile::tempdir().unwrap();
-    let (a, _remote) = published_project(tmp.path());
+    let store = ObjectStore::start();
+    let a = published_project(tmp.path(), &store);
 
     let b = tmp.path().join("b").join("db.sqlite");
     std::fs::create_dir_all(b.parent().unwrap()).unwrap();
-    let assert = qp(&b)
-        .env("QUIPU_LEDGER", a.ledger_clone())
+    let assert = qp(&b, &store)
+        .env(
+            "QUIPU_LEDGER",
+            a.export_to(&tmp.path().join("dump"), &store),
+        )
         .arg("init")
         .assert()
         .failure();
@@ -246,13 +243,17 @@ fn plain_init_beside_a_populated_ledger_refuses_and_names_both_choices() {
 #[test]
 fn starting_a_new_project_on_a_populated_ledger_stays_possible() {
     let tmp = tempfile::tempdir().unwrap();
-    let (a, _remote) = published_project(tmp.path());
+    let store = ObjectStore::start();
+    let a = published_project(tmp.path(), &store);
 
     let c = tmp.path().join("c").join("db.sqlite");
     std::fs::create_dir_all(c.parent().unwrap()).unwrap();
     let out: Value = serde_json::from_slice(
-        &qp(&c)
-            .env("QUIPU_LEDGER", a.ledger_clone())
+        &qp(&c, &store)
+            .env(
+                "QUIPU_LEDGER",
+                a.export_to(&tmp.path().join("dump"), &store),
+            )
             .args(["init", "--new-project", "--json"])
             .assert()
             .success()
@@ -271,13 +272,18 @@ fn starting_a_new_project_on_a_populated_ledger_stays_possible() {
 #[test]
 fn re_initialising_an_existing_store_is_still_idempotent() {
     let tmp = tempfile::tempdir().unwrap();
-    let (a, _remote) = published_project(tmp.path());
+    let store = ObjectStore::start();
+    let a = published_project(tmp.path(), &store);
     let before = a.key();
 
     // The guard must never fire on a store that already has an identity: the
     // ledger clone sits right beside this database, and `qp init --default-tag`
     // on an existing store is a normal thing to run.
-    let out = json(&a.db, &["init", "--default-tag", "kind:bug", "--json"]);
+    let out = json(
+        &a.db,
+        &store,
+        &["init", "--default-tag", "kind:bug", "--json"],
+    );
     assert_eq!(out["identity"], "existing");
     assert_eq!(a.key(), before, "re-init must not re-home a store");
 }
@@ -285,8 +291,9 @@ fn re_initialising_an_existing_store_is_still_idempotent() {
 #[test]
 fn a_store_cannot_be_moved_to_another_project() {
     let tmp = tempfile::tempdir().unwrap();
-    let (a, _remote) = published_project(tmp.path());
-    qp(&a.db)
+    let store = ObjectStore::start();
+    let a = published_project(tmp.path(), &store);
+    qp(&a.db, &store)
         .args(["init", "--project-key", "some-other-project"])
         .assert()
         .failure();
@@ -328,18 +335,21 @@ fn strip_keys(dir: &Path) {
 #[test]
 fn a_keyless_ledger_restores_as_the_store_that_wrote_it() {
     let tmp = tempfile::tempdir().unwrap();
-    let (a, _remote) = published_project(tmp.path());
+    let store = ObjectStore::start();
+    let a = published_project(tmp.path(), &store);
     let uuid = a.uuid();
-    strip_keys(&a.ledger_clone());
+    let dump = a.export_to(&tmp.path().join("dump"), &store);
+    strip_keys(&dump);
 
     let r = tmp.path().join("r").join("db.sqlite");
     std::fs::create_dir_all(r.parent().unwrap()).unwrap();
     let out = json(
         &r,
+        &store,
         &[
             "init",
             "--from",
-            a.ledger_clone().join(&uuid).to_str().unwrap(),
+            dump.join(&uuid).to_str().unwrap(),
             "--restore",
             "--json",
         ],
@@ -354,20 +364,18 @@ fn a_keyless_ledger_restores_as_the_store_that_wrote_it() {
 #[test]
 fn a_keyless_ledger_can_still_be_joined_and_named() {
     let tmp = tempfile::tempdir().unwrap();
-    let (a, _remote) = published_project(tmp.path());
+    let store = ObjectStore::start();
+    let a = published_project(tmp.path(), &store);
     let uuid = a.uuid();
-    strip_keys(&a.ledger_clone());
+    let dump = a.export_to(&tmp.path().join("dump"), &store);
+    strip_keys(&dump);
 
     let b = tmp.path().join("b").join("db.sqlite");
     std::fs::create_dir_all(b.parent().unwrap()).unwrap();
     let out = json(
         &b,
-        &[
-            "init",
-            "--from",
-            a.ledger_clone().to_str().unwrap(),
-            "--json",
-        ],
+        &store,
+        &["init", "--from", dump.to_str().unwrap(), "--json"],
     );
     assert_eq!(out["project_key"], format!("legacy-{uuid}"));
     assert_ne!(out["project_uuid"], uuid, "joining still mints a new store");
@@ -383,10 +391,12 @@ fn a_keyless_ledger_can_still_be_joined_and_named() {
 #[test]
 fn a_keyless_ledger_merges_into_its_own_project_and_no_one_elses() {
     let tmp = tempfile::tempdir().unwrap();
-    let (a, _remote) = published_project(tmp.path());
+    let store = ObjectStore::start();
+    let a = published_project(tmp.path(), &store);
     let uuid = a.uuid();
-    strip_keys(&a.ledger_clone());
-    let ledger = a.ledger_clone();
+    let dump = a.export_to(&tmp.path().join("dump"), &store);
+    strip_keys(&dump);
+    let ledger = dump.clone();
 
     // The store that wrote it, as a joiner sees it: the join derives
     // `legacy-<uuid>` and folds the pre-join history in under that key.
@@ -394,6 +404,7 @@ fn a_keyless_ledger_merges_into_its_own_project_and_no_one_elses() {
     std::fs::create_dir_all(b_db.parent().unwrap()).unwrap();
     let out = json(
         &b_db,
+        &store,
         &["init", "--from", ledger.to_str().unwrap(), "--json"],
     );
     assert_eq!(out["project_key"], format!("legacy-{uuid}"));
@@ -406,10 +417,11 @@ fn a_keyless_ledger_merges_into_its_own_project_and_no_one_elses() {
     // An unrelated project reading the same directory gets nothing from it.
     let s_db = tmp.path().join("s").join("db.sqlite");
     std::fs::create_dir_all(s_db.parent().unwrap()).unwrap();
-    ok(&s_db, &["init", "--new-project"]);
-    ok(&s_db, &["add", "the stranger's own ticket"]);
+    ok(&s_db, &store, &["init", "--new-project"]);
+    ok(&s_db, &store, &["add", "the stranger's own ticket"]);
     let merged = json(
         &s_db,
+        &store,
         &[
             "import",
             "--from",
@@ -435,7 +447,8 @@ fn a_keyless_ledger_merges_into_its_own_project_and_no_one_elses() {
 #[test]
 fn a_store_that_predates_the_key_is_healed_rather_than_bricked() {
     let tmp = tempfile::tempdir().unwrap();
-    let (a, _remote) = published_project(tmp.path());
+    let store = ObjectStore::start();
+    let a = published_project(tmp.path(), &store);
     let uuid = a.uuid();
 
     // Exactly what a store initialised by an older binary looks like: every row
@@ -448,13 +461,13 @@ fn a_store_that_predates_the_key_is_healed_rather_than_bricked() {
     }
 
     // Any command at all heals it, and nothing else is disturbed.
-    let listed = ok(&a.db, &["list"]);
+    let listed = ok(&a.db, &store, &["list"]);
     assert!(listed.contains("written where the project started"));
     assert_eq!(a.key(), format!("legacy-{uuid}"));
     // And the healed key is the one its already-published keyless batches mean,
     // so its own history does not become another project's.
-    ok(&a.db, &["add", "after the upgrade"]);
-    ok(&a.db, &["sync"]);
+    ok(&a.db, &store, &["add", "after the upgrade"]);
+    ok(&a.db, &store, &["sync"]);
     assert_eq!(a.titles().len(), 2);
 }
 
@@ -465,14 +478,15 @@ fn a_store_that_predates_the_key_is_healed_rather_than_bricked() {
 #[test]
 fn joining_from_a_url_needs_no_clone_and_no_further_configuration() {
     let tmp = tempfile::tempdir().unwrap();
-    let (a, remote) = published_project(tmp.path());
-    let url = format!("file://{}", remote.display());
+    let store = ObjectStore::start();
+    let a = published_project(tmp.path(), &store);
+    let url = store.url();
 
-    // Nothing local: no clone, no `qp remote set`, no `git` run by hand. This is
+    // Nothing local: no clone, no `qp remote set`, nothing run by hand. This is
     // the whole state a person has when they sit down at a second machine.
     let b_db = tmp.path().join("b").join("db.sqlite");
     std::fs::create_dir_all(b_db.parent().unwrap()).unwrap();
-    let out = json(&b_db, &["init", "--from", &url, "--json"]);
+    let out = json(&b_db, &store, &["init", "--from", &url, "--json"]);
     assert_eq!(out["identity"], "inherited");
     let b = Machine { db: b_db };
 
@@ -480,41 +494,50 @@ fn joining_from_a_url_needs_no_clone_and_no_further_configuration() {
     assert_ne!(a.uuid(), b.uuid(), "and must still be its own store");
 
     // The join recorded where it came from, so the machine is syncable at once.
-    let shown = ok(&b.db, &["remote", "show"]);
+    let shown = ok(&b.db, &store, &["remote", "show"]);
     assert!(
         shown.contains(&url),
         "join must set the ledger remote: {shown}"
     );
 
-    // And it did not leave the project's existing tickets behind: sync decides
-    // what is new by diffing its clone across a fetch, so a join that populated
-    // that clone and left it at that would never receive them at all.
+    // And it did not leave the project's existing tickets behind. A join that
+    // merely recorded the url and left the history for the first sync would
+    // never receive it: sync only fetches what it has not already accounted
+    // for, and a store that has accounted for nothing still has to be given the
+    // history explicitly.
     assert_eq!(
         a.titles(),
         b.titles(),
         "a join must carry the project history"
     );
 
-    ok(&b.db, &["add", "written on the machine that joined"]);
-    ok(&b.db, &["sync"]);
-    ok(&a.db, &["sync"]);
+    ok(
+        &b.db,
+        &store,
+        &["add", "written on the machine that joined"],
+    );
+    ok(&b.db, &store, &["sync"]);
+    ok(&a.db, &store, &["sync"]);
     assert_eq!(a.titles(), b.titles());
     assert_eq!(a.titles().len(), 2);
 }
 
 #[test]
-fn a_bare_ledger_path_is_read_as_a_remote_not_as_a_directory() {
+fn an_exported_directory_is_read_in_place_rather_than_as_a_url() {
     let tmp = tempfile::tempdir().unwrap();
-    let (a, remote) = published_project(tmp.path());
+    let store = ObjectStore::start();
+    let a = published_project(tmp.path(), &store);
 
-    // A bare repository is BOTH an existing directory and a git url, and its
-    // batches are in `objects` rather than in a tree. Reading it as a directory
-    // finds nothing and reports an empty ledger about a full one.
+    // The disaster-recovery shape: a directory of batch files, no credentials,
+    // no network. It has to keep working, because it is what someone has when
+    // the object store is the thing that is gone.
+    let dump = a.export_to(&tmp.path().join("dump"), &store);
     let b_db = tmp.path().join("b").join("db.sqlite");
     std::fs::create_dir_all(b_db.parent().unwrap()).unwrap();
     let out = json(
         &b_db,
-        &["init", "--from", remote.to_str().unwrap(), "--json"],
+        &store,
+        &["init", "--from", dump.to_str().unwrap(), "--json"],
     );
     assert_eq!(out["identity"], "inherited");
     assert_eq!(out["project_key"].as_str().unwrap(), a.key());
@@ -524,12 +547,13 @@ fn a_bare_ledger_path_is_read_as_a_remote_not_as_a_directory() {
 #[test]
 fn the_guard_fires_for_a_ledger_that_is_only_a_url() {
     let tmp = tempfile::tempdir().unwrap();
-    let (_a, remote) = published_project(tmp.path());
-    let url = format!("file://{}", remote.display());
+    let store = ObjectStore::start();
+    let _a = published_project(tmp.path(), &store);
+    let url = store.url();
 
     let b = tmp.path().join("b").join("db.sqlite");
     std::fs::create_dir_all(b.parent().unwrap()).unwrap();
-    let assert = qp(&b)
+    let assert = qp(&b, &store)
         .env("QUIPU_LEDGER", &url)
         .arg("init")
         .assert()
@@ -547,62 +571,33 @@ fn the_guard_fires_for_a_ledger_that_is_only_a_url() {
 }
 
 // ---------------------------------------------------------------------------
-// the branch the batches live on
+// an empty answer has two causes
 // ---------------------------------------------------------------------------
 
+/// An empty ledger and an unreadable one look identical, so the message says so.
+///
+/// A LIST scoped outside your credentials' policy is not refused — it returns
+/// nothing, exactly like a bucket nobody has written to. Reporting only "no
+/// project here" sends someone looking for a lost ledger when the real fault is
+/// a key that cannot see it.
 #[test]
-fn a_plain_clone_of_a_published_ledger_lands_on_the_batches() {
+fn an_empty_ledger_names_the_other_thing_it_could_be() {
     let tmp = tempfile::tempdir().unwrap();
-    let (a, remote) = published_project(tmp.path());
-
-    // A bare repository's HEAD names `main`/`master`, and pushing a branch does
-    // NOT move it — so without quipu adopting it, this clone is an empty tree
-    // and every downstream message describes a full ledger as an empty one.
-    let clone = tmp.path().join("by-hand");
-    assert!(std::process::Command::new("git")
-        .args(["clone", "-q"])
-        .arg(&remote)
-        .arg(&clone)
-        .status()
-        .unwrap()
-        .success());
-
-    assert_eq!(
-        git(&clone, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        "quipu-ledger"
-    );
-    assert!(
-        clone.join(a.uuid()).is_dir(),
-        "the clone must actually hold the batches"
-    );
-}
-
-#[test]
-fn a_ledger_with_no_batches_in_it_names_the_branch_rather_than_denying_the_project() {
-    let tmp = tempfile::tempdir().unwrap();
-    let empty = tmp.path().join("nothing-published.git");
-    assert!(std::process::Command::new("git")
-        .args(["init", "--bare", "-q"])
-        .arg(&empty)
-        .status()
-        .unwrap()
-        .success());
-    let clone = tmp.path().join("by-hand");
-    let _ = std::process::Command::new("git")
-        .args(["clone", "-q"])
-        .arg(&empty)
-        .arg(&clone)
-        .status();
+    let store = ObjectStore::start();
 
     let db = tmp.path().join("b").join("db.sqlite");
     std::fs::create_dir_all(db.parent().unwrap()).unwrap();
-    let assert = qp(&db)
-        .args(["init", "--from", clone.to_str().unwrap()])
+    let assert = qp(&db, &store)
+        .args(["init", "--from", &store.url()])
         .assert()
         .failure();
     let err = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
-    // The message a person hits after cloning a ledger by hand must point at the
-    // real cause. "No project here" alone sends them looking for a lost ledger.
-    assert!(err.contains("quipu-ledger"), "must name the branch: {err}");
-    assert!(err.contains("git clone"), "must name the cause: {err}");
+    assert!(
+        err.contains("no quipu batches"),
+        "must say the ledger is empty: {err}"
+    );
+    assert!(
+        err.contains("AWS_ACCESS_KEY_ID"),
+        "must name the other cause an empty listing has: {err}"
+    );
 }

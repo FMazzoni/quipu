@@ -185,3 +185,26 @@ CREATE TABLE IF NOT EXISTS conflict (
 -- task is tagged for a human to settle. Rebuilt from scratch by every merge.
 
 CREATE INDEX IF NOT EXISTS idx_foreign_event_ts ON foreign_event(ts, origin_uuid, origin_id);
+
+CREATE TABLE IF NOT EXISTS ledger_object (
+    key     TEXT PRIMARY KEY,
+    seen_at TEXT NOT NULL
+);
+-- Every ledger object this store has already accounted for: the batches it PUT
+-- itself, and the peer batches it has GOT and merged.
+--
+-- The ledger lives in object storage and there is no local clone, so the
+-- question "what have I already seen" has nowhere else to live. The git ledger
+-- answered it by diffing filenames in a working tree across a fetch; a working
+-- tree is exactly what had to go, because a fetch takes a whole branch and so
+-- every project's store carried every other project's ledger.
+--
+-- Here instead of on disk because the store is already the durable, transactional
+-- thing on this machine, and because a cache directory would reintroduce in
+-- miniature the local mirror this design deleted. It stays prefix-scoped: only
+-- keys under this store's own project ever land here, which is the whole point.
+--
+-- Losing a row is safe and costs one redundant download: a re-merged batch is a
+-- no-op, since `foreign_event` is keyed by (origin store, origin event id).
+-- Inventing one is not, which is why a key is recorded only after the merge
+-- that read it has committed.

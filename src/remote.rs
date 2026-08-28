@@ -139,24 +139,6 @@ fn is_ssh_url(url: &str) -> bool {
     }
 }
 
-/// The filesystem directory a url names, when it names one at all.
-///
-/// `Some` only for a bare path or a `file://` url that exists as a directory —
-/// the two shapes quipu can act on as a repository rather than only talk to over
-/// a protocol. Everything else (ssh, http, git) is `None`: the far end is
-/// reachable but not touchable, and pretending otherwise means inventing remote
-/// shell commands on someone else's machine.
-pub fn local_path(url: &str) -> Option<PathBuf> {
-    let raw = match url.strip_prefix("file://") {
-        Some(rest) => rest,
-        None if url.contains("://") => return None,
-        None if is_ssh_url(url) => return None,
-        None => url,
-    };
-    let p = PathBuf::from(raw);
-    p.is_dir().then_some(p)
-}
-
 /// Directory holding quipu's ssh control sockets: `<store-dir>/ssh`.
 ///
 /// Under quipu's own directory rather than `~/.ssh`, so a stale socket is
@@ -226,20 +208,34 @@ pub fn git(db_path: &Path, url: &str, lane: &str) -> std::process::Command {
 }
 
 /// Outcome of a reachability probe. Opt-in everywhere; nothing runs it implicitly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+///
+/// `Fault` carries the object store's own diagnosis rather than collapsing to
+/// `Unreachable`. That distinction is the whole value of the probe on a ledger:
+/// missing credentials, rejected credentials, a missing bucket, a prefix outside
+/// your policy, a TLS trust failure and a skewed clock all want different fixes,
+/// and they are indistinguishable once flattened into "could not reach it".
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reach {
     Ok,
     Unreachable,
     /// `git` itself could not be spawned.
     NoGit,
+    /// The far end answered, and said why it would not serve the request.
+    Fault(String),
 }
 
-/// Asks the far end for its refs. The only function in this module that touches the network.
+/// Asks the far end whether it is there. The only function in this module that touches the network.
 ///
-/// `git ls-remote` exits 0 against a reachable remote — including a freshly
-/// created empty bare repo, verified — and 128 when it cannot get there at all.
+/// Two transports, because the two urls are two different things. The claim
+/// authority is a git remote and stays one — the atomic ref compare-and-swap is
+/// what makes a claim a claim. The ledger is an object store, and a LIST of its
+/// own prefix is the cheapest question that exercises credentials, trust, the
+/// bucket and the policy in one round trip.
 pub fn probe(db_path: &Path, url: &str, lane: &str) -> Reach {
+    if crate::s3::is_object_url(url) {
+        return probe_object(url);
+    }
     match git(db_path, url, lane)
         .args(["ls-remote", "--", url])
         .stdout(std::process::Stdio::null())
@@ -250,6 +246,33 @@ pub fn probe(db_path: &Path, url: &str, lane: &str) -> Reach {
         Ok(_) => Reach::Unreachable,
         Err(_) => Reach::NoGit,
     }
+}
+
+fn probe_object(url: &str) -> Reach {
+    let client = match crate::s3::Client::open(url) {
+        Ok(c) => c,
+        Err(e) => return Reach::Fault(e.to_string()),
+    };
+    match client.list("") {
+        Ok(_) => Reach::Ok,
+        Err(crate::s3::Fault::Unreachable { detail, .. }) => {
+            Reach::Fault(format!("unreachable: {detail}"))
+        }
+        Err(e) => Reach::Fault(e.to_string()),
+    }
+}
+
+/// Rejects a ledger url that is not an object-store url.
+///
+/// The ledger is object storage and nothing else. A git url here used to work
+/// and no longer does: a fetch takes a whole branch, so every store carried
+/// every other project's history, and no transport option turned that off. The
+/// refusal names the form rather than saying "invalid", because the person
+/// typing it has a working git url in their hand.
+pub fn validate_ledger_url(url: &str) -> Result<()> {
+    validate_url(url)?;
+    crate::s3::parse(url)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -293,21 +316,6 @@ mod tests {
         let b = ssh_command(&db, url, "agent-b").unwrap();
         assert_ne!(a, b, "two lanes must not share one ControlMaster");
         assert!(a.contains("ControlMaster=auto"));
-    }
-
-    #[test]
-    fn only_a_filesystem_url_names_a_directory_we_can_touch() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().to_str().unwrap();
-        assert_eq!(local_path(dir).as_deref(), Some(tmp.path()));
-        assert_eq!(
-            local_path(&format!("file://{dir}")).as_deref(),
-            Some(tmp.path())
-        );
-        assert!(local_path("ssh://host.invalid/srv/ledger.git").is_none());
-        assert!(local_path("user@host.invalid:ledger.git").is_none());
-        assert!(local_path("https://host.invalid/ledger.git").is_none());
-        assert!(local_path("/no/such/directory/anywhere").is_none());
     }
 
     #[test]

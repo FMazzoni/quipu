@@ -24,10 +24,46 @@ clap = { version = "4.5", features = ["derive", "env"] }
 # per-platform signal numbers.
 libc = "0.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
+# The object-store ledger, and the two crates it takes. Both are SYNCHRONOUS:
+# `ureq` is a blocking HTTP client and `rusty-s3` is a pure SigV4 signer that
+# performs no I/O of its own, so the no-async-runtime rule is satisfied without
+# contortion. `aws-sdk-s3` was rejected — it requires tokio, and `qp` is invoked
+# hundreds of times per session where cold start is what costs. Shelling out to
+# `curl`/`aws`/`mc` was rejected too: a system binary is an undeclared runtime
+# dependency that varies per machine.
+#
+# Features are pared to what the ledger uses. `ureq` drops `gzip` (batches are
+# already small JSONL and a ledger GET is not worth flate2). `rusty-s3` keeps
+# only `rustcrypto` (HMAC/SHA-256 for signing) and `xml` (ListObjectsV2 response
+# parsing); its `full` feature pulls serde_json and md-5 for actions quipu never
+# issues — there is no DELETE and no multipart here.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+rusty-s3 = { version = "0.10", default-features = false, features = [
+    "rustcrypto",
+    "xml",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 uuid = { version = "1", features = ["v4"] }
+# NOT a second datetime crate, and not a preference. `jiff` is an unconditional
+# (non-optional) dependency of `rusty-s3` and appears in its PUBLIC API:
+# `S3Action::sign_with_time(&self, Duration, &jiff::Timestamp)` is the only way
+# to sign at a fixed instant, which is what pins the published AWS vectors
+# against the exact call the client makes. `url::Url` is the same story — it is
+# what `Bucket::new` takes and what signing returns. Measured: declaring both
+# here adds ZERO crates to `cargo tree` (they are already in it via rusty-s3);
+# it only makes `use jiff::…` legal in `src/s3.rs` instead of reaching through a
+# re-export that rusty-s3 does not offer. This is the same situation as `libc`
+# above.
+#
+# So do not try to unify `jiff` with the `time` crate below: `time` is quipu's
+# own RFC 3339 stamping (`src/time.rs`), `jiff` is the signer's instant type,
+# and dropping the direct declaration would remove a line from this file and
+# nothing from the binary. `jiff` drops its timezone database — signing needs a
+# UTC instant and nothing else.
+jiff = { version = "0.2", default-features = false, features = ["std"] }
+url = "2"
 
 [dev-dependencies]
 assert_cmd = "2"
