@@ -209,8 +209,14 @@ impl Outcome for RemoteCleared {
     }
 }
 
-pub fn run(db_path: &std::path::Path, a: RemoteArgs) -> Result<()> {
-    let conn = db::open(db_path)?;
+/// Runs one `remote` op. Takes a `Ctx` rather than a bare path.
+///
+/// `doctor` diagnoses the front door named for THIS invocation, and that name
+/// arrives on the global `--server` / `QP_SERVER` — the same two tiers
+/// `resolve_server` reads first. The other three ops act on the store in front
+/// of them and ignore it.
+pub fn run(ctx: &crate::route::Ctx, a: RemoteArgs) -> Result<()> {
+    let db_path = ctx.db_path.as_path();
     match a.op {
         RemoteOp::Set {
             ledger,
@@ -218,6 +224,7 @@ pub fn run(db_path: &std::path::Path, a: RemoteArgs) -> Result<()> {
             check,
             json,
         } => {
+            let conn = db::open(db_path)?;
             if ledger.is_none() && front_door.is_none() {
                 return Err(db::invalid_input(
                     "nothing to set: pass --ledger <url> or --front-door <url>",
@@ -254,6 +261,7 @@ pub fn run(db_path: &std::path::Path, a: RemoteArgs) -> Result<()> {
             )
         }
         RemoteOp::Show { check, json } => {
+            let conn = db::open(db_path)?;
             let now = remote::load(&conn)?;
             let checked = probe_all(&now, check, &["ledger", "server"]);
             emit(
@@ -269,7 +277,24 @@ pub fn run(db_path: &std::path::Path, a: RemoteArgs) -> Result<()> {
             )
         }
         RemoteOp::Doctor { json } => {
-            let report = crate::doctor::run(db_path, &remote::load(&conn)?);
+            // The one op here that must work with no store on this disk. The
+            // machine most likely to be misconfigured is the one holding a
+            // binary and two environment variables, and a diagnostic that
+            // refuses to run there is not a diagnostic. `db::open` is
+            // therefore reached only when a store is actually present —
+            // opening one that is not there is `no_store` (exit 6), which is
+            // how the obvious fix, exempting `remote` from the attach check,
+            // fails from one function further down.
+            let remotes = match db_path.exists() {
+                true => Some(remote::load(&db::open(db_path)?)?),
+                false => None,
+            };
+            let report = crate::doctor::run(&crate::doctor::Subject {
+                db_path,
+                remotes: remotes.as_ref(),
+                named_server: ctx.server.as_deref(),
+                named_project: ctx.project.as_deref(),
+            });
             let failed = report.failed();
             emit(json, &report)?;
             // The diagnosis is the output, not the error: the command did what
@@ -289,6 +314,7 @@ pub fn run(db_path: &std::path::Path, a: RemoteArgs) -> Result<()> {
             all,
             json,
         } => {
+            let conn = db::open(db_path)?;
             // No flag still means everything, which is what `clear` has always
             // meant and what a script that already says `qp remote clear`
             // depends on. `--all` is the explicit spelling of the same thing.

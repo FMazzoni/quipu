@@ -611,6 +611,197 @@ fn the_human_form_prints_a_remedy_under_each_failure() {
 }
 
 // ---------------------------------------------------------------------------
+// a client with no store: the machine most likely to be misconfigured
+// ---------------------------------------------------------------------------
+
+/// The reproduction this slice exists for: a binary, two environment variables,
+/// and no store — which used to be exit 6 and no diagnosis at all.
+#[test]
+fn a_client_with_no_store_diagnoses_the_url_in_its_environment() {
+    let c = Storeless::new();
+    let r = c.doctor(&[
+        ("QP_SERVER", &format!("http://127.0.0.1:{}", free_port())),
+        ("QP_PROJECT", "alpha"),
+    ]);
+    assert_eq!(
+        r.code, 5,
+        "a dead front door is a fault, and a named one: {}",
+        r.text
+    );
+    assert_eq!(r.status("server", "reachable"), "fail");
+    let fix = r.remedy("server", "reachable");
+    assert!(
+        fix.contains("qp serve"),
+        "the remedy must say what to start: {fix}"
+    );
+    // The store-side tail of that remedy names a command this machine cannot
+    // run, against a store it does not have. Sending an operator there is a
+    // second `no_store` on top of the fault they came to fix.
+    assert!(
+        !fix.contains("qp remote clear --front-door"),
+        "a storeless client has no recorded url to clear: {fix}"
+    );
+    for later in ["version", "serves"] {
+        assert_eq!(r.status("server", later), "skipped");
+    }
+}
+
+/// Having no local store is the intended arrangement here, and must read as one.
+///
+/// The load-bearing assertions are the negative ones: nothing in the report may
+/// be a `fail` and nothing may be reported as a fault, because a diagnostic
+/// that calls the intended configuration broken is worse than no diagnostic.
+#[test]
+fn the_absence_of_a_local_store_is_never_reported_as_a_fault() {
+    let held = Store::named("alpha");
+    let srv = Serve::start(&held.db);
+    let c = Storeless::new();
+    let r = c.doctor(&[("QP_SERVER", &srv.url), ("QP_PROJECT", "alpha")]);
+    assert_eq!(
+        r.code, 0,
+        "a storeless client is first-class, not broken: {}",
+        r.text
+    );
+    assert_eq!(r.status("config", "configured"), "pass");
+    assert!(r
+        .detail("config", "configured")
+        .contains("no store on this disk"));
+    assert_eq!(r.status("server", "serves"), "pass");
+    assert!(
+        r.json["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["status"] != "fail"),
+        "nothing here is a fault: {}",
+        r.text
+    );
+    // A skip that reads as damage is the failure mode this wording exists to
+    // avoid: the store-side checks did not fail, they do not apply.
+    for name in ["registered", "entry_path"] {
+        assert_eq!(r.status("project", name), "skipped");
+        let d = r.detail("project", name);
+        assert!(d.contains("not applicable"), "a skip read as a fault: {d}");
+        assert!(
+            !d.contains("did not pass"),
+            "nothing earlier failed, and saying so would be a lie: {d}"
+        );
+    }
+    assert_eq!(r.status("ledger", "url"), "skipped");
+}
+
+/// Alive is not the same as serving you, reached without a store.
+///
+/// A different fault from unreachable because the remedies differ, and the
+/// name it looks for comes from the environment rather than from a store.
+#[test]
+fn a_storeless_client_at_a_front_door_that_does_not_serve_it_is_a_different_fault() {
+    let held = Store::named("beta");
+    let srv = Serve::start(&held.db);
+    let c = Storeless::new();
+    let r = c.doctor(&[("QP_SERVER", &srv.url), ("QP_PROJECT", "alpha")]);
+    assert_eq!(r.code, 5, "{}", r.text);
+    assert_eq!(
+        r.status("server", "reachable"),
+        "pass",
+        "a server that answered is reachable: {}",
+        r.text
+    );
+    assert_eq!(r.status("server", "serves"), "fail");
+    let d = r.detail("server", "serves");
+    assert!(d.contains("alpha") && d.contains("beta"), "{d}");
+}
+
+/// The strongest diagnosis in the command, reached with no store behind it.
+#[test]
+fn a_storeless_client_pointed_at_something_that_is_not_quipu_is_told_so() {
+    let stub = HealthStub::start("200 OK", "hello from some other service");
+    let c = Storeless::new();
+    let r = c.doctor(&[("QP_SERVER", &stub.url), ("QP_PROJECT", "alpha")]);
+    assert_eq!(r.code, 5, "{}", r.text);
+    assert_eq!(r.status("server", "reachable"), "fail");
+    assert!(
+        r.detail("server", "reachable")
+            .contains("not a quipu front door"),
+        "{}",
+        r.text
+    );
+}
+
+/// No project named is not a fault when there is nothing to choose between.
+///
+/// An unnamed request selects a front door's only store, so naming one is
+/// unnecessary there and required the moment there are two — which is a real
+/// misconfiguration, and the one that otherwise shows up as an empty board.
+#[test]
+fn naming_no_project_is_a_fault_only_when_the_front_door_serves_more_than_one() {
+    let held = Store::named("alpha");
+    let srv = Serve::start(&held.db);
+    let c = Storeless::new();
+    let one = c.doctor(&[("QP_SERVER", &srv.url)]);
+    assert_eq!(one.code, 0, "one store needs no name: {}", one.text);
+    assert_eq!(one.status("server", "serves"), "pass");
+
+    let two = HealthStub::start(
+        "200 OK",
+        &format!(
+            r#"{{"version":"{}","bind":"127.0.0.1:0","uptime_s":1,"projects":["alpha","beta"]}}"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
+    let r = c.doctor(&[("QP_SERVER", &two.url)]);
+    assert_eq!(
+        r.code, 5,
+        "two stores and no name selects neither: {}",
+        r.text
+    );
+    assert_eq!(r.status("server", "serves"), "fail");
+    let fix = r.remedy("server", "serves");
+    assert!(fix.contains("QP_PROJECT"), "{fix}");
+}
+
+/// A malformed name is a fault wherever the store lives.
+///
+/// It is the front door's lookup key, so a spelling that normalises two ways
+/// selects nothing — and this is the one store-side check that still applies
+/// with no store.
+#[test]
+fn a_malformed_project_name_from_the_environment_is_still_a_fault() {
+    let c = Storeless::new();
+    let r = c.doctor(&[
+        ("QP_SERVER", &format!("http://127.0.0.1:{}", free_port())),
+        ("QP_PROJECT", "Not A Name"),
+    ]);
+    assert_eq!(r.code, 5, "{}", r.text);
+    assert_eq!(r.status("project", "name_form"), "fail");
+    assert!(r.remedy("project", "name_form").contains("QP_PROJECT"));
+}
+
+/// Precedence, and it is `resolve_server`'s rather than a second opinion.
+///
+/// A front door named for the invocation outranks the store's recorded url,
+/// because that is the one every served verb would go to. Diagnosing the other
+/// one would answer a question nobody asked.
+#[test]
+fn a_named_front_door_outranks_the_one_the_store_records() {
+    let s = Store::named("alpha");
+    let srv = Serve::start(&s.db);
+    let recorded = format!("http://127.0.0.1:{}", free_port());
+    s.set_server(&recorded);
+    let r = s.doctor_with_env(&[("QP_SERVER", &srv.url)]);
+    assert_eq!(
+        r.code, 0,
+        "the live url was named for this invocation and is the one that matters: {}",
+        r.text
+    );
+    assert_eq!(r.json["server"], srv.url);
+    assert_eq!(r.status("server", "reachable"), "pass");
+    // And the disagreement is said out loud, without being a fault.
+    assert_eq!(r.status("config", "front_door"), "note");
+    assert!(r.detail("config", "front_door").contains(&recorded));
+}
+
+// ---------------------------------------------------------------------------
 // harness
 // ---------------------------------------------------------------------------
 
@@ -666,6 +857,11 @@ impl Store {
             "AWS_REGION",
             "AWS_DEFAULT_REGION",
             "QUIPU_S3_PLAINTEXT",
+            // The front door named for the invocation outranks the store's
+            // recorded url, so a developer with either of these exported would
+            // be running different tests from CI.
+            "QP_SERVER",
+            "QP_PROJECT",
         ] {
             c.env_remove(k);
         }
@@ -715,6 +911,65 @@ impl Store {
             text: String::from_utf8_lossy(&h.stdout).to_string(),
             json: serde_json::from_slice(&j.stdout)
                 .unwrap_or_else(|e| panic!("doctor --json was not JSON: {e}")),
+        }
+    }
+}
+
+/// A machine with the binary and nothing else: no store, and no `QP_DB`.
+///
+/// This is the deployment the front door exists for — a worker holding two
+/// environment variables — and it is exactly the shape `qp remote doctor` could
+/// not run in. Its registry and config directory are its own, so the
+/// developer's are never read and never written.
+struct Storeless {
+    tmp: tempfile::TempDir,
+}
+
+impl Storeless {
+    fn new() -> Self {
+        Self {
+            tmp: tempfile::tempdir().unwrap(),
+        }
+    }
+
+    /// Both output formats of one diagnosis, from a directory with no store in
+    /// it or above it.
+    fn doctor(&self, env: &[(&str, &str)]) -> Run {
+        let build = || {
+            let mut c = Command::cargo_bin("qp").unwrap();
+            c.current_dir(self.tmp.path())
+                .env_remove("QP_DB")
+                .env_remove("QP_SERVER")
+                .env_remove("QP_PROJECT")
+                .env("QUIPU_REGISTRY", self.tmp.path().join("registry.json"))
+                .env("HOME", self.tmp.path())
+                .env("XDG_CONFIG_HOME", self.tmp.path().join("xdg"));
+            for (k, v) in env {
+                c.env(k, v);
+            }
+            c
+        };
+        let h = build().args(["remote", "doctor"]).output().unwrap();
+        let j = build()
+            .args(["remote", "doctor", "--json"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            h.status.code(),
+            j.status.code(),
+            "the two output formats disagreed about the exit code"
+        );
+        let text = String::from_utf8_lossy(&h.stdout).to_string();
+        Run {
+            code: h.status.code().unwrap_or(-1),
+            json: serde_json::from_slice(&j.stdout).unwrap_or_else(|e| {
+                panic!(
+                    "doctor --json was not JSON: {e}\nstdout: {}\nstderr: {}",
+                    text,
+                    String::from_utf8_lossy(&j.stderr)
+                )
+            }),
+            text,
         }
     }
 }

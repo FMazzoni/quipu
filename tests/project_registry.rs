@@ -52,6 +52,11 @@ impl Fixture {
         c.env("HOME", self.root().join("home"));
         c.env("XDG_CONFIG_HOME", self.root().join("xdg"));
         c.env_remove("QUIPU_LEDGER");
+        // `qp remote doctor` now diagnoses the front door named by the
+        // environment in preference to the store's recorded url, so a
+        // developer with one exported would change what these tests measure.
+        c.env_remove("QP_SERVER");
+        c.env_remove("QP_PROJECT");
         c
     }
 
