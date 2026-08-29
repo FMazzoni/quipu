@@ -647,8 +647,15 @@ fn an_unserved_verb_says_it_ran_locally() {
 ///
 /// Exactly one wins; the losers get 409/`conflict` and exit 2. The server adds
 /// no serialisation of its own — `BEGIN IMMEDIATE` inside SQLite is the whole
-/// guarantee, and it is the same guarantee whether the writers are processes,
-/// threads, or a concurrent `qp` in someone's terminal.
+/// guarantee.
+///
+/// This docstring used to go on to *assert* that the guarantee is the same
+/// whether the writers are processes, threads, or a concurrent `qp` in
+/// someone's terminal. It is true and a comment is not a test, and the claim is
+/// load-bearing enough to be one: `tests/race.rs` now races `take` through a
+/// front door, and races two front doors against a local writer on one file.
+/// `take` is the verb that needed it — its racers name no row, so nothing
+/// serialises them but the statement itself.
 ///
 /// The fixture is minted through the served `add`. Opening the server's file
 /// out of band would work under SQLite and would test a setup path no user has.
