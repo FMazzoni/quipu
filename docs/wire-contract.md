@@ -578,6 +578,13 @@ what a URL may be. Terminating TLS is the vertical slice's problem, and
 legitimate answer — in which case `qp` speaks `http` to `127.0.0.1` and the rule
 is satisfied exactly as written.
 
+*Settled, and the answer was the one named here.* No TLS stack was added. The
+reverse-proxy arrangement is now stated as **the** supported way a second
+machine reaches a front door, rather than as one legitimate answer among
+several, with the operational consequences — what the proxy must not omit, and
+which bind must never ship — in the process contract's reach-path section. This
+paragraph is still the rule; that section is what an operator does with it.
+
 ## Still open
 
 One thing this contract deliberately did not do, recorded here because the

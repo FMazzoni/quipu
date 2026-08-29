@@ -513,7 +513,10 @@ reach the port can act as any agent — which is no worse than anything that can
 write the file, and is exactly why the bind default is loopback and `http://` is
 refused for any host that is not a loopback literal. To reach it from elsewhere,
 put a reverse proxy in front that terminates TLS and speaks plaintext to
-loopback.
+loopback; that proxy is your authentication boundary, and one that asks for no
+credential has added encryption rather than authentication. Widening the bind is
+not the alternative — it publishes every served verb, unauthenticated, on every
+interface. `docs/process-contract.md` works the whole arrangement through.
 
 Startup is fail-fast: every project is resolved and opened before the listener
 binds, so a misconfiguration is a failed process with a message rather than one

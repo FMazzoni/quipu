@@ -28,6 +28,11 @@
 //! 6. **An empty queue is not a failure.** `take` chooses, and choosing nothing
 //!    is exit 0 with a null payload and a 200 on the status line. A poller that
 //!    read "no work" as "something broke" would retry forever.
+//! 7. **The reach path is refused where it must be.** A plaintext url to a host
+//!    that is not a loopback literal never opens a socket, and the message
+//!    names the remedy — a TLS terminator in front — because the move an
+//!    operator makes instead is to widen the bind, which publishes an
+//!    unauthenticated write endpoint.
 
 use assert_cmd::Command;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -1726,4 +1731,37 @@ fn remote_doctor_still_diagnoses_a_front_door_that_is_down() {
         body.contains(&url),
         "the diagnosis must name the url it probed: {body}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// the reach path
+// ---------------------------------------------------------------------------
+
+/// The operator-facing refusal, with the remedy in it.
+///
+/// `client.rs` unit-tests the rule; what this covers is the path an operator
+/// actually walks — a plaintext url off loopback typed at a prompt, the way
+/// they type it, failing the way the process contract's reach-path section says
+/// it will. The message has to name the way forward, because the wrong move
+/// (widen the bind) is the one that looks like the fix.
+///
+/// `host.invalid` is RFC 2606 and cannot resolve, and the refusal happens in
+/// `check_url` before a socket is opened, so nothing here touches a network in
+/// either the passing or the failing case.
+#[test]
+fn a_plaintext_url_off_loopback_is_refused_and_names_the_remedy() {
+    let mut c = std::process::Command::new(qp_bin());
+    c.env("QP_SERVER", "http://host.invalid:8787")
+        .env("QP_DB", "/nonexistent/quipu/db.sqlite");
+    let r = run(&mut c, &["claim", "QP-1", "--as", "w-a"]);
+
+    assert_eq!(r.code, 1, "`invalid_input` is exit 1: {:?}", r.stderr);
+    assert_eq!(r.kind().as_deref(), Some("invalid_input"), "{:?}", r.stderr);
+    for phrase in ["https", "terminate", "TLS", "loopback"] {
+        assert!(
+            r.stderr.contains(phrase),
+            "the refusal must name the remedy; `{phrase}` missing from {:?}",
+            r.stderr
+        );
+    }
 }
