@@ -175,6 +175,15 @@ fn wants_json(cmd: &Cmd) -> bool {
     }
 }
 
+/// Whether this subcommand needs a store to already exist.
+///
+/// `init` is the only command allowed to create one. `install-skills` writes
+/// files on disk and never opens a store at all, so requiring one would break
+/// the bootstrap step that runs *before* a project exists.
+fn needs_store(cmd: &Cmd) -> bool {
+    !matches!(cmd, Cmd::Init(_) | Cmd::InstallSkills(_))
+}
+
 /// Restores the default disposition for `SIGPIPE`.
 ///
 /// That is what makes `qp` behave like a normal Unix filter when a reader
@@ -292,10 +301,21 @@ fn main() {
 ///
 /// Errors are returned rather than printed: `main` is the single place that
 /// maps a `QuipuError` to an exit code and an output format, so no command
-/// module needs to know either. Path resolution and the project-mismatch
-/// warning happen once here, ahead of the match, rather than in each arm.
+/// module needs to know either. Path resolution, the attach check and the
+/// project-mismatch warning happen once here, ahead of the match, rather than
+/// in each arm.
+///
+/// Resolving a store path and creating one are separate acts. `resolve_path`
+/// answers "where would the store be" and cannot fail; `require_attached` then
+/// refuses every command but `init` when nothing is there. Before that split a
+/// misconfigured machine got a silent private store and exit 0 — `qp list`
+/// printed `[]`, `qp add` filed into a project nobody meant to make, and only
+/// `qp show` complained, as a not-found that read like a bad ticket id.
 fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
     let db_path = db::resolve_path(cli.db.clone())?;
+    if needs_store(&cli.cmd) {
+        db::require_attached(&db_path, cli.db.is_some())?;
+    }
     // `json` is threaded in so the warning matches the stream's format: under
     // --json stderr is JSON Lines, so a prose warning here would make the
     // error envelope on the following line unparseable. See QP-120.

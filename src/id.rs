@@ -150,7 +150,7 @@ mod tests {
     fn resolve_handles_whitespace_and_lowercase() {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("db.sqlite");
-        let conn = crate::db::open(&db).unwrap();
+        let conn = crate::db::init(&db, None, &[], None).unwrap();
         conn.execute(
             "INSERT INTO task(display_id, title) VALUES ('QP-1', 'first')",
             [],
@@ -166,7 +166,7 @@ mod tests {
     fn resolve_handles_zero_padding() {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("db.sqlite");
-        let conn = crate::db::open(&db).unwrap();
+        let conn = crate::db::init(&db, None, &[], None).unwrap();
         conn.execute(
             "INSERT INTO task(display_id, title) VALUES ('QP-1', 'first')",
             [],
@@ -181,7 +181,7 @@ mod tests {
     fn resolve_handles_legacy_t_form() {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("db.sqlite");
-        let conn = crate::db::open(&db).unwrap();
+        let conn = crate::db::init(&db, None, &[], None).unwrap();
         conn.execute(
             "INSERT INTO task(display_id, title) VALUES ('T1', 'first')",
             [],
@@ -196,7 +196,7 @@ mod tests {
     fn resolve_full_returns_canonical_display_id() {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("db.sqlite");
-        let conn = crate::db::open(&db).unwrap();
+        let conn = crate::db::init(&db, None, &[], None).unwrap();
         conn.execute(
             "INSERT INTO task(display_id, title) VALUES ('QP-1', 'first')",
             [],
@@ -255,7 +255,7 @@ mod tests {
     fn resolve_missing_task_echoes_raw_input() {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("db.sqlite");
-        let conn = crate::db::open(&db).unwrap();
+        let conn = crate::db::init(&db, None, &[], None).unwrap();
         let err = resolve(&conn, "QP-999").unwrap_err();
         assert_eq!(err.to_string(), "no such task: QP-999");
     }
