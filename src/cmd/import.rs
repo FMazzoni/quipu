@@ -417,6 +417,13 @@ pub struct ImportOutcome {
     pub unreconstructable_tasks: Vec<String>,
     /// Tasks a forced merge kept as they were rather than dropping.
     pub carried_over: Vec<String>,
+    /// Event kinds replay derived no projection from, as `kind×count`.
+    ///
+    /// Almost always annotations, which have no projection to derive — but a
+    /// structural kind from a newer quipu would land here too, and there the
+    /// empty projection is a real gap. Named so a reader can tell which.
+    #[serde(default)]
+    pub opaque_kinds: Vec<String>,
     pub anomalies: Vec<String>,
 }
 
@@ -486,6 +493,15 @@ impl Outcome for ImportOutcome {
                 "\n{} field value(s) were recovered from an edit's own `from`, because the \
                  creation event that should have carried them did not.",
                 self.repaired_fields
+            ));
+        }
+        if !self.opaque_kinds.is_empty() {
+            s.push_str(&format!(
+                "\n{} event kind(s) replay derives no projection from were carried verbatim: \
+                 {}. Free-form `qp log` kinds are expected here; a kind a newer quipu writes \
+                 as a real change is not, and would leave this projection short.",
+                self.opaque_kinds.len(),
+                self.opaque_kinds.join(", ")
             ));
         }
         if self.events_lost > 0 {
@@ -560,6 +576,7 @@ pub fn import(db_path: &Path, a: &ImportArgs) -> Result<ImportOutcome> {
             conflicted_tasks: Vec::new(),
             unreconstructable_tasks: Vec::new(),
             carried_over: Vec::new(),
+            opaque_kinds: Vec::new(),
             anomalies: Vec::new(),
         });
     }
@@ -827,6 +844,7 @@ fn restore(
         best_effort,
         tasks: summary.tasks,
         conflicts: summary.conflicts,
+        opaque_kinds: opaque_kinds(&summary),
         unreconstructable_tasks: named(&summary),
         conflicted_tasks: summary.conflicted_tasks,
         carried_over: Vec::new(),
@@ -851,6 +869,15 @@ fn named(summary: &Summary) -> Vec<String> {
         .unreconstructable
         .iter()
         .map(|(uuid, id)| format!("{uuid}/{id}"))
+        .collect()
+}
+
+/// The kinds replay projected nothing from, rendered for the outcome.
+fn opaque_kinds(summary: &Summary) -> Vec<String> {
+    summary
+        .opaque
+        .iter()
+        .map(|(kind, n)| format!("{kind}\u{d7}{n}"))
         .collect()
 }
 
@@ -971,6 +998,7 @@ fn merge(
         best_effort,
         tasks: tasks as usize,
         conflicts: summary.conflicts,
+        opaque_kinds: opaque_kinds(&summary),
         unreconstructable_tasks: named(&summary),
         conflicted_tasks: summary.conflicted_tasks,
         carried_over: carried,
@@ -1199,6 +1227,8 @@ struct Summary {
     conflicts: usize,
     conflicted_tasks: Vec<String>,
     anomalies: Vec<String>,
+    /// Kinds carried verbatim with no projection derived, and how many of each.
+    opaque: BTreeMap<String, usize>,
     /// Transitions applied without a real guard, because the event records no
     /// origin state to check them against.
     unguarded: usize,
@@ -1240,6 +1270,8 @@ struct Replay<'a> {
     conflict_base: HashMap<(i64, String), Option<String>>,
     branches: HashMap<(i64, String), Vec<Branch>>,
     anomalies: Vec<String>,
+    /// Kinds replay derived no projection from, and how many of each.
+    opaque: BTreeMap<String, usize>,
     unguarded: usize,
     /// Creation events, by the task they mint, so a forward reference can pull
     /// one forward instead of failing.
@@ -1329,6 +1361,7 @@ impl<'a> Replay<'a> {
             conflict_base: HashMap::new(),
             branches: HashMap::new(),
             anomalies: Vec::new(),
+            opaque: BTreeMap::new(),
             unguarded: 0,
             last_state: HashMap::new(),
             creations: HashMap::new(),
@@ -1576,11 +1609,22 @@ impl<'a> Replay<'a> {
             }
             // Recorded about a task, changing no row. A no-op by design.
             "note" | "decision" | "artifact" | "blocker" => {}
-            other => self.anomaly(format!(
-                "event {}/{}: unknown kind `{other}`. Replay cannot know what projection it \
-                 writes, so it wrote none — add an arm for it in `import`",
-                ev.origin_uuid, ev.origin_id
-            )),
+            // Any other kind is an annotation too, and the tally is what says
+            // so out loud. This used to raise an anomaly, which was wrong twice
+            // over: `qp log` takes the kind as a free-form argument, so the set
+            // is open BY DESIGN and cannot be enumerated in advance — real
+            // stores carry `finding`, `review`, `progress`, `handoff` and more
+            // that nobody declared anywhere — and the event survives in full
+            // regardless, written back into `event` by a restore and into
+            // `foreign_event` by a merge. Calling that damage put a clean
+            // ledger behind `--force` for writing its own log.
+            //
+            // It is still counted and named rather than passed over, because
+            // the other thing an unrecognised kind could be is a structural
+            // event from a NEWER quipu, and there the empty projection is a
+            // real gap. Replay cannot tell the two apart, so it reports what it
+            // saw and leaves the judgement to the reader.
+            other => *self.opaque.entry(other.to_string()).or_insert(0) += 1,
         }
         Ok(())
     }
@@ -1815,6 +1859,26 @@ impl<'a> Replay<'a> {
                     .or_else(|| ev.agent_id.clone());
                 match agent {
                     Some(agent) => {
+                        // Defence in depth for the one error the schema turns
+                        // into an abort. `idx_assign_one_open` makes a second
+                        // open assignment a raw `UNIQUE constraint failed` from
+                        // inside rusqlite, which is not an anomaly — it is the
+                        // end of the restore, with nothing written and nothing
+                        // named. Anything the arm above did not manage to close
+                        // is closed here and reported instead.
+                        if let Some(open) = self.open_assignment(task)? {
+                            self.anomaly(format!(
+                                "event {}/{} at {}: {} moves to `assigned` from `{from}` while \
+                                 {open}'s claim is still open; the release that ended it is not \
+                                 in the log. Replay closed it with no recorded outcome so the \
+                                 rest of the ledger could be rebuilt.",
+                                ev.origin_uuid,
+                                ev.origin_id,
+                                ev.ts,
+                                id::encode(task, &self.prefix),
+                            ));
+                            self.close_assignment(task, &ev.ts, None)?;
+                        }
                         self.tx.execute(
                             "INSERT INTO assignment(task_id, agent_id, assigned_at) VALUES (?,?,?)",
                             rusqlite::params![task, agent, ev.ts],
@@ -1834,23 +1898,15 @@ impl<'a> Replay<'a> {
                     rusqlite::params![ev.ts, task],
                 )?;
             }
-            "done" => self.close_assignment(task, &ev.ts, "success")?,
-            "cancelled" => self.close_assignment(task, &ev.ts, "cancelled")?,
-            // Arriving at `pending` from `ready` is the freeze sweep and holds
-            // no claim; only a release from a held state closes one.
-            "pending" if from == "assigned" || from == "running" => {
-                let outcome = match payload.get("via").and_then(Value::as_str) {
-                    Some("abandon") | Some("block") => "abandoned",
-                    Some("reclaim") => "reclaimed",
-                    other => {
-                        self.anomaly(format!(
-                            "event {}/{}: release from `{from}` with via={other:?}; replay does \
-                             not know which assignment outcome that records",
-                            ev.origin_uuid, ev.origin_id
-                        ));
-                        return Ok(());
-                    }
-                };
+            // Leaving a held state releases the claim — EVERY destination, not
+            // an enumerated three. `assigned` -> `running` is the sole edge
+            // that stays inside the hold and it is the arm above; `ready` was
+            // the destination this list was missing, and the missing arm cost
+            // two real stores their entire ledger. Keying on the origin rather
+            // than on the destination is what stops the next unlisted hop from
+            // doing it again.
+            _ if order::holds_assignment(from) && to != "running" => {
+                let outcome = self.release_outcome(ev, payload, task, from, to);
                 self.close_assignment(task, &ev.ts, outcome)?;
             }
             _ => {}
@@ -1858,7 +1914,57 @@ impl<'a> Replay<'a> {
         Ok(())
     }
 
-    fn close_assignment(&self, task: i64, ts: &str, outcome: &str) -> Result<()> {
+    /// Which assignment outcome a move out of a held state records.
+    ///
+    /// `None` is not a failure to look: it is the recorded fact that the log
+    /// did not say. Guessing an outcome would put a value in the column that no
+    /// event supports, and refusing to close would leave the claim open — the
+    /// shape that took two real stores down. So it closes, unclassified, and
+    /// the anomaly names the task and the event a reader has to go and look at.
+    fn release_outcome(
+        &mut self,
+        ev: &LedgerEvent,
+        payload: &Value,
+        task: i64,
+        from: &str,
+        to: &str,
+    ) -> Option<&'static str> {
+        match to {
+            "done" => return Some("success"),
+            "cancelled" => return Some("cancelled"),
+            _ => {}
+        }
+        match payload.get("via").and_then(Value::as_str) {
+            Some("abandon") | Some("block") => Some("abandoned"),
+            Some("reclaim") => Some("reclaimed"),
+            other => {
+                self.anomaly(format!(
+                    "event {}/{} at {}: {} was released from `{from}` to `{to}` with \
+                     via={other:?}, which replay cannot map to an assignment outcome. The \
+                     claim is closed with none recorded rather than left open.",
+                    ev.origin_uuid,
+                    ev.origin_id,
+                    ev.ts,
+                    id::encode(task, &self.prefix)
+                ));
+                None
+            }
+        }
+    }
+
+    /// The agent holding this task's open claim, if one is open.
+    fn open_assignment(&self, task: i64) -> Result<Option<String>> {
+        Ok(self
+            .tx
+            .query_row(
+                "SELECT agent_id FROM assignment WHERE task_id = ? AND completed_at IS NULL",
+                [task],
+                |r| r.get(0),
+            )
+            .ok())
+    }
+
+    fn close_assignment(&self, task: i64, ts: &str, outcome: Option<&str>) -> Result<()> {
         self.tx.execute(
             "UPDATE assignment SET completed_at = ?1, outcome = ?2
               WHERE task_id = ?3 AND completed_at IS NULL",
@@ -2020,6 +2126,7 @@ impl<'a> Replay<'a> {
                 .map(|t| id::encode(*t, &self.prefix))
                 .collect(),
             anomalies: self.anomalies,
+            opaque: self.opaque,
             unguarded: self.unguarded,
             said_tags: self.said_tags,
             said_deps: self.said_deps,

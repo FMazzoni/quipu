@@ -178,6 +178,56 @@ where a move started, and relaxed only where the log itself admits it does not.
 A ledger whose events all carry their origins refuses on any anomaly, in both
 modes. See `merge` for the reasoning in full.
 
+## Claims, and the one error that is not an anomaly
+
+A task holds at most one open assignment, and the schema enforces it with a
+partial unique index rather than trusting eight commands to agree. Replay has to
+honour the same invariant, and the way it gets that wrong is instructive: an
+earlier version closed the claim on an enumerated list of DESTINATIONS —
+`done`, `cancelled`, `pending` — and a historic ledger containing a direct
+`running` -> `ready` release was not on it. The claim stayed open, the next
+`assigned` opened a second one, and what came out was
+`UNIQUE constraint failed: assignment.task_id` from inside the SQLite driver.
+That is not an anomaly. It aborts the whole restore, writes nothing, and names
+neither the task nor the events — to someone who is already mid-recovery,
+because that is the only reason to be restoring at all. Whole ledgers were
+unrestorable because of a handful of such events.
+
+So the rule is keyed on the ORIGIN, not the destination: **leaving `assigned` or
+`running` releases the claim, whatever the destination**, with `assigned` ->
+`running` the single edge that stays inside the hold. A destination nobody
+anticipated then closes the claim instead of colliding with it. Which outcome
+gets recorded still comes from the event — `done` is a success, `cancelled` a
+cancellation, and a release reads its `via` — and a release whose `via` replay
+cannot map closes the claim with **no outcome recorded** and raises an anomaly
+naming the ticket. `NULL` there is a fact, not a failure to look: the claim
+ended and the log did not say how, and guessing would put a value in the column
+that no event supports.
+
+Against the residue there is a backstop: before opening an assignment, replay
+checks whether one is already open, and if so closes it and reports it. Nothing
+should reach that check. It exists so that the next unanticipated shape is an
+anomaly with a ticket id on it rather than a constraint error with a stack.
+
+## Kinds with no projection
+
+`qp log` takes the event kind as a free-form argument, so the set of kinds a
+ledger can contain is open by design and cannot be enumerated in advance. Real
+stores carry a long tail of them.
+
+Replay derives a projection from the kinds it knows and derives none from the
+rest, which is not damage: a restore writes every event back into `event`
+verbatim and a merge stores every foreign event in `foreign_event`, so the
+record survives in full either way and only the projection is empty. Treating
+those as anomalies — as an earlier version did — put a perfectly clean ledger
+behind `--force` for the crime of having used `qp log`.
+
+They are still counted and named in the outcome (`opaque_kinds`), because the
+other thing an unrecognised kind can be is a structural event from a NEWER
+quipu, and there the empty projection is a real gap. Replay cannot tell the two
+apart from the kind alone, so it reports what it saw and leaves the judgement to
+the reader.
+
 ## History the log cannot rebuild, and why that is permanent
 
 A store written before the event log recorded every write holds three kinds of

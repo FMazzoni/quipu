@@ -1355,3 +1355,279 @@ fn a_modern_ledger_with_an_anomaly_still_refuses_a_restore() {
         .stderr(predicates::str::contains("--force"));
     assert_eq!(count(&peer, "task"), 0);
 }
+
+// ---------------------------------------------------------------------------
+// releases replay has to notice
+// ---------------------------------------------------------------------------
+
+/// Rewrites a store's log into the shape a pre-fidelity binary wrote a reclaim.
+///
+/// Two edits, and both are what was found in real ledgers. Every recorded
+/// origin goes, because that era did not write one. And the release pair —
+/// `-> pending` then the sweep's `-> ready` — collapses into the single
+/// `-> ready` hop those binaries emitted, which is the move the state machine
+/// has no edge for and the one replay has to survive.
+fn age_into_a_direct_reclaim(db: &Path) {
+    let conn = Connection::open(db).unwrap();
+    conn.execute(
+        "DELETE FROM event
+          WHERE kind = 'state_change' AND json_extract(payload,'$.via') = 'reclaim'
+            AND json_extract(payload,'$.to') = 'pending'",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE event SET payload = json_set(payload,'$.via','reclaim')
+          WHERE kind = 'state_change' AND json_extract(payload,'$.to') = 'ready'
+            AND json_extract(payload,'$.from') = 'pending'",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE event SET payload = json_remove(payload,'$.from')
+          WHERE kind = 'state_change'",
+        [],
+    )
+    .unwrap();
+}
+
+/// A ticket reclaimed the old way, then handed to someone else, still restores.
+///
+/// The historic release wrote one `running` -> `ready` hop and nothing else, so
+/// replay reaches `ready` with the assignment it opened still open. The next
+/// `assigned` then opens a second one against a store whose whole point is that
+/// a task holds at most one — and what came out was a raw
+/// `UNIQUE constraint failed: assignment.task_id` from four frames down, which
+/// aborted the entire restore. Two of the stores this was measured against
+/// could not be rebuilt from their ledger at all because of six such events.
+///
+/// The fix is not an arm for `ready`: it is that ANY move out of a held state
+/// releases the claim, `assigned` -> `running` excepted.
+#[test]
+fn a_historic_running_to_ready_release_closes_its_assignment() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src.sqlite");
+    let dst = tmp.path().join("dst.sqlite");
+    let ledger = tmp.path().join("ledger");
+
+    init(&src, "AAA");
+    ok(&src, &["add", "a task"]);
+    ok(&src, &["assign", "AAA-1", "--to", "agentA"]);
+    ok(&src, &["claim", "AAA-1", "--as", "agentA"]);
+    tick();
+    ok(&src, &["reclaim", "AAA-1", "--reason", "agent wedged"]);
+    tick();
+    ok(&src, &["assign", "AAA-1", "--to", "agentB"]);
+    ok(&src, &["claim", "AAA-1", "--as", "agentB"]);
+    age_into_a_direct_reclaim(&src);
+    export(&src, &ledger);
+
+    init(&dst, "ZZZ");
+    qp(&dst)
+        .args(["import", "--from", ledger.to_str().unwrap(), "--restore"])
+        .assert()
+        .success();
+
+    assert_eq!(count(&dst, "task"), 1, "the ledger restored no tasks");
+    let conn = Connection::open(&dst).unwrap();
+    assert_eq!(
+        common::rows(&conn, "SELECT state FROM task"),
+        vec!["running"],
+        "the reclaimed-then-reassigned ticket did not end where the log left it"
+    );
+    // Two assignments, and only the second one open: the release closed the
+    // first, and its outcome names the `via` the event carried.
+    assert_eq!(
+        common::rows(
+            &conn,
+            "SELECT agent_id || '/' || CASE WHEN completed_at IS NULL THEN 'open'
+                     ELSE COALESCE(outcome,'unrecorded') END FROM assignment ORDER BY id"
+        ),
+        vec!["agentA/reclaimed", "agentB/open"],
+        "the historic release left its assignment open"
+    );
+}
+
+/// A release replay cannot classify closes the assignment and says so.
+///
+/// The `via` key is what tells replay which outcome a release recorded, and a
+/// log that omits it is a log replay cannot read. Reporting it and leaving the
+/// assignment open is the worst of both: the anomaly is raised AND the store is
+/// left holding a claim nobody released, which the next `assigned` collides
+/// with. So the claim is closed with no outcome — the honest encoding of "it
+/// ended, and the log did not say how" — and the anomaly names the task.
+#[test]
+fn a_release_with_no_via_is_reported_and_still_closes_the_claim() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src.sqlite");
+    let dst = tmp.path().join("dst.sqlite");
+    let ledger = tmp.path().join("ledger");
+
+    init(&src, "AAA");
+    ok(&src, &["add", "a task"]);
+    ok(&src, &["assign", "AAA-1", "--to", "agentA"]);
+    ok(&src, &["claim", "AAA-1", "--as", "agentA"]);
+    tick();
+    ok(&src, &["reclaim", "AAA-1", "--reason", "agent wedged"]);
+    tick();
+    ok(&src, &["assign", "AAA-1", "--to", "agentB"]);
+    Connection::open(&src)
+        .unwrap()
+        .execute(
+            "UPDATE event SET payload = json_remove(payload,'$.via')
+              WHERE kind = 'state_change' AND json_extract(payload,'$.to') = 'pending'",
+            [],
+        )
+        .unwrap();
+    export(&src, &ledger);
+
+    init(&dst, "ZZZ");
+    let out = qp(&dst)
+        .args([
+            "import",
+            "--from",
+            ledger.to_str().unwrap(),
+            "--restore",
+            "--force",
+        ])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("AAA-1") && stderr.contains("via="),
+        "the unreadable release was not reported against the task:\n{stderr}"
+    );
+    let conn = Connection::open(&dst).unwrap();
+    assert_eq!(
+        common::rows(
+            &conn,
+            "SELECT agent_id || '/' || CASE WHEN completed_at IS NULL THEN 'open'
+                     ELSE COALESCE(outcome,'unrecorded') END FROM assignment ORDER BY id"
+        ),
+        vec!["agentA/unrecorded", "agentB/open"],
+        "the unclassifiable release did not close its claim"
+    );
+}
+
+/// A second `assigned` over a live claim is reported, not a raw constraint.
+///
+/// `idx_assign_one_open` is the last thing standing between replay and two open
+/// assignments, and what it produces is `UNIQUE constraint failed:
+/// assignment.task_id` from inside rusqlite — which aborts the whole restore,
+/// writes nothing, and names neither the task nor the events. Someone seeing
+/// that is mid-recovery with a store they cannot rebuild and no idea why.
+///
+/// So the invariant is checked before the INSERT that would break it: the stale
+/// claim is closed with no outcome and the anomaly names the ticket. The
+/// release arm should already have closed it — this is the backstop for the
+/// hops nobody has thought of yet, which is exactly the class this whole
+/// ticket came from.
+#[test]
+fn a_reassignment_over_a_live_claim_is_named_rather_than_a_constraint_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src.sqlite");
+    let dst = tmp.path().join("dst.sqlite");
+    let ledger = tmp.path().join("ledger");
+
+    init(&src, "AAA");
+    ok(&src, &["add", "a task"]);
+    ok(&src, &["assign", "AAA-1", "--to", "agentA"]);
+    ok(&src, &["claim", "AAA-1", "--as", "agentA"]);
+    tick();
+    // A `running` -> `assigned` hop, which the machine has no edge for: the
+    // pre-fidelity shape of a handover that skipped the release entirely.
+    let conn = Connection::open(&src).unwrap();
+    conn.execute(
+        "INSERT INTO event(task_id, kind, payload)
+         VALUES (1,'state_change','{\"agent_id\":\"agentB\",\"to\":\"assigned\"}')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE event SET payload = json_remove(payload,'$.from') WHERE kind = 'state_change'",
+        [],
+    )
+    .unwrap();
+    export(&src, &ledger);
+
+    init(&dst, "ZZZ");
+    let out = qp(&dst)
+        .args(["import", "--from", ledger.to_str().unwrap(), "--restore"])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("AAA-1") && stderr.contains("still open"),
+        "the stale claim was not reported against the task:\n{stderr}"
+    );
+    let conn = Connection::open(&dst).unwrap();
+    assert_eq!(
+        common::rows(
+            &conn,
+            "SELECT agent_id || '/' || CASE WHEN completed_at IS NULL THEN 'open'
+                     ELSE COALESCE(outcome,'unrecorded') END FROM assignment ORDER BY id"
+        ),
+        vec!["agentA/unrecorded", "agentB/open"],
+        "the handover did not leave exactly one open claim"
+    );
+}
+
+/// An event kind replay has no projection for is carried, not called damage.
+///
+/// `qp log` takes the kind as a free-form argument, so `finding`, `review`,
+/// `progress` and the rest are ordinary logging, not corruption — and a restore
+/// writes every event back verbatim regardless, so nothing is lost by having no
+/// arm for them. Raising an anomaly per event put a clean ledger behind
+/// `--force` for the crime of writing its own log. The count is still reported,
+/// because a structural kind from a newer quipu would land here too.
+#[test]
+fn a_free_form_log_kind_restores_without_being_called_an_anomaly() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src.sqlite");
+    let dst = tmp.path().join("dst.sqlite");
+    let ledger = tmp.path().join("ledger");
+
+    init(&src, "AAA");
+    ok(&src, &["add", "a task"]);
+    ok(
+        &src,
+        &["log", "AAA-1", "finding", "the transport swallows EPIPE"],
+    );
+    ok(
+        &src,
+        &[
+            "log",
+            "AAA-1",
+            "spike-result",
+            "two of three approaches work",
+        ],
+    );
+    export(&src, &ledger);
+
+    init(&dst, "ZZZ");
+    let out = qp(&dst)
+        .args(["import", "--from", ledger.to_str().unwrap(), "--restore"])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr).into_owned();
+    assert!(
+        !stderr.contains("anomaly"),
+        "a free-form log kind was reported as an anomaly:\n{stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains("finding\u{d7}1") && stdout.contains("spike-result\u{d7}1"),
+        "the kinds with no projection were not named:\n{stdout}"
+    );
+    // Carried verbatim is the whole justification for not refusing: the events
+    // are in the restored log, kind and body intact.
+    let conn = Connection::open(&dst).unwrap();
+    assert_eq!(
+        common::rows(
+            &conn,
+            "SELECT kind FROM event WHERE kind NOT IN ('state_change') ORDER BY id"
+        ),
+        vec!["finding", "spike-result"],
+        "the free-form events did not survive the restore"
+    );
+}
