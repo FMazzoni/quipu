@@ -32,7 +32,10 @@ impl Fixture {
 
     /// Where the registry is forced to live for this fixture.
     fn registry(&self) -> PathBuf {
-        self.root().join("config").join("quipu").join("registry.json")
+        self.root()
+            .join("config")
+            .join("quipu")
+            .join("registry.json")
     }
 
     /// The store a project of this name would have, at the conventional layout.
@@ -89,9 +92,14 @@ impl Fixture {
 
     /// The doctor's verdict for one named check on this store.
     fn check(&self, db: &Path, name: &str) -> Value {
-        let out = self.qp(db).args(["remote", "doctor", "--json"]).output().unwrap();
-        let v: Value = serde_json::from_slice(&out.stdout)
-            .unwrap_or_else(|e| panic!("doctor json: {e}\n{}", String::from_utf8_lossy(&out.stdout)));
+        let out = self
+            .qp(db)
+            .args(["remote", "doctor", "--json"])
+            .output()
+            .unwrap();
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!("doctor json: {e}\n{}", String::from_utf8_lossy(&out.stdout))
+        });
         v["checks"]
             .as_array()
             .expect("checks array")
@@ -145,7 +153,14 @@ fn a_malformed_name_is_refused() {
     let f = Fixture::new();
     let db = f.store("alpha");
     std::fs::create_dir_all(db.parent().unwrap()).unwrap();
-    for bad in ["Alpha", "with space", "-leading", "trailing-", "under_score", ""] {
+    for bad in [
+        "Alpha",
+        "with space",
+        "-leading",
+        "trailing-",
+        "under_score",
+        "",
+    ] {
         // `--name=<v>` rather than two arguments: a value beginning with `-`
         // would otherwise be parsed as a flag, and the test would pass on a
         // clap usage error instead of on the validation it is about.
@@ -226,7 +241,10 @@ fn register_list_and_lookup_round_trip() {
     let f = Fixture::new();
     let a = f.init("alpha", &[]);
     let b = f.init("beta", &[]);
-    assert_eq!(f.json(&a, &["project", "register", "--json"])["result"], "added");
+    assert_eq!(
+        f.json(&a, &["project", "register", "--json"])["result"],
+        "added"
+    );
     assert_eq!(
         f.json(&a, &["project", "register", "--json"])["result"],
         "unchanged",
@@ -313,8 +331,7 @@ fn unregister_is_the_remedy_for_a_stale_entry() {
     let a = f.init("alpha", &[]);
     f.ok(&a, &["project", "register"]);
     f.ok(&a, &["project", "unregister", "alpha"]);
-    assert!(f
-        .json(&a, &["project", "list", "--json"])["projects"]
+    assert!(f.json(&a, &["project", "list", "--json"])["projects"]
         .as_array()
         .unwrap()
         .is_empty());
@@ -329,7 +346,14 @@ fn doctor_passes_on_a_named_and_registered_store() {
     let f = Fixture::new();
     let a = f.init("alpha", &[]);
     f.ok(&a, &["project", "register"]);
-    for name in ["unique", "dangling", "name", "name_form", "registered", "entry_path"] {
+    for name in [
+        "unique",
+        "dangling",
+        "name",
+        "name_form",
+        "registered",
+        "entry_path",
+    ] {
         assert_eq!(f.check(&a, name)["status"], "pass", "check `{name}`");
     }
     // And a clean store is not a fault, so the command still exits 0.
@@ -349,7 +373,10 @@ fn doctor_advises_an_unregistered_store_without_failing_the_run() {
     let c = f.check(&a, "registered");
     assert_eq!(c["status"], "note");
     assert!(
-        c["remedy"].as_str().unwrap().contains("qp project register"),
+        c["remedy"]
+            .as_str()
+            .unwrap()
+            .contains("qp project register"),
         "{c}"
     );
     f.qp(&a).args(["remote", "doctor"]).assert().success();
@@ -382,7 +409,11 @@ fn a_deleted_name_is_healed_before_the_doctor_can_see_it_missing() {
         conn.execute("DELETE FROM meta WHERE key = 'project_name'", [])
             .unwrap();
     }
-    assert_eq!(f.check(&a, "name")["status"], "note", "a healed name is derived");
+    assert_eq!(
+        f.check(&a, "name")["status"],
+        "note",
+        "a healed name is derived"
+    );
     assert!(f.meta(&a, "project_name").is_some());
 }
 
@@ -422,7 +453,10 @@ fn doctor_names_a_duplicate_in_the_registry() {
     assert_eq!(c["status"], "fail");
     assert!(c["detail"].as_str().unwrap().contains("alpha"), "{c}");
     assert!(
-        c["remedy"].as_str().unwrap().contains("qp project unregister"),
+        c["remedy"]
+            .as_str()
+            .unwrap()
+            .contains("qp project unregister"),
         "{c}"
     );
 }
@@ -479,5 +513,58 @@ fn the_real_config_directory_is_never_touched() {
     assert!(
         !f.root().join("home").join(".config").join("quipu").exists(),
         "nothing may fall back to a home directory"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// the registry readers work where there is no store
+// ---------------------------------------------------------------------------
+
+/// Reading the registry must not require being attached to a project.
+///
+/// This is the seam between two changes that were written apart: one made every
+/// command fail when there is no store, the other added commands that answer
+/// from the registry file alone. Composed naively the second is unreachable
+/// exactly where it is most needed — you reach for `qp project list` *because*
+/// you do not know which store you are near, and a directory with no store is
+/// the normal place to be standing when you do. Neither branch's own tests can
+/// see this: it only exists once both are in the tree.
+///
+/// `register` is deliberately not in the list. It reads the store's name and
+/// uuid, so it genuinely needs one, and must still refuse with `no_store`.
+#[test]
+fn registry_readers_do_not_need_a_store_but_register_does() {
+    let f = Fixture::new();
+    let nowhere = f.root().join("nowhere");
+    std::fs::create_dir_all(&nowhere).unwrap();
+
+    let bare = |args: &[&str]| {
+        let mut c = Command::cargo_bin("qp").unwrap();
+        c.current_dir(&nowhere);
+        c.env("QUIPU_REGISTRY", f.registry());
+        c.env("HOME", f.root().join("home"));
+        c.env("XDG_CONFIG_HOME", f.root().join("xdg"));
+        c.env_remove("QP_DB");
+        c.env_remove("QUIPU_LEDGER");
+        c.args(args);
+        c
+    };
+
+    bare(&["project", "list", "--json"]).assert().success();
+    // A name that is not registered is `not_found` (2), not `no_store` (6):
+    // the question was answerable and the answer was no.
+    bare(&["project", "lookup", "ghost", "--json"])
+        .assert()
+        .code(2);
+    bare(&["project", "unregister", "ghost", "--json"])
+        .assert()
+        .code(2);
+    bare(&["project", "register", "--json"]).assert().code(6);
+
+    // And none of that may leave a store behind, which is the whole point of
+    // the change on the other side of this seam.
+    assert!(
+        !nowhere.join(".quipu").exists(),
+        "a registry read must not create a store"
     );
 }

@@ -212,7 +212,8 @@ mod tests {
     fn resolve_rejects_foreign_prefix() {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("db.sqlite");
-        let conn = crate::db::open(&db).unwrap();
+        // `init`, not `open`: opening no longer creates. See `db::require_store`.
+        let conn = crate::db::init(&db, None, &[], None).unwrap();
         conn.execute(
             "INSERT INTO task(display_id, title) VALUES ('QP-1', 'first')",
             [],

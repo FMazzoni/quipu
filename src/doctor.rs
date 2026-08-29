@@ -288,7 +288,10 @@ fn registry_checks(reg: &anyhow::Result<crate::registry::Registry>, s: &mut Seq)
             .collect();
         s.fail(
             "unique",
-            format!("a name is claimed by more than one store — {}", listed.join("; ")),
+            format!(
+                "a name is claimed by more than one store — {}",
+                listed.join("; ")
+            ),
             "A lookup on that name resolves to whichever entry comes first, which is not a \
              decision anybody made. Drop the wrong one with `qp project unregister <NAME>`, \
              then give the store that lost its entry a distinct name at \
@@ -299,7 +302,10 @@ fn registry_checks(reg: &anyhow::Result<crate::registry::Registry>, s: &mut Seq)
     }
     let dangling = reg.dangling();
     if dangling.is_empty() {
-        s.pass("dangling", "every registered store is still where the registry says");
+        s.pass(
+            "dangling",
+            "every registered store is still where the registry says",
+        );
     } else {
         let listed: Vec<String> = dangling
             .iter()
@@ -307,7 +313,10 @@ fn registry_checks(reg: &anyhow::Result<crate::registry::Registry>, s: &mut Seq)
             .collect();
         s.fail(
             "dangling",
-            format!("registry entries point at stores that are gone — {}", listed.join("; ")),
+            format!(
+                "registry entries point at stores that are gone — {}",
+                listed.join("; ")
+            ),
             "The store moved or was deleted, and an index cannot notice on its own. Re-run \
              `qp project register` from the store's new location, or drop the entry with \
              `qp project unregister <NAME>`.",
@@ -316,11 +325,7 @@ fn registry_checks(reg: &anyhow::Result<crate::registry::Registry>, s: &mut Seq)
 }
 
 /// This store's own name, and whether the registry agrees about it.
-fn project_checks(
-    db_path: &Path,
-    reg: &anyhow::Result<crate::registry::Registry>,
-    s: &mut Seq,
-) {
+fn project_checks(db_path: &Path, reg: &anyhow::Result<crate::registry::Registry>, s: &mut Seq) {
     let conn = match rusqlite::Connection::open(db_path) {
         Ok(c) => c,
         Err(e) => {
@@ -377,7 +382,10 @@ fn project_checks(
         s.skip("entry_path");
         return;
     }
-    s.pass("name_form", format!("`{name}` is a well-formed project name"));
+    s.pass(
+        "name_form",
+        format!("`{name}` is a well-formed project name"),
+    );
 
     let Ok(reg) = reg else {
         s.skip("registered");

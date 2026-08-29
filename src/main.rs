@@ -184,8 +184,24 @@ fn wants_json(cmd: &Cmd) -> bool {
 /// `init` is the only command allowed to create one. `install-skills` writes
 /// files on disk and never opens a store at all, so requiring one would break
 /// the bootstrap step that runs *before* a project exists.
+///
+/// The registry readers are the third case and the least obvious: `qp project
+/// list`, `lookup` and `unregister` answer from the registry file alone and are
+/// the commands you reach for *because* you do not know which store you are
+/// near — gating them on being attached to one would make the tool that
+/// diagnoses a lost project unusable from anywhere a project is lost. Only
+/// `register` reads the store, because only it needs the name and uuid to file.
 fn needs_store(cmd: &Cmd) -> bool {
-    !matches!(cmd, Cmd::Init(_) | Cmd::InstallSkills(_))
+    !matches!(
+        cmd,
+        Cmd::Init(_)
+            | Cmd::InstallSkills(_)
+            | Cmd::Project(cmd::project::ProjectArgs {
+                op: cmd::project::ProjectOp::List { .. }
+                    | cmd::project::ProjectOp::Lookup { .. }
+                    | cmd::project::ProjectOp::Unregister { .. },
+            })
+    )
 }
 
 /// Restores the default disposition for `SIGPIPE`.

@@ -77,7 +77,9 @@ pub fn path() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os(ENV_REGISTRY) {
         let p = PathBuf::from(p);
         if p.as_os_str().is_empty() {
-            return Err(db::invalid_input(format!("{ENV_REGISTRY} is set but empty")));
+            return Err(db::invalid_input(format!(
+                "{ENV_REGISTRY} is set but empty"
+            )));
         }
         return Ok(p);
     }
@@ -279,7 +281,9 @@ impl Registry {
         })?;
         std::fs::create_dir_all(dir)
             .with_context(|| format!("creating registry directory {}", dir.display()))?;
-        let tmp = self.path.with_extension(format!("json.tmp{}", std::process::id()));
+        let tmp = self
+            .path
+            .with_extension(format!("json.tmp{}", std::process::id()));
         std::fs::write(&tmp, body)
             .with_context(|| format!("writing registry {}", tmp.display()))?;
         std::fs::rename(&tmp, &self.path)
@@ -334,11 +338,15 @@ mod tests {
             Registered::Unchanged
         );
         assert_eq!(
-            r.register(entry("alpha", "/moved/db.sqlite", "u1")).unwrap(),
+            r.register(entry("alpha", "/moved/db.sqlite", "u1"))
+                .unwrap(),
             Registered::Updated
         );
         assert_eq!(r.entries.len(), 1);
-        assert_eq!(r.lookup("alpha").unwrap().path, PathBuf::from("/moved/db.sqlite"));
+        assert_eq!(
+            r.lookup("alpha").unwrap().path,
+            PathBuf::from("/moved/db.sqlite")
+        );
     }
 
     #[test]
