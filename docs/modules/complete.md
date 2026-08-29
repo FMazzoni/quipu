@@ -39,3 +39,13 @@ system — the entire point of the dependency graph — produced no event. A tas
 timeline ended at `→ pending` while the task itself sat in `ready`, and a replay
 of the log put it in the wrong state. `complete_promotion_emits_from_and_to`
 pins the promoted task's event down, both ends of it.
+
+## Ownership is checked before claimed-ness
+
+The open assignment is tested for the *wrong owner* before it is tested for a
+missing `claimed_at`. When both are true, "this is not yours" is the answer the
+caller can act on — and it is the only branch that can recognise a holder whose
+lease was broken while it was away and name it, rather than answering with a
+state-shaped conflict about a row belonging to somebody else. `assign` straight
+to `complete` still reports `not_claimed`, because there the owner matches and
+only the claim is missing.

@@ -56,7 +56,12 @@ struct RaceResult {
 
 /// Start every child before waiting on any of them, then collect.
 fn race(db: &Path, args: &[&str]) -> Vec<RaceResult> {
-    let children: Vec<Child> = (0..RACERS)
+    race_n(db, args, RACERS)
+}
+
+/// [`race`] with the racer count named, for a case that wants a smaller field.
+fn race_n(db: &Path, args: &[&str], racers: usize) -> Vec<RaceResult> {
+    let children: Vec<Child> = (0..racers)
         .map(|_| {
             std::process::Command::new(qp_bin())
                 .args(args)
@@ -361,6 +366,64 @@ fn concurrent_takes_never_hand_the_same_ticket_twice() {
             state_change_count(&db, t, "assigned"),
             1,
             "exactly one assignment may land on {t}"
+        );
+    }
+}
+
+/// Machines that all decide one dead hold is theirs to break produce one winner.
+///
+/// This is the property the whole liveness mechanism rests on, and it is the
+/// one an expiry check makes easy to lose: read "is it stale", then release, and
+/// two machines that both read `stale` both release — the second one breaking a
+/// hold the first had already handed to somebody else. So staleness lives
+/// *inside* the guarded `UPDATE` rather than in a check before it, and the same
+/// `changes() == 1` that decides every other transition decides this one.
+///
+/// Four processes, not the module's usual six: the point is overlap, and this
+/// test builds its store first, so a wider field buys nothing.
+#[test]
+fn concurrent_reclaims_of_one_stale_hold_produce_exactly_one_winner() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+
+    for round in 1..=ROUNDS {
+        let task = format!("QP-{round}");
+        qp(&db).args(["add", "race"]).assert().success();
+        qp(&db)
+            .args(["assign", &task, "--to", "agent"])
+            .assert()
+            .success();
+        qp(&db)
+            .args(["claim", &task, "--as", "agent", "--for", "45m"])
+            .assert()
+            .success();
+        // Quiet for longer than the lease it took. No sleeping: the stored
+        // length is what lets a test construct a past expiry directly.
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE assignment
+                SET last_contact = strftime('%Y-%m-%dT%H:%M:%fZ','now','-46 minutes')
+              WHERE completed_at IS NULL",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let results = race_n(&db, &["reclaim", &task, "--reason", "dead"], 4);
+        let winners = results.iter().filter(|r| r.code == 0).count();
+        assert_eq!(winners, 1, "exactly one machine may break one dead hold");
+        for l in results.iter().filter(|r| r.code != 0) {
+            assert_eq!(l.code, 2);
+            // The losers arrive after the task has left `running`; a loser that
+            // reported `hold_is_live` would mean it had raced the guard and lost
+            // on staleness instead, which is a different bug.
+            assert_eq!(l.error_code.as_deref(), Some("not_assigned_or_running"));
+        }
+        assert_eq!(
+            state_change_count(&db, &task, "pending"),
+            1,
+            "exactly one release may land on {task}"
         );
     }
 }

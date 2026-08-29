@@ -33,3 +33,19 @@ critique loop, or a branch-and-evaluate is — those live in `skills/`. The name
 `wave` is borrowed from the pattern that motivated the view, but the question the
 command answers is purely a graph question, and it stays answerable if the
 pattern is retired tomorrow.
+
+## Stale holds
+
+Each row carries `stale` and the `hold` behind it, and the human rendering trails
+a `[STALE …]` note after the title of any row whose holder has gone quiet past
+its lease. A stranded ticket has to be legible in the view an orchestrator
+already reads: needing a special command to find one means nobody finds one.
+
+The marker trails the title rather than taking a column of its own. The four
+columns here line up with what `list` and `show` print, and a fifth would be a
+positional change every reader of those views inherits.
+
+The staleness itself is `lease::holds_by_task`, one query for the page — a
+per-row statement would put a `SELECT` per ticket on the most-run view in the
+system — and the predicate behind it is the one `reclaim` guards on, so this view
+never calls something stale that `reclaim` would refuse to release.

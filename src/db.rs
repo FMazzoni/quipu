@@ -215,6 +215,30 @@ pub fn not_owner(
     })
 }
 
+/// The error for a write that found no open assignment on the task.
+///
+/// Usually the plain `no_open_assignment` conflict. The exception is the one
+/// that matters: when the caller's own hold was broken by a `reclaim`, it gets
+/// told so by name instead — see `lease::dispossessed`.
+pub fn no_open_assignment(
+    tx: &Transaction,
+    task_id: i64,
+    display_id: &str,
+    agent: Option<&str>,
+    msg: impl Into<String>,
+) -> Result<anyhow::Error> {
+    if let Some(agent) = agent {
+        if let Some(e) = crate::lease::dispossessed(tx, task_id, agent)? {
+            return Ok(e);
+        }
+    }
+    Ok(conflict(
+        "no_open_assignment",
+        msg,
+        Some(display_id.to_string()),
+    ))
+}
+
 /// Referenced entity or edge does not exist.
 pub fn not_found(msg: impl Into<String>, task: Option<String>) -> anyhow::Error {
     anyhow::Error::from(QuipuError::NotFound {
@@ -485,7 +509,15 @@ fn read_project_uuid(path: &Path) -> Result<Option<String>> {
 /// `execute_batch(SCHEMA)` is enough once the stamp moves; without the bump
 /// they would reach freshly-initialised stores only, and the first real store
 /// anyone tried to merge into would fail on `no such table`.
-pub const SCHEMA_VERSION: &str = "6";
+///
+/// "7" adds the three claim-liveness columns on `assignment` —
+/// `last_contact`, `lease_seconds` and `holder_host`. Columns on a table that
+/// already exists, so like "4" the bump alone is not enough: each one needs an
+/// entry in [`add_missing_columns`]. They are all nullable with no default,
+/// which is what makes the migration inert — every pre-existing open claim
+/// lands with no stated expiry, and a claim with no stated expiry never
+/// expires.
+pub const SCHEMA_VERSION: &str = "7";
 
 /// How long a writer waits at the door of a contended store.
 ///
@@ -605,8 +637,16 @@ fn add_missing_columns(conn: &Connection) -> Result<()> {
     // (table, column, full DDL fragment). SQLite requires an ADD COLUMN default
     // to be a constant, so `NOT NULL DEFAULT 'blocks'` is legal and backfills
     // every existing row in place.
-    const ADDITIONS: &[(&str, &str, &str)] =
-        &[("dep", "mode", "mode TEXT NOT NULL DEFAULT 'blocks'")];
+    const ADDITIONS: &[(&str, &str, &str)] = &[
+        ("dep", "mode", "mode TEXT NOT NULL DEFAULT 'blocks'"),
+        // Nullable and defaultless on purpose: an open claim that predates
+        // leases must migrate to "no stated expiry", which is unbreakable.
+        // Backfilling `last_contact` with `now` would invent a lease nobody
+        // took and hand a live claim an expiry date.
+        ("assignment", "last_contact", "last_contact TEXT"),
+        ("assignment", "lease_seconds", "lease_seconds INTEGER"),
+        ("assignment", "holder_host", "holder_host TEXT"),
+    ];
     for (table, column, ddl) in ADDITIONS {
         let present: bool = conn
             .query_row(
@@ -918,7 +958,14 @@ pub fn insert_event(
         "INSERT INTO event(task_id, kind, agent_id, payload) VALUES (?,?,?,?)",
         rusqlite::params![task_id, kind, agent_id, s],
     )?;
-    Ok(tx.last_insert_rowid())
+    let id = tx.last_insert_rowid();
+    // Renewal rides here because this is the one statement every write against
+    // a task already passes through. It is also where a holder whose lease was
+    // broken is refused, by name — see `lease::touch`.
+    if let Some(t) = task_id {
+        crate::lease::touch(tx, t, agent_id)?;
+    }
+    Ok(id)
 }
 
 /// Appends a `state_change` event naming both ends of the transition.

@@ -47,14 +47,45 @@ CREATE TABLE IF NOT EXISTS dep (
 -- store; see the explicit ALTER in `db::add_missing_columns`.
 
 CREATE TABLE IF NOT EXISTS assignment (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id      INTEGER NOT NULL REFERENCES task(id),
-    agent_id     TEXT NOT NULL,
-    assigned_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-    claimed_at   TEXT,
-    completed_at TEXT,
-    outcome      TEXT  -- success | failed | abandoned | reclaimed | cancelled
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id       INTEGER NOT NULL REFERENCES task(id),
+    agent_id      TEXT NOT NULL,
+    assigned_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    claimed_at    TEXT,
+    completed_at  TEXT,
+    outcome       TEXT,  -- success | failed | abandoned | reclaimed | cancelled
+    last_contact  TEXT,
+    lease_seconds INTEGER,
+    holder_host   TEXT
 );
+-- The three liveness columns answer one question about an open row: is the
+-- machine that took this claim still there? They are stamped by `claim` and
+-- moved forward by every subsequent write the holder makes.
+--
+-- A TTL bounds how long a ticket may sit QUIET while held. It does NOT bound
+-- how long the work may take: renewal on write pushes `last_contact` forward,
+-- so a busy ticket never expires no matter how long it runs. Everyone reads it
+-- as a work-time limit on the first pass, which is why it is said twice here
+-- and again in `docs/modules/lease.md`.
+--
+-- `lease_seconds` is the LENGTH the lease was taken for, not the instant it
+-- ends. The instant is derived (`last_contact` + `lease_seconds`) precisely so
+-- renewal can recompute it: storing only the instant would silently reset a
+-- deliberate short lease to the default the first time the holder wrote
+-- anything.
+--
+-- NULL `lease_seconds` (or NULL `last_contact`) means NO STATED EXPIRY, and a
+-- claim with no stated expiry NEVER expires. Every row written before these
+-- columns existed is in exactly that shape, and the only safe reading of a
+-- record that never promised an expiry is that it is unbreakable.
+--
+-- `holder_host` names the machine, not the role. `agent_id` is a role name
+-- (`w-liveness`) that is reused on every machine that ever plays that role, so
+-- a stranded row that cannot say which box died is one a human cannot act on.
+-- A server would know the connection; the row still has to outlive it.
+--
+-- Adding these columns to schema.sql was NOT enough to get them onto an
+-- existing store; see the explicit ALTERs in `db::add_missing_columns`.
 
 CREATE TABLE IF NOT EXISTS event (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,

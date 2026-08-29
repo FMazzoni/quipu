@@ -2,7 +2,7 @@
 //!
 #![doc = include_str!("../../docs/modules/wave.md")]
 
-use crate::{db, store};
+use crate::{db, lease, store};
 use anyhow::Result;
 use clap::Args;
 
@@ -45,10 +45,14 @@ pub fn run(db_path: &std::path::Path, a: WaveArgs) -> Result<()> {
 
         let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
         let last_event = store::last_event_by_task(&conn, &ids)?;
+        // A stranded ticket has to be legible in the view an orchestrator
+        // already reads, or finding it needs a command nobody thinks to run.
+        let holds = lease::holds_by_task(&conn, &ids)?;
         let arr: Vec<serde_json::Value> = rows
             .iter()
             .map(|r| {
                 let ev = last_event.get(&r.id);
+                let hold = holds.get(&r.id);
                 serde_json::json!({
                     "display_id": r.display_id,
                     "title": r.title,
@@ -56,6 +60,8 @@ pub fn run(db_path: &std::path::Path, a: WaveArgs) -> Result<()> {
                     "agent": r.agent,
                     "last_kind": ev.and_then(|v| v.get("kind")).and_then(|v| v.as_str()),
                     "last_ts": ev.and_then(|v| v.get("ts")).and_then(|v| v.as_str()),
+                    "stale": hold.is_some_and(|h| h.stale),
+                    "hold": hold.map(lease::Hold::to_json),
                 })
             })
             .collect();
@@ -74,12 +80,26 @@ pub fn run(db_path: &std::path::Path, a: WaveArgs) -> Result<()> {
             any = true;
             println!("## {label}");
             for r in arr {
+                // The stale marker trails the title rather than taking a column:
+                // the four columns here are load-bearing elsewhere, and a hold
+                // that has gone quiet is worth a sentence, not a flag.
+                let stale = if r["stale"].as_bool().unwrap_or(false) {
+                    let host = r["hold"]["host"].as_str().unwrap_or("unknown host");
+                    format!(
+                        "   [STALE — quiet since {}, on {}]",
+                        r["hold"]["last_contact"].as_str().unwrap_or("?"),
+                        host
+                    )
+                } else {
+                    String::new()
+                };
                 println!(
-                    "  {:>7}  {:<14}  {:<10}  {}",
+                    "  {:>7}  {:<14}  {:<10}  {}{}",
                     r["display_id"].as_str().unwrap_or(""),
                     r["agent"].as_str().unwrap_or("-"),
                     r["last_kind"].as_str().unwrap_or("-"),
-                    r["title"].as_str().unwrap_or("")
+                    r["title"].as_str().unwrap_or(""),
+                    stale
                 );
             }
         }

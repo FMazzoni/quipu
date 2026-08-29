@@ -37,3 +37,11 @@ open-assignment invariant was already broken before this command ran; it reports
 `already_closed` and the whole transaction rolls back rather than releasing the
 task with its assignment left open. That is the shape of corruption `assign`'s
 `stale_open_assignment` guard catches downstream.
+
+## A holder that was dispossessed
+
+If the open assignment belongs to somebody else, the ownership refusal first asks
+whether *this* agent's own hold on the task was closed by a `reclaim`. If it was,
+the error says so by name instead of the generic "not yours": a machine coming
+back to find its lease broken has to be told, and has to proceed as a store that
+holds nothing rather than retrying against a ticket somebody else now owns.
