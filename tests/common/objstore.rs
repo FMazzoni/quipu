@@ -145,6 +145,20 @@ impl ObjectStore {
         self.state.lock().unwrap().objects.get(key).cloned()
     }
 
+    /// Puts an object no `qp` wrote, at a key of the fixture's choosing.
+    ///
+    /// The one way to fixture history from before the writer existed: a batch
+    /// with no `project_key` cannot be produced by this binary any more, and a
+    /// bucket that already holds one is exactly what every store looks like the
+    /// first time it publishes after upgrading.
+    pub fn place(&self, key: &str, body: &[u8]) {
+        self.state
+            .lock()
+            .unwrap()
+            .objects
+            .insert(key.to_string(), body.to_vec());
+    }
+
     /// A snapshot of the whole store, for asserting nothing was rewritten.
     pub fn snapshot(&self) -> BTreeMap<String, Vec<u8>> {
         self.state.lock().unwrap().objects.clone()

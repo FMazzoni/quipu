@@ -444,6 +444,144 @@ fn a_keyless_ledger_merges_into_its_own_project_and_no_one_elses() {
     );
 }
 
+/// One store, both eras of batch, in one directory — the migration shape.
+///
+/// A store that published before project identity existed and has since been
+/// given a key has BOTH shapes of batch under its own uuid: keyless ones from
+/// before, keyed ones from now. They are two projects — the keyless half is the
+/// store standing alone, under its derived key — and the grouping that decides
+/// this is per FILE, never per directory. Grouping by directory would file the
+/// older half under the newer project; ignoring it would lose the history
+/// entirely. Neither failure looks like anything from inside the store.
+///
+/// `qp export` cannot write a keyless batch any more, so the older half is
+/// hand-written from a real one. The two batches close over different event
+/// ranges, which is what keeps their filenames apart when both land in one
+/// directory.
+fn mixed_era_ledger(tmp: &Path, store: &ObjectStore) -> (Machine, PathBuf) {
+    let a = Machine::started(tmp, "a", store);
+    ok(&a.db, store, &["add", "written before the key"]);
+    let early = a.export_to(&tmp.join("early"), store);
+    strip_keys(&early);
+
+    // A wider batch, keyed: exported into a fresh directory, so it closes over
+    // the whole history rather than only what came after the first export.
+    ok(&a.db, store, &["add", "written after the key"]);
+    let late = a.export_to(&tmp.join("late"), store);
+
+    let mixed = tmp.join("mixed").join(a.uuid());
+    std::fs::create_dir_all(&mixed).unwrap();
+    for src in [early.join(a.uuid()), late.join(a.uuid())] {
+        for f in std::fs::read_dir(src).unwrap().flatten() {
+            std::fs::copy(f.path(), mixed.join(f.file_name())).unwrap();
+        }
+    }
+    assert_eq!(
+        std::fs::read_dir(&mixed).unwrap().count(),
+        2,
+        "the two halves collided on a filename, so this fixture holds only one era"
+    );
+    (a, tmp.join("mixed"))
+}
+
+#[test]
+fn a_keyless_half_and_a_keyed_half_in_one_directory_are_two_projects() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = ObjectStore::start();
+    let (a, mixed) = mixed_era_ledger(tmp.path(), &store);
+    let uuid = a.uuid();
+
+    // The join listing sees two, and names both: the derived key for the era
+    // before the key, the store's real key for the era after it.
+    let db = tmp.path().join("j").join("db.sqlite");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let assert = qp(&db, &store)
+        .args(["init", "--from", mixed.to_str().unwrap()])
+        .assert()
+        .failure();
+    let err = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        err.contains("holds 2 projects"),
+        "one store's two eras were counted as one project:\n{err}"
+    );
+    assert!(
+        err.contains(&format!("legacy-{uuid}")) && err.contains(&a.key()),
+        "both eras must be offered by name:\n{err}"
+    );
+}
+
+/// The keyless half belongs to the project it resolves to, and to nobody else.
+#[test]
+fn a_keyless_half_merges_into_its_own_project_and_no_one_elses() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = ObjectStore::start();
+    let (a, mixed) = mixed_era_ledger(tmp.path(), &store);
+    let uuid = a.uuid();
+
+    // A machine of the project that keyless batch IS: the derived key, named
+    // outright. It takes the keyless half and leaves the keyed half alone.
+    let mine = tmp.path().join("mine").join("db.sqlite");
+    std::fs::create_dir_all(mine.parent().unwrap()).unwrap();
+    ok(
+        &mine,
+        &store,
+        &["init", "--project-key", &format!("legacy-{uuid}")],
+    );
+    let merged = json(
+        &mine,
+        &store,
+        &[
+            "import",
+            "--from",
+            mixed.to_str().unwrap(),
+            "--merge",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        merged["batches"], 1,
+        "the store that wrote the keyless half did not take it"
+    );
+    assert_eq!(
+        merged["foreign_batches"], 1,
+        "the keyed half is another project's and must be skipped"
+    );
+    assert_eq!(
+        Machine { db: mine }.titles(),
+        vec!["written before the key".to_string()],
+        "the keyless half brought history that is not in it"
+    );
+
+    // An unrelated project reading the same directory gets neither half.
+    let s_db = tmp.path().join("s").join("db.sqlite");
+    std::fs::create_dir_all(s_db.parent().unwrap()).unwrap();
+    ok(&s_db, &store, &["init", "--new-project"]);
+    ok(&s_db, &store, &["add", "the stranger's own ticket"]);
+    let merged = json(
+        &s_db,
+        &store,
+        &[
+            "import",
+            "--from",
+            mixed.to_str().unwrap(),
+            "--merge",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        merged["events_new"], 0,
+        "a keyless batch was treated as matching whoever asked"
+    );
+    assert_eq!(
+        merged["foreign_batches"], 2,
+        "both halves must be seen and skipped, or this proves nothing"
+    );
+    assert_eq!(
+        Machine { db: s_db }.titles(),
+        vec!["the stranger's own ticket".to_string()]
+    );
+}
+
 #[test]
 fn a_store_that_predates_the_key_is_healed_rather_than_bricked() {
     let tmp = tempfile::tempdir().unwrap();

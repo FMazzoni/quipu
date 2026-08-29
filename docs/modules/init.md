@@ -43,8 +43,11 @@ layouts is one people learn to pass a flag past, which spends its credibility
 exactly where it is needed.
 
 A url in `$QUIPU_LEDGER` is listed, which is the one place `qp init` touches the
-network at all — one delimited LIST, no downloads, because the project key is the
-first key segment and so the server's answer IS the project list — and only when that variable is set. An unreachable ledger is
+network at all — one delimited LIST for the candidates, because the project key
+is the first key segment, then one batch read per candidate to confirm it, since
+a first-level segment can also be a key prefix somebody else's store publishes
+under and a name in a listing is not evidence of a project — and only when that
+variable is set. An unreachable ledger is
 treated as no ledger rather than as an error: someone on a plane initialising a
 store must not be blocked by a guard that cannot see what it is guarding. A store
 that already exists is never guarded either — re-running `qp init` to add a

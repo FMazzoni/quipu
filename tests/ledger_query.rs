@@ -12,6 +12,11 @@
 //! `qp ledger` is the one command that reads ACROSS projects, so it is the one
 //! that lists the whole bucket rather than a single prefix. That is deliberate
 //! and is the exception, not the rule: `qp sync` never leaves its own prefix.
+//!
+//! It is also the file that holds the two views to each other. `qp init --from`
+//! answers the same question over the same bucket by a cheaper route, and the
+//! two must not disagree about what a project is — so the join listing is
+//! asserted here, beside the global query, by COUNT.
 
 mod common;
 
@@ -59,6 +64,23 @@ impl Project {
         Self { db }
     }
 
+    /// A project whose ledger url names a key PREFIX inside the same bucket.
+    ///
+    /// Not a second project at the root: a prefix is part of the location, so
+    /// this store is as isolated from the root as it would be in another
+    /// bucket. From the root it shows up as one more first-level segment, which
+    /// is exactly the thing a listing cannot tell apart from a project.
+    fn under_prefix(root: &Path, name: &str, store: &ObjectStore, prefix: &str) -> Self {
+        let db = root.join(name).join("db.sqlite");
+        ok(&db, store, &["init"]);
+        ok(
+            &db,
+            store,
+            &["remote", "set", "--ledger", &store.url_with_prefix(prefix)],
+        );
+        Self { db }
+    }
+
     /// A second machine of an EXISTING project: same key, its own uuid, its own
     /// numbering starting at 1 again.
     fn joining(root: &Path, name: &str, store: &ObjectStore, key: &str) -> Self {
@@ -76,6 +98,29 @@ impl Project {
             |r| r.get(0),
         )
         .unwrap()
+    }
+
+    fn uuid(&self) -> String {
+        let conn = rusqlite::Connection::open(&self.db).unwrap();
+        conn.query_row(
+            "SELECT value FROM meta WHERE key = 'project_uuid'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn titles(&self) -> Vec<String> {
+        let conn = rusqlite::Connection::open(&self.db).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT title FROM task ORDER BY title")
+            .unwrap();
+        let v = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        v
     }
 
     /// Everything a write to this store could possibly disturb.
@@ -143,6 +188,21 @@ fn three_projects(root: &Path, store: &ObjectStore) -> (String, Project, Project
         ok(&p.db, store, &["sync"]);
     }
     (ledger, a, b, c)
+}
+
+/// The stderr of a command that must not succeed.
+fn fails(db: &Path, store: &ObjectStore, args: &[&str]) -> String {
+    let out = qp(db, store).args(args).assert().failure();
+    String::from_utf8_lossy(&out.get_output().stderr).to_string()
+}
+
+/// The project keys `qp init --from <ledger>` would offer, read off its refusal.
+///
+/// There is no listing subcommand: naming the candidates is something `qp init`
+/// only does when it cannot choose between them, so the ambiguity refusal IS the
+/// join listing, and its count is the number under test.
+fn join_candidates(db: &Path, store: &ObjectStore, url: &str) -> String {
+    fails(db, store, &["init", "--from", url])
 }
 
 fn ledger_json(db: &Path, store: &ObjectStore) -> Value {
@@ -362,4 +422,209 @@ fn two_stores_in_one_project_that_both_minted_a_qp_1_are_disambiguated() {
         );
     }
     assert_ne!(firsts[0]["origin_uuid"], firsts[1]["origin_uuid"]);
+}
+
+// ---------------------------------------------------------------------------
+// what counts as a project, from the two ends that must agree
+// ---------------------------------------------------------------------------
+
+/// A key prefix is a location, and a location is not a project.
+///
+/// The two paths answer the same question by different means — the join listing
+/// enumerates the bucket's first-level segments, the global query reads the
+/// header of every batch it downloads — and they used to disagree: a bucket
+/// holding a real project plus one store publishing under a key prefix offered
+/// TWO candidates to join and reported ONE project. Joining the phantom gave a
+/// store built from a directory holding no batches, failing later somewhere that
+/// says nothing about why.
+#[test]
+fn a_key_prefix_in_the_bucket_is_not_a_project_in_either_view() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = ObjectStore::start();
+
+    let a = Project::new(tmp.path(), "alpha", &store);
+    ok(&a.db, &store, &["add", "alpha one"]);
+    ok(&a.db, &store, &["sync"]);
+
+    let b = Project::under_prefix(tmp.path(), "beta", &store, "team");
+    ok(&b.db, &store, &["add", "beta one"]);
+    ok(&b.db, &store, &["sync"]);
+
+    // The fixture is only honest if the prefixed store really did publish under
+    // a segment the root can see.
+    assert!(
+        store.keys().iter().any(|k| k.starts_with("team/")),
+        "nothing was published under the key prefix: {:?}",
+        store.keys()
+    );
+
+    let v = ledger_json(&a.db, &store);
+    let projects = v["projects"].as_array().unwrap();
+    assert_eq!(
+        projects.len(),
+        1,
+        "the global query counted the key prefix as a project: {projects:?}"
+    );
+    assert_eq!(projects[0]["project_key"], a.key());
+
+    // One candidate, so the join is unambiguous and lands on the one project
+    // the global query named. Two candidates and this refuses instead.
+    let j = tmp.path().join("joiner").join("db.sqlite");
+    std::fs::create_dir_all(j.parent().unwrap()).unwrap();
+    let out: Value =
+        serde_json::from_str(&ok(&j, &store, &["init", "--from", &store.url(), "--json"])).unwrap();
+    assert_eq!(
+        out["project_key"],
+        a.key(),
+        "the join listing offered something other than the one project on this ledger"
+    );
+    assert_eq!(
+        Project { db: j }.titles(),
+        vec!["alpha one".to_string()],
+        "the join landed on a project with no history"
+    );
+}
+
+/// The number, not just the names: the count is what diverged.
+#[test]
+fn the_join_listing_and_the_global_query_count_the_same_projects() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = ObjectStore::start();
+
+    let a = Project::new(tmp.path(), "alpha", &store);
+    let c = Project::new(tmp.path(), "gamma", &store);
+    for (p, title) in [(&a, "alpha one"), (&c, "gamma one")] {
+        ok(&p.db, &store, &["add", title]);
+        ok(&p.db, &store, &["sync"]);
+    }
+    let b = Project::under_prefix(tmp.path(), "beta", &store, "team");
+    ok(&b.db, &store, &["add", "beta one"]);
+    ok(&b.db, &store, &["sync"]);
+
+    let j = tmp.path().join("joiner").join("db.sqlite");
+    std::fs::create_dir_all(j.parent().unwrap()).unwrap();
+    let refusal = join_candidates(&j, &store, &store.url());
+    assert!(
+        refusal.contains("holds 2 projects"),
+        "the join listing did not count 2 projects:\n{refusal}"
+    );
+    for key in [a.key(), c.key()] {
+        assert!(
+            refusal.contains(&key),
+            "project {key} was not offered as a candidate:\n{refusal}"
+        );
+    }
+    assert!(
+        !refusal.contains("team"),
+        "the key prefix was offered as a project to join:\n{refusal}"
+    );
+    assert!(
+        !refusal.contains(&b.key()),
+        "a project living under another prefix was offered from the root:\n{refusal}"
+    );
+
+    assert_eq!(
+        ledger_json(&a.db, &store)["projects"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "the two views disagree about how many projects this ledger holds"
+    );
+}
+
+/// One store's keyless and keyed batches are two projects, per FILE.
+///
+/// The shape every store takes the first time it publishes after upgrading: the
+/// batches it wrote before project identity existed carry no key, the ones it
+/// writes now do. Both come from one store uuid, so a download lays them side by
+/// side in ONE directory — grouping by directory would file the older half under
+/// the newer project, and dropping it would lose the store's own history from
+/// the only view that spans projects.
+#[test]
+fn a_keyless_half_and_a_keyed_half_of_one_store_are_attributed_separately() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = ObjectStore::start();
+
+    let a = Project::new(tmp.path(), "alpha", &store);
+    let uuid = a.uuid();
+    ok(&a.db, &store, &["add", "written before the key"]);
+
+    // The keyless half, hand-written: `qp export` cannot produce one any more,
+    // so the fixture takes a real batch and puts it back into the shape a
+    // pre-identity `qp` wrote — format version 1, no `project_key`.
+    let dump = tmp.path().join("dump");
+    ok(&a.db, &store, &["export", "--out", dump.to_str().unwrap()]);
+    let early = std::fs::read_dir(dump.join(&uuid))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|e| e == "jsonl"))
+        .expect("an exported batch");
+    let name = early.file_name().unwrap().to_str().unwrap().to_string();
+    let keyless = strip_key(&std::fs::read_to_string(&early).unwrap());
+
+    // The keyed half: a second ticket, then a real sync. Its batch closes over
+    // a wider range, so the two halves cannot collide on a filename once the
+    // download flattens them into one directory.
+    ok(&a.db, &store, &["add", "written after the key"]);
+    ok(&a.db, &store, &["sync"]);
+
+    // Where a pre-identity store's batches resolve to: its own derived key.
+    store.place(&format!("legacy-{uuid}/{uuid}/{name}"), keyless.as_bytes());
+
+    let v = ledger_json(&a.db, &store);
+    let projects = v["projects"].as_array().unwrap();
+    assert_eq!(
+        projects.len(),
+        2,
+        "the keyless half was dropped or merged into the keyed one: {projects:?}"
+    );
+
+    let legacy = projects
+        .iter()
+        .find(|g| g["project_key"] == format!("legacy-{uuid}"))
+        .expect("the keyless half is its own project, under the derived key");
+    let titles: Vec<&str> = legacy["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        titles,
+        vec!["written before the key"],
+        "the keyless half replayed as something other than the history it holds"
+    );
+
+    let keyed = projects
+        .iter()
+        .find(|g| g["project_key"] == a.key())
+        .expect("the keyed half is the store's current project");
+    let mut titles: Vec<&str> = keyed["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["title"].as_str().unwrap())
+        .collect();
+    titles.sort_unstable();
+    assert_eq!(
+        titles,
+        vec!["written after the key", "written before the key"],
+        "the keyed half lost history the store had published"
+    );
+}
+
+/// One batch, put back into the shape a `qp` that predates the key wrote.
+fn strip_key(batch: &str) -> String {
+    let mut lines: Vec<String> = batch.lines().map(str::to_string).collect();
+    let mut header: Value = serde_json::from_str(&lines[0]).unwrap();
+    let obj = header.as_object_mut().unwrap();
+    assert!(
+        obj.remove("project_key").is_some(),
+        "fixture is only honest if a key was really there"
+    );
+    obj.insert("format_version".into(), Value::from(1));
+    lines[0] = serde_json::to_string(&header).unwrap();
+    lines.join("\n") + "\n"
 }

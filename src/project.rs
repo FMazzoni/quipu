@@ -140,51 +140,25 @@ pub fn scan(root: &Path) -> Result<Vec<LedgerProject>> {
     // time rather than events.
     let mut best: BTreeMap<String, (i64, LedgerProject)> = BTreeMap::new();
     for path in files {
-        let Some(raw) = first_line(&path) else {
+        let Some(h) = first_line(&path).as_deref().and_then(header) else {
             continue;
         };
-        let Ok(v) = serde_json::from_str::<Value>(&raw) else {
-            continue;
-        };
-        if v.get("record").and_then(Value::as_str) != Some("header")
-            || v.get("format").and_then(Value::as_str) != Some(crate::cmd::export::FORMAT)
-        {
-            continue;
-        }
-        let Some(uuid) = v.get("project_uuid").and_then(Value::as_str) else {
-            continue;
-        };
-        let header_key = v.get("project_key").and_then(Value::as_str);
-        let key = effective_key(header_key, uuid);
-        let last = v
-            .get("last_event_id")
-            .and_then(Value::as_i64)
-            .unwrap_or_default();
-        let entry = best.entry(key.clone()).or_insert_with(|| {
+        let entry = best.entry(h.key.clone()).or_insert_with(|| {
             (
                 i64::MIN,
                 LedgerProject {
-                    project_key: key.clone(),
+                    project_key: h.key.clone(),
                     display_prefix: "QP".to_string(),
                     default_tags: Vec::new(),
                 },
             )
         });
-        if last > entry.0 {
-            entry.0 = last;
-            if let Some(p) = v.get("display_prefix").and_then(Value::as_str) {
-                entry.1.display_prefix = p.to_string();
+        if h.last_event_id > entry.0 {
+            entry.0 = h.last_event_id;
+            if let Some(p) = h.display_prefix {
+                entry.1.display_prefix = p;
             }
-            entry.1.default_tags = v
-                .get("default_tags")
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default();
+            entry.1.default_tags = h.default_tags;
         }
     }
     Ok(best.into_values().map(|(_, p)| p).collect())
@@ -207,24 +181,112 @@ pub fn batches_by_project(root: &Path) -> Result<BTreeMap<String, Vec<PathBuf>>>
 
     let mut out: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
     for path in files {
-        let Some(raw) = first_line(&path) else {
+        let Some(key) = batch_key(&path) else {
             continue;
         };
-        let Ok(v) = serde_json::from_str::<Value>(&raw) else {
-            continue;
-        };
-        if v.get("record").and_then(Value::as_str) != Some("header")
-            || v.get("format").and_then(Value::as_str) != Some(crate::cmd::export::FORMAT)
-        {
-            continue;
-        }
-        let Some(uuid) = v.get("project_uuid").and_then(Value::as_str) else {
-            continue;
-        };
-        let key = effective_key(v.get("project_key").and_then(Value::as_str), uuid);
         out.entry(key).or_default().push(path);
     }
     Ok(out)
+}
+
+/// The projects an object ledger holds, by the rule [`scan`] applies to a directory.
+///
+/// The key layout puts the project key first, so a delimited LIST offers the
+/// candidates for free — and a candidate is a LOCATION, which is not evidence.
+/// A url naming the bucket root sees the key prefix another store publishes
+/// under as a first segment indistinguishable by name from a project, and
+/// offering it as one hands the joiner a project with no batches in it, failing
+/// later somewhere that says nothing about why. So each candidate is confirmed
+/// the same way a directory is: it is a project when a batch under it carries a
+/// header this binary can read.
+///
+/// The candidate segment is what comes back, not the key its header declares:
+/// the header answers *whether there is a project here*, and the segment is
+/// *where it is* — the prefix every subsequent LIST and GET addresses. The
+/// asymmetry is the point of the whole layout, and a ledger url is a vantage
+/// point rather than a privileged one: what projects exist is only ever answered
+/// relative to a prefix.
+///
+/// Costs one GET per candidate rather than per batch: every batch opens with its
+/// header, so the first key settles it, and the loop continues only past files
+/// that turn out not to be batches at all.
+pub fn scan_object(client: &crate::s3::Client) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for candidate in client.list_project_keys()? {
+        if holds_a_batch(client, &candidate)? {
+            out.push(candidate);
+        }
+    }
+    Ok(out)
+}
+
+/// Whether any object under one candidate prefix reads as a batch.
+fn holds_a_batch(client: &crate::s3::Client, candidate: &str) -> Result<bool> {
+    for key in client.list(&crate::s3::project_prefix(candidate))? {
+        // A key that is not `<project>/<store>/<batch>.jsonl` is somebody
+        // else's file, or a whole extra segment of prefix — either way it is
+        // not a batch of this project, and reading it would prove nothing.
+        if crate::s3::key_tail(&key).is_none() {
+            continue;
+        }
+        let body = client.get(&key)?;
+        let first = body.split(|b| *b == b'\n').next().unwrap_or_default();
+        if std::str::from_utf8(first).ok().and_then(header).is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The envelope one batch header carries, once the line is known to be one.
+struct Header {
+    key: String,
+    display_prefix: Option<String>,
+    default_tags: Vec<String>,
+    last_event_id: i64,
+}
+
+/// Reads one line as a batch header, or `None` when it is not one.
+///
+/// The single answer to both halves of "is this a batch, and whose project is
+/// it". Every reader that enumerates a ledger — a directory walk, an object
+/// listing — differs only in how it finds bytes to hand to this; the moment one
+/// of them decides for itself what counts as a project, two code paths disagree
+/// about what the ledger holds, and the cheaper one is always the wrong one.
+fn header(raw: &str) -> Option<Header> {
+    let v: Value = serde_json::from_str(raw).ok()?;
+    if v.get("record").and_then(Value::as_str) != Some("header")
+        || v.get("format").and_then(Value::as_str) != Some(crate::cmd::export::FORMAT)
+    {
+        return None;
+    }
+    let uuid = v.get("project_uuid").and_then(Value::as_str)?;
+    Some(Header {
+        key: effective_key(v.get("project_key").and_then(Value::as_str), uuid),
+        display_prefix: v
+            .get("display_prefix")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        default_tags: v
+            .get("default_tags")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        last_event_id: v
+            .get("last_event_id")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+    })
+}
+
+/// The project one batch file belongs to; `None` when it is not a batch at all.
+fn batch_key(path: &Path) -> Option<String> {
+    header(first_line(path)?.as_str()).map(|h| h.key)
 }
 
 /// Gathers `*.jsonl` paths from `dir`, descending one level when `deep`.

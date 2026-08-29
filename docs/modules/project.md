@@ -41,6 +41,22 @@ wrote it, standing alone, under the legacy key above. `effective_key` is the
 single place that decision is made; readers call it rather than looking at the
 raw field, and `batch_key` is that reading applied to one file on disk.
 
+## What counts as a project
+
+A place holds a project when a batch under it carries a header this binary can
+read — never when a directory or a key segment merely exists under that name.
+`scan` applies that to a directory and `scan_object` to an object ledger; both
+decide through the same `header`, and the transports differ only in where the
+bytes come from. The rule is stated once because it was once implemented twice:
+the object listing believed its own `CommonPrefixes`, so a bucket root holding a
+key prefix offered a project to join that the global query did not show, and
+joining it produced a store with no batches in it.
+
+A prefix is part of the LOCATION, not of the data. Two stores pointed at one
+bucket under different prefixes are as isolated as two buckets — by design — so
+"what projects exist here" is only answered relative to a prefix, and the root is
+not a privileged vantage point.
+
 The reverse direction is a hard break, on purpose: format version 2 batches are
 refused by a `qp` old enough to predate the key, because such a reader would
 silently ignore it and merge across projects. See `docs/modules/export.md`.

@@ -134,15 +134,19 @@ struct Materialised {
 impl Source {
     /// The project keys this ledger holds.
     ///
-    /// For an object store this is one delimited LIST and no downloads — the
-    /// project key is the first key segment, so the answer is the listing.
+    /// Both transports ask `project` the same question and get the same rule
+    /// back — a project is a place holding at least one readable batch header,
+    /// never a name in a listing. The object listing alone used to be the
+    /// answer, and it counted a key prefix belonging to some other store as a
+    /// project: `qp init --from` offered a candidate that `qp ledger` did not
+    /// show, and joining it produced a store with nothing in it.
     fn project_keys(&self) -> Result<Vec<String>> {
         match &self.origin {
             Origin::Dir(d) => Ok(project::scan(d)?
                 .into_iter()
                 .map(|p| p.project_key)
                 .collect()),
-            Origin::Object(c) => Ok(c.list_project_keys()?),
+            Origin::Object(c) => project::scan_object(c),
         }
     }
 
@@ -374,8 +378,9 @@ fn attach_ledger(conn: &rusqlite::Connection, url: Option<&str>) -> Result<()> {
 ///
 /// Enumerating comes before downloading, which is the shape the object store
 /// made possible: the project keys are the first key segment, so choosing costs
-/// one listing and only the chosen project is ever transferred. The git ledger
-/// had to fetch everything before it could tell you what was in it.
+/// one listing plus one batch read per candidate, and only the chosen project is
+/// ever transferred. The git ledger had to fetch everything before it could tell
+/// you what was in it.
 fn join_from_ledger(source: &Source, wanted: Option<&str>) -> Result<Intent> {
     let mut keys = source.project_keys()?;
     if let Some(want) = wanted {
