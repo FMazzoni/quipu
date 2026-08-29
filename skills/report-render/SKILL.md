@@ -23,6 +23,19 @@ qp report --json --output snapshot.json # write to a file instead of stdout
 `--since` and `--wave` compose with the default and `--all-tickets` modes.
 `--ticket` and `--all-tickets` are mutually exclusive with each other.
 
+### Through a front door
+
+`report` is served, so every line above works unchanged on a machine with no
+store of its own: `QP_SERVER=<url>` in the environment, plus `QP_PROJECT=<name>`
+when the front door serves more than one. One round trip returns the whole
+payload — the server assembles the projection, so a renderer never fans out into
+per-ticket requests.
+
+`--output` stays on the client: the file is written where the command ran, which
+is where you want the report. If the front door is down the command fails with
+the `unavailable` kind and exit 7, and nothing is served from a cache — render
+the failure, never a stale board.
+
 ## Payload shapes
 
 ### Default (board snapshot)

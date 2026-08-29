@@ -105,3 +105,17 @@ check-lean:
     else \
         echo "(RSS check skipped: GNU /usr/bin/time -v unavailable on this platform)"; \
     fi
+
+# the container deployment smoke — build the image, then drive it from outside
+#
+# Not part of `lint`: it needs a docker daemon, builds the whole crate a second
+# time inside a container, and takes minutes. It is the check you run before
+# trusting a deployment, not the one that gates a PR.
+#
+# QP_SMOKE_PORT overrides the placeholder port when 8787 is taken. The host side
+# of the publish is always loopback — see "Amendment: publishing a container
+# port" in docs/process-contract.md for why the bind inside is 0.0.0.0 and why
+# that is not the arrangement the same section forbids.
+[doc("build the container image and smoke-test a deployment (needs docker)")]
+docker-smoke:
+    ./docker-smoke.sh
