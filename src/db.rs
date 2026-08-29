@@ -4,7 +4,9 @@
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 use thiserror::Error;
 
 const SCHEMA: &str = include_str!("schema.sql");
@@ -517,6 +519,67 @@ fn read_project_uuid(path: &Path) -> Result<Option<String>> {
 /// expires.
 pub const SCHEMA_VERSION: &str = "7";
 
+/// How long a writer waits at the door of a contended store.
+///
+/// Named because `checkpoint_now` has to suspend it and put it back; two
+/// literals would drift and the restore would silently change the timeout.
+const BUSY_TIMEOUT_MS: i32 = 5000;
+
+/// Commits between periodic WAL checkpoints.
+///
+/// Defended against the measured growth rate in `docs/modules/db.md`.
+const CHECKPOINT_EVERY: u32 = 256;
+
+/// Commits since the last checkpoint attempt, per store file.
+///
+/// Keyed by path rather than counted globally because a server holds one
+/// connection per project: a single global counter would checkpoint whichever
+/// store happened to commit on the 256th tick, so a quiet project could ride
+/// behind a busy one and never be checkpointed at all.
+static COMMITS_SINCE_CHECKPOINT: LazyLock<Mutex<HashMap<String, u32>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Count a commit; `true` when this one is the Nth and owes a checkpoint.
+///
+/// Resets on the tick it fires, whether or not the checkpoint then succeeds.
+/// That is the anti-spin rule: a store with a pinned reader gets at most one
+/// (immediately-refused) attempt per `CHECKPOINT_EVERY` commits, not one per
+/// commit for as long as the reader is held.
+fn owes_checkpoint(conn: &Connection) -> bool {
+    let Some(path) = conn.path().map(str::to_string) else {
+        return false; // `:memory:` has no WAL to bound
+    };
+    let mut counts = COMMITS_SINCE_CHECKPOINT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let n = counts.entry(path).or_insert(0);
+    *n += 1;
+    if *n >= CHECKPOINT_EVERY {
+        *n = 0;
+        true
+    } else {
+        false
+    }
+}
+
+/// Attempt one `TRUNCATE` checkpoint, refusing to wait for it.
+///
+/// The write that triggered this has already committed, so every failure here
+/// is discarded: a checkpoint is housekeeping and must never turn a successful
+/// write into an error.
+///
+/// Suspending `busy_timeout` for the duration is the load-bearing part.
+/// `wal_checkpoint(TRUNCATE)` runs the busy handler, so under the store's
+/// normal 5 s timeout a checkpoint blocked by one pinned reader returns busy
+/// only after stalling the writer for the full five seconds — measured at
+/// 5.00 s per attempt, against 3 µs when the timeout is suspended.
+fn checkpoint_now(conn: &Connection) {
+    let _ = conn.pragma_update(None, "busy_timeout", 0);
+    let _: rusqlite::Result<i64> =
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0));
+    let _ = conn.pragma_update(None, "busy_timeout", BUSY_TIMEOUT_MS);
+}
+
 /// Open the connection and set pragmas.
 ///
 /// Shared by both the hot path (`open`) and init-time (`init`) — no migration,
@@ -534,7 +597,7 @@ fn open_conn(path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", true)?;
-    conn.pragma_update(None, "busy_timeout", 5000)?;
+    conn.pragma_update(None, "busy_timeout", BUSY_TIMEOUT_MS)?;
     Ok(conn)
 }
 
@@ -859,6 +922,9 @@ pub fn with_tx<T>(conn: &mut Connection, f: impl FnOnce(&Transaction) -> Result<
     match f(&tx) {
         Ok(v) => {
             tx.commit()?;
+            if owes_checkpoint(conn) {
+                checkpoint_now(conn);
+            }
             Ok(v)
         }
         Err(e) => {
@@ -1447,6 +1513,191 @@ mod tests {
         }
         assert_eq!(State::from_str("nope"), None);
         assert_eq!(State::from_str("blocked"), None);
+    }
+
+    /// Payload size per commit in the WAL tests.
+    ///
+    /// 4 KB, big enough that a few hundred commits outrun the 1000-page
+    /// autocheckpoint — which is the only way to see the pin at all.
+    const ROW: usize = 4096;
+
+    /// Ceiling every bounded case is asserted against.
+    ///
+    /// The unpinned steady state measured ~4 MB (the autocheckpoint's 1000
+    /// pages at a 4 KB page size), so 8 MB passes comfortably while still
+    /// failing an unbounded WAL, which reaches ~10 MB by 300 commits.
+    const BOUND: u64 = 8 * 1024 * 1024;
+
+    fn wal_bytes(db: &Path) -> u64 {
+        let mut w = db.as_os_str().to_os_string();
+        w.push("-wal");
+        std::fs::metadata(PathBuf::from(w))
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
+    fn commit_row(conn: &mut Connection, bytes: usize) {
+        let body = "x".repeat(bytes);
+        with_tx(conn, |tx| {
+            tx.execute(
+                "INSERT INTO event(kind, payload) VALUES ('wal_test', ?1)",
+                [&body],
+            )?;
+            Ok(())
+        })
+        .expect("a housekeeping checkpoint must never fail the write it follows");
+    }
+
+    fn fresh(dir: &tempfile::TempDir) -> (PathBuf, Connection) {
+        let path = dir.path().join("db.sqlite");
+        let conn = init(&path, None, &[], None).unwrap();
+        (path, conn)
+    }
+
+    #[test]
+    fn autocheckpoint_is_left_at_the_sqlite_default() {
+        let d = tempfile::tempdir().unwrap();
+        let (_p, conn) = fresh(&d);
+        let pages: i64 = conn
+            .pragma_query_value(None, "wal_autocheckpoint", |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            pages, 1000,
+            "the periodic checkpoint supplements autocheckpoint rather than replacing it"
+        );
+    }
+
+    #[test]
+    fn held_read_cursor_pins_the_wal_and_releasing_it_reclaims_the_space() {
+        let d = tempfile::tempdir().unwrap();
+        let (path, mut w) = fresh(&d);
+        for _ in 0..20 {
+            commit_row(&mut w, ROW);
+        }
+
+        let reader = open(&path).unwrap();
+        let mut stmt = reader.prepare("SELECT id, payload FROM event").unwrap();
+        let mut rows = stmt.query([]).unwrap();
+        rows.next().unwrap(); // stepping once opens the read transaction that pins the WAL
+
+        for _ in 0..300 {
+            commit_row(&mut w, ROW);
+        }
+        let pinned = wal_bytes(&path);
+        assert!(
+            pinned > BOUND,
+            "one open cursor should have pinned the checkpoint and grown the WAL past {BOUND} \
+             bytes, but it is {pinned} — if this fails the effect no longer reproduces and the \
+             rest of this policy needs re-deriving, not relaxing"
+        );
+
+        // A TRUNCATE checkpoint is refused outright while the cursor is held,
+        // and the refusal leaves the file exactly as it was. (PASSIVE would be
+        // the wrong probe: it never reports busy, it just backfills what it can
+        // and leaves the file at its high-water mark.)
+        w.pragma_update(None, "busy_timeout", 0).unwrap();
+        let busy: i64 = w
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))
+            .unwrap();
+        w.pragma_update(None, "busy_timeout", BUSY_TIMEOUT_MS)
+            .unwrap();
+        assert_eq!(
+            busy, 1,
+            "a pinned reader must report the checkpoint as busy"
+        );
+        assert_eq!(
+            wal_bytes(&path),
+            pinned,
+            "a refused checkpoint must not touch the file"
+        );
+
+        drop(rows);
+        drop(stmt);
+        drop(reader);
+
+        // Releasing the cursor does not shrink the file on its own: the next
+        // CHECKPOINT_EVERY commits are what reclaim it.
+        for _ in 0..CHECKPOINT_EVERY {
+            commit_row(&mut w, 64);
+        }
+        let reclaimed = wal_bytes(&path);
+        assert!(
+            reclaimed < BOUND,
+            "the periodic checkpoint should have reclaimed the WAL once the cursor was \
+             released, but it is still {reclaimed} bytes (was {pinned})"
+        );
+    }
+
+    #[test]
+    fn materialized_reads_keep_the_wal_bounded() {
+        let d = tempfile::tempdir().unwrap();
+        let (path, mut w) = fresh(&d);
+        let reader = open(&path).unwrap();
+
+        for _ in 0..300 {
+            commit_row(&mut w, ROW);
+            // The rule this file exists to protect: collect, then release.
+            let _seen: Vec<i64> = reader
+                .prepare("SELECT id FROM event ORDER BY id DESC LIMIT 5")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+        }
+        let size = wal_bytes(&path);
+        assert!(
+            size < BOUND,
+            "a reader that materializes every read leaves the WAL bounded; got {size} bytes"
+        );
+    }
+
+    #[test]
+    fn a_busy_checkpoint_neither_fails_the_write_nor_waits_on_the_reader() {
+        let d = tempfile::tempdir().unwrap();
+        let (path, mut w) = fresh(&d);
+        commit_row(&mut w, 64);
+
+        let reader = open(&path).unwrap();
+        let mut stmt = reader.prepare("SELECT id, payload FROM event").unwrap();
+        let mut rows = stmt.query([]).unwrap();
+        rows.next().unwrap();
+
+        // Two full checkpoint periods, every attempt refused by the pinned
+        // reader. `commit_row` already asserts no write fails; what this adds
+        // is that no attempt paid the store's 5 s busy_timeout.
+        let started = std::time::Instant::now();
+        for _ in 0..(CHECKPOINT_EVERY * 2) {
+            commit_row(&mut w, 64);
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "{} busy checkpoints took {elapsed:?}; a checkpoint that honours busy_timeout stalls \
+             the writer 5 s per attempt",
+            2
+        );
+
+        // busy_timeout is put back exactly as `open_conn` set it.
+        let ms: i64 = w
+            .pragma_query_value(None, "busy_timeout", |r| r.get(0))
+            .unwrap();
+        assert_eq!(ms, i64::from(BUSY_TIMEOUT_MS));
+    }
+
+    #[test]
+    fn a_short_lived_process_still_leaves_no_wal_file() {
+        let d = tempfile::tempdir().unwrap();
+        let (path, mut w) = fresh(&d);
+        for _ in 0..10 {
+            commit_row(&mut w, ROW);
+        }
+        drop(w);
+        assert_eq!(
+            wal_bytes(&path),
+            0,
+            "the last connection to close checkpoints and unlinks the WAL"
+        );
     }
 
     #[test]

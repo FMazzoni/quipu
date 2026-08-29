@@ -156,3 +156,94 @@ lease breaking under it.
 It is also the one place that can refuse a write from a holder whose lease was
 already broken. The refusal returns an error like any other, so `with_tx` unwinds
 and the ticket is left untouched by the machine that no longer owns it.
+
+## Bounding the WAL in a process that never exits
+
+A WAL is bounded by processes exiting. Today every `qp` invocation exits, and
+the last connection to close checkpoints and unlinks the WAL — which is why a
+live store directory holds `db.sqlite` and no `-wal` file at all. A long-lived
+process removes that, and nothing else in SQLite puts it back.
+
+One open read cursor anywhere in the process pins the checkpoint for every
+writer. Not a second process — a second *connection*, in the same process, that
+stepped a `SELECT` and has not finished it. A read that outlives its response is
+therefore a leak with no error message: nothing fails, the writes all succeed,
+and the WAL grows until the disk does not.
+
+Measured on a synthetic bench with 4 KB rows, one process, page size 4 KB:
+
+| Situation | WAL |
+| --- | --- |
+| no reader, several hundred commits | ~4 MB, steady — `wal_autocheckpoint` at its default 1000 pages does the job |
+| one cursor held, 100 commits | ~4.5 MB |
+| one cursor held, 200 commits | ~7.5 MB |
+| one cursor held, 400 commits | ~13 MB, still climbing linearly |
+| cursor released, one more commit | ~13 MB — releasing does **not** shrink it |
+| explicit `wal_checkpoint(TRUNCATE)` after release | 0 |
+
+Two separate facts hide in that table. The pinned growth is unfixable from the
+write side — `wal_checkpoint(TRUNCATE)` returns busy for as long as the cursor
+is held, and no checkpoint mode can reset a WAL past a live reader's mark. What
+*is* fixable is the last two rows: once the reader lets go, autocheckpoint
+backfills the pages but never truncates the file, so the space stays committed
+for the life of the process. Recovering it takes an explicit checkpoint that
+nothing currently issues.
+
+So the mitigation has two halves, and only one of them lives here.
+
+**Never hold a cursor across a response.** Materialize every read fully, then
+release. That is the half that prevents the growth, it belongs to the read
+layer, and `store.rs` enforces it on itself — see `docs/modules/store.md` for
+what that covers and what it does not.
+
+**Checkpoint every `CHECKPOINT_EVERY` commits.** That is the half that reclaims
+the file, and `with_tx` is where it goes: it is the one place a commit happens,
+so the policy rides the write path that already exists. No timer and no thread —
+quipu runs neither, and a checkpoint counted in commits needs neither.
+
+### Why 256
+
+Two constraints, one from each end.
+
+At the top: the number bounds how much space a released pin leaves stranded. At
+the measured worst case of roughly 33 KB of WAL per pinned commit, 256 commits
+cap that overshoot at about 8 MB per store — recovered on the next tick, not
+held for the life of the process.
+
+At the bottom: a short-lived `qp` run commits once or twice, so at 256 no CLI
+invocation ever reaches a checkpoint. The periodic policy costs the command line
+exactly one integer increment per commit and changes nothing about it; the
+short-lived path still ends with no `-wal` file because closing the last
+connection still checkpoints. Anything small enough for a CLI run to trip would
+be putting checkpoint I/O on the cold-start budget to solve a problem the CLI
+does not have.
+
+`wal_autocheckpoint` is deliberately left at SQLite's default 1000 pages, and
+`journal_mode` is untouched. The periodic checkpoint supplements autocheckpoint
+rather than replacing it: autocheckpoint holds the unpinned steady state at
+~4 MB, and the periodic one exists for the file-shrinking that autocheckpoint
+structurally never does.
+
+### Busy, and the five-second trap
+
+A checkpoint refused by a pinned reader must not fail the write that triggered
+it, and must not spin. Both are handled by doing nothing: `checkpoint_now`
+discards its `Result` — the commit already happened, and housekeeping cannot be
+allowed to retroactively fail a successful write — and `owes_checkpoint` zeroes
+its counter on the tick it fires whether or not the checkpoint then succeeds. A
+store with a permanently pinned reader therefore makes one refused attempt per
+256 commits, not one per commit forever.
+
+The non-obvious part is the timeout. `wal_checkpoint(TRUNCATE)` runs the busy
+handler, so under the store's ordinary 5 s `busy_timeout` a checkpoint blocked
+by a single pinned reader returns busy *after stalling the writer for the full
+five seconds* — measured at 5.00 s per attempt. That is far worse than the leak
+it was trying to fix. `checkpoint_now` suspends `busy_timeout` for the duration
+and restores it: the same refused checkpoint then returns in about 3 µs. Anyone
+deleting those two `pragma_update` lines as noise reintroduces a five-second
+stall that appears only under concurrency and only in the server.
+
+The counter is keyed by store path rather than kept as one global tally,
+because a server holds one connection per project. A single counter would
+checkpoint whichever store happened to commit on the 256th tick, letting a quiet
+project ride behind a busy one and never be checkpointed at all.
