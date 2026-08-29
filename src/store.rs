@@ -553,6 +553,9 @@ mod tests {
                 );
             }
         }
-        assert!(checked >= 10, "signature scan found only {checked} pub fns — did the scan break?");
+        assert!(
+            checked >= 10,
+            "signature scan found only {checked} pub fns — did the scan break?"
+        );
     }
 }

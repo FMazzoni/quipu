@@ -543,9 +543,8 @@ fn owes_checkpoint(conn: &Connection) -> bool {
 /// 5.00 s per attempt, against 3 µs when the timeout is suspended.
 fn checkpoint_now(conn: &Connection) {
     let _ = conn.pragma_update(None, "busy_timeout", 0);
-    let _: rusqlite::Result<i64> = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
-        r.get(0)
-    });
+    let _: rusqlite::Result<i64> =
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0));
     let _ = conn.pragma_update(None, "busy_timeout", BUSY_TIMEOUT_MS);
 }
 
@@ -1485,13 +1484,18 @@ mod tests {
     fn wal_bytes(db: &Path) -> u64 {
         let mut w = db.as_os_str().to_os_string();
         w.push("-wal");
-        std::fs::metadata(PathBuf::from(w)).map(|m| m.len()).unwrap_or(0)
+        std::fs::metadata(PathBuf::from(w))
+            .map(|m| m.len())
+            .unwrap_or(0)
     }
 
     fn commit_row(conn: &mut Connection, bytes: usize) {
         let body = "x".repeat(bytes);
         with_tx(conn, |tx| {
-            tx.execute("INSERT INTO event(kind, payload) VALUES ('wal_test', ?1)", [&body])?;
+            tx.execute(
+                "INSERT INTO event(kind, payload) VALUES ('wal_test', ?1)",
+                [&body],
+            )?;
             Ok(())
         })
         .expect("a housekeeping checkpoint must never fail the write it follows");
@@ -1548,9 +1552,17 @@ mod tests {
         let busy: i64 = w
             .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))
             .unwrap();
-        w.pragma_update(None, "busy_timeout", BUSY_TIMEOUT_MS).unwrap();
-        assert_eq!(busy, 1, "a pinned reader must report the checkpoint as busy");
-        assert_eq!(wal_bytes(&path), pinned, "a refused checkpoint must not touch the file");
+        w.pragma_update(None, "busy_timeout", BUSY_TIMEOUT_MS)
+            .unwrap();
+        assert_eq!(
+            busy, 1,
+            "a pinned reader must report the checkpoint as busy"
+        );
+        assert_eq!(
+            wal_bytes(&path),
+            pinned,
+            "a refused checkpoint must not touch the file"
+        );
 
         drop(rows);
         drop(stmt);
@@ -1634,7 +1646,11 @@ mod tests {
             commit_row(&mut w, ROW);
         }
         drop(w);
-        assert_eq!(wal_bytes(&path), 0, "the last connection to close checkpoints and unlinks the WAL");
+        assert_eq!(
+            wal_bytes(&path),
+            0,
+            "the last connection to close checkpoints and unlinks the WAL"
+        );
     }
 
     #[test]
