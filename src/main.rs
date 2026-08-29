@@ -3,6 +3,8 @@
 #![doc = include_str!("../docs/architecture.md")]
 //!
 #![doc = include_str!("../docs/wire-contract.md")]
+//!
+#![doc = include_str!("../docs/process-contract.md")]
 
 mod cmd;
 mod db;
