@@ -1770,6 +1770,7 @@ fn stalled_request_bodies_do_not_wedge_the_front_door() {
             s
         })
         .collect();
+    let stalls_opened = std::time::Instant::now();
     // Every worker has dequeued one by now; none of them can ever finish.
     std::thread::sleep(std::time::Duration::from_millis(500));
 
@@ -1803,8 +1804,29 @@ fn stalled_request_bodies_do_not_wedge_the_front_door() {
     // The stalls were held open for that whole window rather than dying on
     // their own: sending the promised body now still reaches the server, and
     // the answer is the refusal the deadline wrote rather than a created task.
+    // Wait for the server to SAY the deadline fired, then send the late body.
+    //
+    // Two earlier versions of this got it wrong in opposite directions, and
+    // both were reasoning about a clock they cannot see. The deadline is
+    // per-connection and starts when a WORKER begins reading, not when the
+    // client connected — and this target runs its tests concurrently, so a
+    // stall can sit unread while another test holds the workers. Timing the
+    // wait from the client sent a body that was not yet late, and the server
+    // correctly answered 200. Waiting to *read* a refusal instead hangs,
+    // because nothing is written until the body arrives: the abandoned socket
+    // thread is still blocked in its read.
+    //
+    // The server logs `read_timeout` when a worker gives up, so that line is
+    // the observable. Waiting for all four means any remaining stall is
+    // certainly late, whenever its five seconds happened to begin.
+    assert_eq!(
+        srv.wait_for_lines("\"event\":\"read_timeout\"", 4),
+        4,
+        "all four stalls must be given up on before a late body can be late"
+    );
+
     let mut late = stalled.pop().expect("a stalled connection");
-    late.set_read_timeout(Some(std::time::Duration::from_secs(20)))
+    late.set_read_timeout(Some(std::time::Duration::from_secs(30)))
         .expect("read timeout");
     late.write_all(&promised)
         .expect("the stall is still connected");
