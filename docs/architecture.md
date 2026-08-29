@@ -301,8 +301,21 @@ main.rs      clap subcommand enum → dispatch. Routing only.
              rendered as either JSON or a prose line
   effects.rs the reserved `_effects` key: tasks a transaction moved that the
              caller never named, resolved from rowids to display ids
+  route.rs   the served-verb table: which commands `qp serve` answers and
+             which the client sends over the wire, generated from one list
+  wire.rs    the HTTP projection of the error taxonomy, in both directions
+  client.rs  one blocking request, when `--server` is set
   cmd/*.rs   argument parsing and rendering
 ```
+
+`route.rs`, `wire.rs` and `client.rs` are the front door and are inert without
+it: with no `--server` set, nothing in them runs, and `qp serve` is an optional
+process that no CLI path depends on. The server is an HTTP front door for stores
+that already exist — not a source of truth and not a lock manager. Serialisation
+comes from `BEGIN IMMEDIATE` inside SQLite and always has, which is why a
+concurrent `qp` in a terminal remains correct against a store that is being
+served. `docs/wire-contract.md` and `docs/process-contract.md` settle the
+envelope and the process; both are included on this page.
 
 `outcome.rs` is why `--json` is not a second code path: a mutator builds one
 struct and `emit` chooses the representation, so the two output modes cannot

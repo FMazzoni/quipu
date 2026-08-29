@@ -2,19 +2,32 @@
 //!
 #![doc = include_str!("../../docs/modules/assign.md")]
 
-use crate::outcome::{emit, Outcome};
+use crate::outcome::Outcome;
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AssignArgs {
     pub task: String,
     #[arg(long = "to")]
     pub to: String,
     #[arg(long)]
+    #[serde(skip)]
     pub json: bool,
+}
+
+impl crate::route::Served for AssignArgs {
+    const VERB: &'static str = "assign";
+    type Out = Assigned;
+    fn wants_json(&self) -> bool {
+        self.json
+    }
+    fn exec(db_path: &std::path::Path, a: Self) -> Result<Self::Out> {
+        exec(db_path, a)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -30,7 +43,7 @@ impl Outcome for Assigned {
     }
 }
 
-pub fn run(db_path: &std::path::Path, a: AssignArgs) -> Result<()> {
+pub fn exec(db_path: &std::path::Path, a: AssignArgs) -> Result<Assigned> {
     let mut conn = db::open(db_path)?;
     let resolved = id::resolve_full(&conn, &a.task)?;
     let task_id = resolved.id;
@@ -73,12 +86,9 @@ pub fn run(db_path: &std::path::Path, a: AssignArgs) -> Result<()> {
         )?;
         Ok(())
     })?;
-    emit(
-        a.json,
-        &Assigned {
-            display_id: resolved.display_id,
-            agent_id: a.to,
-            state: "assigned".to_string(),
-        },
-    )
+    Ok(Assigned {
+        display_id: resolved.display_id,
+        agent_id: a.to,
+        state: "assigned".to_string(),
+    })
 }

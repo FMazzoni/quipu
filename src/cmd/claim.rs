@@ -2,13 +2,14 @@
 //!
 #![doc = include_str!("../../docs/modules/claim.md")]
 
-use crate::outcome::{emit, Outcome};
+use crate::outcome::Outcome;
 use crate::{db, id, lease};
 use anyhow::Result;
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClaimArgs {
     pub task: String,
     #[arg(long = "as")]
@@ -16,9 +17,22 @@ pub struct ClaimArgs {
     /// How long this hold may sit quiet before it reads as stale. A unit
     /// suffix is required: 30s, 45m, 8h, 2d. Defaults to 8h.
     #[arg(long = "for")]
+    #[serde(default)]
     pub ttl: Option<String>,
     #[arg(long)]
+    #[serde(skip)]
     pub json: bool,
+}
+
+impl crate::route::Served for ClaimArgs {
+    const VERB: &'static str = "claim";
+    type Out = Claimed;
+    fn wants_json(&self) -> bool {
+        self.json
+    }
+    fn exec(db_path: &std::path::Path, a: Self) -> Result<Self::Out> {
+        exec(db_path, a)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -41,7 +55,7 @@ impl Outcome for Claimed {
     }
 }
 
-pub fn run(db_path: &std::path::Path, a: ClaimArgs) -> Result<()> {
+pub fn exec(db_path: &std::path::Path, a: ClaimArgs) -> Result<Claimed> {
     // Parsed before anything else moves: a lease length the operator got wrong
     // must fail with nothing claimed, not leave a ticket held under a length
     // nobody meant.
@@ -112,13 +126,10 @@ pub fn run(db_path: &std::path::Path, a: ClaimArgs) -> Result<()> {
         Ok(())
     })?;
     let expires_at = lease::hold_of(&conn, task_id)?.and_then(|h| h.expires_at);
-    emit(
-        a.json,
-        &Claimed {
-            display_id: resolved.display_id,
-            agent_id: a.agent,
-            state: "running".to_string(),
-            expires_at,
-        },
-    )
+    Ok(Claimed {
+        display_id: resolved.display_id,
+        agent_id: a.agent,
+        state: "running".to_string(),
+        expires_at,
+    })
 }

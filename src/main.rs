@@ -6,6 +6,7 @@
 //!
 #![doc = include_str!("../docs/process-contract.md")]
 
+mod client;
 mod cmd;
 mod db;
 mod doctor;
@@ -17,9 +18,11 @@ mod outcome;
 mod project;
 mod registry;
 mod remote;
+mod route;
 mod s3;
 mod store;
 mod time;
+mod wire;
 
 use clap::{Parser, Subcommand};
 
@@ -40,6 +43,20 @@ use clap::{Parser, Subcommand};
 struct Cli {
     #[arg(long, global = true, env = "QP_DB")]
     db: Option<std::path::PathBuf>,
+    /// Front door to send served verbs through, instead of opening the store
+    /// on this disk. `http://` is accepted for loopback literals only.
+    #[arg(long, global = true, env = "QP_SERVER", value_name = "URL")]
+    server: Option<String>,
+    /// Project name. Repeatable, because `qp serve` opens a set of them and a
+    /// client selects one from that set; a client naming more than one is a
+    /// usage error rather than a silent pick.
+    #[arg(
+        long = "project",
+        global = true,
+        env = "QP_PROJECT",
+        value_name = "NAME"
+    )]
+    project: Vec<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -53,7 +70,7 @@ struct Cli {
 /// it runs before a store exists, but the decision it makes — start a project
 /// or join one — is large enough to own a module rather than sit inline here.
 #[derive(Subcommand)]
-enum Cmd {
+pub(crate) enum Cmd {
     /// Initialize a store in the current directory
     Init(cmd::init::InitArgs),
     /// Add a new task
@@ -120,6 +137,8 @@ enum Cmd {
     Show(cmd::show::ShowArgs),
     /// Read every project on the shared ledger (read-only; writes nothing local)
     Ledger(cmd::ledger::LedgerArgs),
+    /// Front the resolved stores with an HTTP listener, in the foreground
+    Serve(cmd::serve::ServeArgs),
 }
 
 /// Whether `--json` was passed for this invocation.
@@ -180,7 +199,9 @@ fn wants_json(cmd: &Cmd) -> bool {
         // `--json` flag, so there is no flag to read. Giving `wait` one would be
         // a contract change, not a bug fix — its signal is the exit code
         // (4 = empty cohort), not its output.
-        Cmd::Wait(_) | Cmd::InstallSkills(_) => false,
+        // `serve` writes JSON Lines to stderr for its whole life and has no
+        // success payload to print, so a `--json` flag would name nothing.
+        Cmd::Wait(_) | Cmd::InstallSkills(_) | Cmd::Serve(_) => false,
     }
 }
 
@@ -189,6 +210,11 @@ fn wants_json(cmd: &Cmd) -> bool {
 /// `init` is the only command allowed to create one. `install-skills` writes
 /// files on disk and never opens a store at all, so requiring one would break
 /// the bootstrap step that runs *before* a project exists.
+///
+/// `serve` is the fourth: it resolves a *set* of stores, and the missing-store
+/// answer it owes an operator names which project failed and why. The check
+/// still happens — `db::open` runs per resolved store before the listener binds
+/// — it just happens where the name is known.
 ///
 /// The registry readers are the third case and the least obvious: `qp project
 /// list`, `lookup` and `unregister` answer from the registry file alone and are
@@ -201,6 +227,7 @@ fn needs_store(cmd: &Cmd) -> bool {
         cmd,
         Cmd::Init(_)
             | Cmd::InstallSkills(_)
+            | Cmd::Serve(_)
             | Cmd::Project(cmd::project::ProjectArgs {
                 op: cmd::project::ProjectOp::List { .. }
                     | cmd::project::ProjectOp::Lookup { .. }
@@ -322,6 +349,28 @@ fn main() {
     }
 }
 
+/// Says that `--server` was set and this verb still read the local store.
+///
+/// Follows `warn_on_project_mismatch`'s shape, including the format switch:
+/// under `--json` stderr is JSON Lines, so a prose line here would make the
+/// error envelope on the next line unparseable.
+fn warn_unserved(json: bool) {
+    if json {
+        eprintln!(
+            "{}",
+            serde_json::json!({"warning": {
+                "kind": "verb_not_served",
+                "message": "--server is set but this verb is not served yet; it ran against the local store",
+            }})
+        );
+    } else {
+        eprintln!(
+            "warning: --server is set but this verb is not served yet; it ran \
+             against the local store"
+        );
+    }
+}
+
 /// Dispatch, split out from `main` so every arm can use `?`.
 ///
 /// Errors are returned rather than printed: `main` is the single place that
@@ -338,20 +387,44 @@ fn main() {
 /// `qp show` complained, as a not-found that read like a bad ticket id.
 fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
     let db_path = db::resolve_path(cli.db.clone())?;
-    if needs_store(&cli.cmd) {
+    // A client pointed at a front door has no store on this disk and must not
+    // be refused for lacking one. `route::is_served` is generated from the same
+    // list the dispatch arms below use, so the two cannot drift apart.
+    let remote = cli.server.is_some() && route::is_served(&cli.cmd);
+    if needs_store(&cli.cmd) && !remote {
         db::require_attached(&db_path, cli.db.is_some())?;
     }
     // `json` is threaded in so the warning matches the stream's format: under
     // --json stderr is JSON Lines, so a prose warning here would make the
     // error envelope on the following line unparseable. See QP-120.
-    db::warn_on_project_mismatch(&cli.db, json)?;
+    if !remote {
+        db::warn_on_project_mismatch(&cli.db, json)?;
+    }
+    // A verb the front door does not answer yet still runs, against the store on
+    // this disk — which is a *different store* from the one the operator just
+    // named. Silently reading the wrong file is the exact failure the attach
+    // check exists to prevent, so it is said out loud. The line disappears verb
+    // by verb as the fan-out slices land.
+    if cli.server.is_some() && !remote && needs_store(&cli.cmd) {
+        warn_unserved(json);
+    }
+    if cli.project.len() > 1 && !matches!(cli.cmd, Cmd::Serve(_)) {
+        return Err(db::invalid_input(
+            "--project may be given more than once only for `qp serve`",
+        ));
+    }
+    let ctx = route::Ctx {
+        db_path: db_path.clone(),
+        server: cli.server.clone(),
+        project: cli.project.first().cloned(),
+    };
     match cli.cmd {
         Cmd::Init(a) => cmd::init::run(&db_path, a),
-        Cmd::Add(a) => cmd::add::run(&db_path, a),
-        Cmd::Assign(a) => cmd::assign::run(&db_path, a),
-        Cmd::Claim(a) => cmd::claim::run(&db_path, a),
+        Cmd::Add(a) => route::dispatch::<cmd::add::AddArgs>(&ctx, a),
+        Cmd::Assign(a) => route::dispatch::<cmd::assign::AssignArgs>(&ctx, a),
+        Cmd::Claim(a) => route::dispatch::<cmd::claim::ClaimArgs>(&ctx, a),
         Cmd::Take(a) => cmd::take::run(&db_path, a),
-        Cmd::Complete(a) => cmd::complete::run(&db_path, a),
+        Cmd::Complete(a) => route::dispatch::<cmd::complete::CompleteArgs>(&ctx, a),
         Cmd::Block(a) => cmd::block::run(&db_path, a),
         Cmd::Cancel(a) => cmd::cancel::run(&db_path, a),
         Cmd::Abandon(a) => cmd::abandon::run(&db_path, a),
@@ -379,6 +452,7 @@ fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
         Cmd::Sync(a) => cmd::sync::run(&db_path, a),
         Cmd::Show(a) => cmd::show::run(&db_path, a),
         Cmd::Ledger(a) => cmd::ledger::run(&db_path, a),
+        Cmd::Serve(a) => cmd::serve::run(&db_path, a, &cli.project),
         #[allow(unreachable_patterns)]
         _ => {
             eprintln!("not implemented yet");

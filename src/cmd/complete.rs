@@ -3,23 +3,38 @@
 #![doc = include_str!("../../docs/modules/complete.md")]
 
 use crate::effects::{self, Effect};
-use crate::outcome::{emit, Outcome};
+use crate::outcome::Outcome;
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompleteArgs {
     pub task: String,
     #[arg(long = "as")]
     pub agent: String,
     #[arg(long, value_name = "TEXT")]
+    #[serde(default)]
     pub decision: Vec<String>,
     #[arg(long = "artifact", value_name = "PATH")]
+    #[serde(default)]
     pub artifact: Vec<String>,
     #[arg(long)]
+    #[serde(skip)]
     pub json: bool,
+}
+
+impl crate::route::Served for CompleteArgs {
+    const VERB: &'static str = "complete";
+    type Out = Completed;
+    fn wants_json(&self) -> bool {
+        self.json
+    }
+    fn exec(db_path: &std::path::Path, a: Self) -> Result<Self::Out> {
+        exec(db_path, a)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -39,7 +54,7 @@ impl Outcome for Completed {
     }
 }
 
-pub fn run(db_path: &std::path::Path, a: CompleteArgs) -> Result<()> {
+pub fn exec(db_path: &std::path::Path, a: CompleteArgs) -> Result<Completed> {
     let mut conn = db::open(db_path)?;
     let resolved = id::resolve_full(&conn, &a.task)?;
     let task_id = resolved.id;
@@ -129,14 +144,11 @@ pub fn run(db_path: &std::path::Path, a: CompleteArgs) -> Result<()> {
             &db::Movements::promoted(promoted),
         )
     })?;
-    emit(
-        a.json,
-        &Completed {
-            display_id: resolved.display_id,
-            state: "done".to_string(),
-            decisions: a.decision,
-            artifacts: a.artifact,
-            effects,
-        },
-    )
+    Ok(Completed {
+        display_id: resolved.display_id,
+        state: "done".to_string(),
+        decisions: a.decision,
+        artifacts: a.artifact,
+        effects,
+    })
 }
