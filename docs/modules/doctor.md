@@ -199,7 +199,7 @@ the same order, and the twenty-five tests on them run untouched.
 | `registry` | runs — the registry is a machine-local file, not a store's |
 | `project` | runs in a storeless form: `name` is a note, `name_form` is really checked, `registered` and `entry_path` are not applicable |
 | `ledger` | not applicable — the ledger url is a row in a store's `meta` |
-| `server` | runs, and is the whole point |
+| `server` | runs, and is the whole point — with the identity half of `serves` reduced to a name comparison, because there is no key here to compare |
 
 **Not-applicable is not a skip, and the difference is the whole of what makes
 this readable.** `Seq::skip` says an earlier check in this sequence did not
@@ -238,6 +238,15 @@ Two things, both of them in what the checks may assume:
   selects a front door's only store, so it passes when the process serves one
   and fails when it serves several — which is a real misconfiguration and
   precisely the one that otherwise shows up as an empty board.
+- **It has no project key either, and cannot ever have one.** The key is a
+  `meta` row, so `Wanted::Named` carries `key: None` here as a real state
+  rather than an omission, and the identity half of `serves` degrades to a
+  name comparison. That is reported as a plain **note with no remedy**, and the
+  distinction from the store-side `(None, Some(_))` branch is the point: a
+  store that was never stamped can be, and its advice says `qp init`; a
+  storeless client cannot, so advice there would be an unfollowable remedy on
+  every healthy run — which is how a check teaches people to ignore it. The
+  machine that holds the store is where the two identities can be compared.
 - **The unreachable remedy's tail differs.** The store-side version explains
   why `qp remote clear --front-door` is not the first thing to reach for; on a
   storeless client that command needs a store it does not have, so following it

@@ -60,3 +60,21 @@ source address or the OS user: a wave coordinator is one process acting on
 behalf of many agent ids, and connection-derived identity would need one
 connection per agent. It is also unauthenticated — anything that can reach the
 port can assert any agent — which is why the server binds loopback by default.
+
+## The other identity: which PROJECT, not which agent
+
+`--as` says who is asking. `project_key` says which project they think they are
+asking about, and the two are unrelated concepts that happen to share the word.
+
+It rides in the query string beside `project`, not in the body, because both are
+**addressing**: `project` says which store, `project_key` says which project that
+store had better be. Neither is an argument to the verb. A body field would also
+have to be added to every served args struct — all of which set
+`deny_unknown_fields` — for a value that is a property of the invocation rather
+than of the command.
+
+The client sends it only when it is naming its own project; `main::asserted_project_key`
+holds the rule and the reasoning. A client with no store on disk sends nothing,
+and the guard does not apply to it: a storeless worker has no recorded key to
+be wrong about, so `--project alpha` *defines* alpha as whatever that front door
+calls alpha.

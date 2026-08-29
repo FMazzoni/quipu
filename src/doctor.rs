@@ -249,8 +249,14 @@ pub struct Subject<'a> {
 
 /// Which project the `serves` check looks for, and why there may not be one.
 enum Wanted {
-    /// The name this client works on — a store's own, or one from the environment.
-    Named(String),
+    /// The name this client works on — a store's own, or one from the
+    /// environment — and the project identity behind it, when there is one.
+    ///
+    /// `key` is `None` in two different situations and the check tells them
+    /// apart: a store that has never been stamped, which `qp init` fixes, and a
+    /// storeless client, which cannot have one at all because the key is a
+    /// `meta` row and there is no `meta` here.
+    Named { name: String, key: Option<String> },
     /// There is a store and its name could not be read; `project_checks` says why.
     Unreadable,
     /// A storeless client that named no project. Not a fault on its own: an
@@ -356,21 +362,36 @@ pub fn run(subject: &Subject) -> Report {
     let wanted = match subject.remotes {
         Some(_) => {
             project_checks(db_path, &reg, &mut Seq::new("project", &mut checks));
-            // The name this store answers to, read without opening the store the way
-            // `db::open` does — a diagnostic must not migrate the thing it measures,
-            // and `project_checks` above has already reported an unreadable one.
-            match rusqlite::Connection::open(db_path)
-                .ok()
-                .and_then(|c| crate::project::read_name(&c).ok().flatten())
-            {
-                Some(n) => Wanted::Named(n),
+            // Name AND key, both read without opening the store the way
+            // `db::open` does — a diagnostic must not migrate the thing it
+            // measures, and `project_checks` above has already reported an
+            // unreadable one. Read independently rather than through
+            // `project::peek`, whose all-or-nothing is right for asserting an
+            // identity and wrong here: a store with a name and no key must
+            // still be told whether it is reaching the right NAME, and peek
+            // would report it as having neither.
+            let conn = rusqlite::Connection::open(db_path).ok();
+            let name = conn
+                .as_ref()
+                .and_then(|c| crate::project::read_name(c).ok().flatten());
+            let key = conn
+                .as_ref()
+                .and_then(|c| crate::project::read(c).ok().flatten());
+            match name {
+                Some(name) => Wanted::Named { name, key },
                 None => Wanted::Unreadable,
             }
         }
         None => {
             storeless_project_checks(subject.named_project, &mut Seq::new("project", &mut checks));
             match subject.named_project {
-                Some(n) => Wanted::Named(n.to_string()),
+                // No key, and never one: the key is a `meta` row and this
+                // machine has no store to hold it. A real state rather than an
+                // omission, and what `serves` says about it below.
+                Some(name) => Wanted::Named {
+                    name: name.to_string(),
+                    key: None,
+                },
                 None => Wanted::Unnamed,
             }
         }
@@ -1098,8 +1119,12 @@ fn server_checks(url: &str, wanted: &Wanted, storeless: bool, s: &mut Seq) {
     }
     s.pass("url", format!("front door at {url}"));
 
-    let (version, projects) = match crate::remote::probe_server(url) {
-        ServerReach::Alive { version, projects } => (version, projects),
+    let (version, projects, keys) = match crate::remote::probe_server(url) {
+        ServerReach::Alive {
+            version,
+            projects,
+            keys,
+        } => (version, projects, keys),
         ServerReach::Unreachable(detail) => {
             s.fail(
                 "reachable",
@@ -1140,8 +1165,8 @@ fn server_checks(url: &str, wanted: &Wanted, storeless: bool, s: &mut Seq) {
 
     version_check(version.as_deref(), s);
 
-    let name = match wanted {
-        Wanted::Named(n) => n.as_str(),
+    let (name, project_key) = match wanted {
+        Wanted::Named { name, key } => (name.as_str(), key.as_deref()),
         // Not a fault of the server's, and not silence either: the `project`
         // sequence has already failed on the unreadable name, and repeating it
         // here as a server fault would name the wrong thing to fix.
@@ -1187,7 +1212,70 @@ fn server_checks(url: &str, wanted: &Wanted, storeless: bool, s: &mut Seq) {
         }
     };
     if projects.iter().any(|p| p == name) {
-        s.pass("serves", format!("the front door serves `{name}`"));
+        // The name got us here; only the key says it is the same PROJECT. A
+        // project name is machine-local, so a second host serving its own
+        // `alpha` passes a name comparison and then hands out that project's
+        // work at exit 0. This is the only place a `qp remote doctor` can catch
+        // that, and it costs nothing: the key came back inside the payload the
+        // reachability probe had already read.
+        match (project_key, keys.get(name)) {
+            (Some(mine), Some(theirs)) if mine == theirs => s.pass(
+                "serves",
+                format!("the front door serves `{name}`, and it is this project"),
+            ),
+            (Some(mine), Some(theirs)) => s.fail(
+                "serves",
+                format!(
+                    "the front door serves a project NAMED `{name}` and it is not this \
+                     one: it serves project `{theirs}`, this store belongs to `{mine}`"
+                ),
+                format!(
+                    "a project name is machine-local, so two hosts can each serve an \
+                     `{name}` that are different projects — and work taken from the wrong \
+                     one comes back as an ordinary success, which is why this is a fault \
+                     and not a note. This url points at another machine's store. Point it \
+                     at the front door that fronts THIS project with \
+                     `qp remote set --front-door <url>`, or restart the front door on the \
+                     machine that holds this store."
+                ),
+            ),
+            (_, None) => s.advice(
+                "serves",
+                format!(
+                    "the front door serves `{name}` and reported no project identity for \
+                     it, so this check could compare names only"
+                ),
+                "a name is machine-local and two hosts can each serve one that are \
+                 different projects. Restart the front door on a build that publishes \
+                 `project_keys` in its health payload to have this compared properly.",
+            ),
+            // Two different reasons this client brought no key, and they want
+            // different words. A store that was never stamped can be, and the
+            // advice says how. A storeless client cannot: the key is a `meta`
+            // row and there is no `meta` here, so it is a plain note with no
+            // remedy — an unfollowable one on every healthy run is how a check
+            // teaches people to ignore it.
+            (None, Some(_)) if storeless => s.note(
+                "serves",
+                format!(
+                    "the front door serves `{name}`, and this client has no store and so no \
+                     project identity of its own to compare it against — the name is all \
+                     there is to go on here. That is what a storeless client is, not \
+                     something to fix; the machine that holds the store is where the two \
+                     identities can be compared."
+                ),
+            ),
+            (None, Some(_)) => s.advice(
+                "serves",
+                format!(
+                    "the front door serves `{name}` and this store has no readable \
+                     project_key, so this check could compare names only"
+                ),
+                "run `qp init` in this store to stamp its project identity; until then \
+                 nothing here can tell this project from another machine's project of \
+                 the same name.",
+            ),
+        }
     } else {
         s.fail(
             "serves",
@@ -1483,7 +1571,10 @@ mod tests {
         let mut checks = Vec::new();
         server_checks(
             "s3://host.invalid/bucket",
-            &Wanted::Named("example".to_string()),
+            &Wanted::Named {
+                name: "example".to_string(),
+                key: Some("key-example".to_string()),
+            },
             false,
             &mut Seq::new("server", &mut checks),
         );

@@ -469,6 +469,47 @@ fn resolve_server(
     remote::recorded_server(db_path)
 }
 
+/// The project identity this invocation asserts a front door must be serving.
+///
+/// A project NAME is machine-local by construction — a registry maps a name to
+/// a path per machine — so `--project alpha` on this machine and `alpha` on the
+/// machine behind the socket are two independent facts. Two hosts each serving
+/// their own `alpha` is the default case rather than an exotic one, and with no
+/// identity on the wire the second one answers, exit 0, with work from a project
+/// the caller has never seen. `project::KEY_PROJECT` is what survives that: it
+/// is the value a set of stores SHARE, so it means "the same project on another
+/// machine", which is exactly the question being asked. The store's
+/// `project_uuid` cannot do it — that is per-store, so the CORRECT case (one
+/// project, two machines, two stores) would fail every time.
+///
+/// INVARIANT: only ever asserted when the caller is naming its OWN project.
+/// The two cases where it is:
+///
+/// - `--project <n>` where this store answers to `<n>`. The two-host failure
+///   exactly: one name, two projects, and until now nothing compared.
+/// - no `--project` at all, with a store on this disk. A machine that holds a
+///   store and names a front door means its own project — that is what
+///   `qp remote set --front-door` records — and the front door either has one
+///   store or has already refused the request for want of a name.
+///
+/// And the case where it deliberately is NOT: `--project <n>` naming something
+/// this store is not. That caller has said out loud that it is addressing a
+/// project other than its own, so there is nothing to compare, and naming the
+/// project is the escape hatch the mismatch message points at.
+///
+/// A client with no store asserts nothing, and the guard does not apply to it.
+/// That is not an oversight and it cannot be fixed here: a storeless worker has
+/// no recorded key of its own, so `--project alpha` *defines* alpha as whatever
+/// that front door calls alpha. An identity such a caller could compare against
+/// would have to come from whatever dispatched it, not from this disk.
+fn asserted_project_key(db_path: &std::path::Path, named: Option<&str>) -> Option<String> {
+    let (name, key) = project::peek(db_path)?;
+    match named {
+        Some(n) if n != name => None,
+        _ => Some(key),
+    }
+}
+
 /// Dispatch, split out from `main` so every arm can use `?`.
 ///
 /// Errors are returned rather than printed: `main` is the single place that
@@ -530,10 +571,14 @@ fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
             "--project may be given more than once only for `qp serve`",
         ));
     }
+    let named = cli.project.first().map(String::as_str);
     let ctx = route::Ctx {
+        project_key: remote
+            .then(|| asserted_project_key(&db_path, named))
+            .flatten(),
         db_path: db_path.clone(),
         server,
-        project: cli.project.first().cloned(),
+        project: named.map(str::to_string),
     };
     match cli.cmd {
         Cmd::Init(a) => cmd::init::run(&db_path, a),

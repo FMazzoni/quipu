@@ -201,9 +201,18 @@ pub fn validate_server_url(url: &str) -> Result<()> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerReach {
     /// A quipu front door answered, and said what it is and what it serves.
+    ///
+    /// `keys` is the identity half of "what it serves": `projects` answers
+    /// whether a NAME is there, and only a key answers whether that name is the
+    /// caller's project. A front door that predates the field reports none,
+    /// which is why this is a map that may be missing an entry rather than a
+    /// `Vec` in lockstep with `projects` — a probe has to be able to say "it
+    /// serves the name and told me nothing about which project" instead of
+    /// guessing.
     Alive {
         version: Option<String>,
         projects: Vec<String>,
+        keys: std::collections::BTreeMap<String, String>,
     },
     /// Something answered on that url and it is not a quipu front door.
     NotQuipu(String),
@@ -257,6 +266,15 @@ pub fn probe_server(url: &str) -> ServerReach {
             .get("version")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
+        keys: body
+            .get("project_keys")
+            .and_then(serde_json::Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default(),
         projects: projects
             .iter()
             .filter_map(serde_json::Value::as_str)

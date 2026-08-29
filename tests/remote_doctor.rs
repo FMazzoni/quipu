@@ -451,7 +451,41 @@ fn a_version_difference_is_reported_without_failing_the_run() {
     assert_eq!(r.status("server", "version"), "note");
     assert!(r.detail("server", "version").contains("0.0.1-elsewhere"));
     assert!(r.remedy("server", "version").contains("not a fault"));
-    assert_eq!(r.status("server", "serves"), "pass");
+    // Not `pass`: this stub is standing in for a *different build*, and one that
+    // reports no `project_keys` cannot be told apart from a front door serving
+    // another machine's project of the same name. Saying so is the advice
+    // branch, and it is deliberately not a fault — see the test below.
+    assert_eq!(r.status("server", "serves"), "note");
+}
+
+/// A front door that publishes no identity is compared by name, and says so.
+///
+/// The honest answer for a build that predates `project_keys`: a name matched,
+/// and a name is machine-local, so this cannot be the verdict it looks like.
+/// It is a note rather than a fault because the older build is the *ordinary*
+/// case during an upgrade, and a check that fires on the ordinary case is one
+/// people learn to ignore — the same judgement `version_check` makes.
+#[test]
+fn a_front_door_that_publishes_no_project_key_is_compared_by_name_with_a_caveat() {
+    let stub = HealthStub::start(
+        "200 OK",
+        r#"{"version":"0.1.0","bind":"127.0.0.1:0","uptime_s":1,"projects":["alpha"]}"#,
+    );
+    let s = Store::named("alpha");
+    s.set_server(&stub.url);
+    let r = s.doctor();
+    assert_eq!(
+        r.code, 0,
+        "an unidentified front door is not a fault: {}",
+        r.text
+    );
+    assert_eq!(r.status("server", "serves"), "note");
+    let d = r.detail("server", "serves");
+    assert!(
+        d.contains("could compare names only"),
+        "the caveat is the whole content of this check: {d}"
+    );
+    assert!(r.remedy("server", "serves").contains("project_keys"));
 }
 
 /// A url of the ledger's kind in the server slot, and vice versa.
@@ -666,7 +700,23 @@ fn the_absence_of_a_local_store_is_never_reported_as_a_fault() {
     assert!(r
         .detail("config", "configured")
         .contains("no store on this disk"));
-    assert_eq!(r.status("server", "serves"), "pass");
+    // The name matched. The project KEY could not be compared, and never can
+    // be here: the key is a `meta` row and this client has no store to hold
+    // one. A note rather than advice, because advice carries a remedy and
+    // there is nothing this machine could do — one that fired on every healthy
+    // run is how a check teaches people to ignore it.
+    assert_eq!(r.status("server", "serves"), "note");
+    let d = r.detail("server", "serves");
+    assert!(d.contains("alpha"), "{d}");
+    assert!(
+        d.contains("not something to fix"),
+        "a storeless client having no key is what it IS, not a defect: {d}"
+    );
+    assert!(
+        r.find("server", "serves")["remedy"].is_null(),
+        "there is nothing to do about it, so there must be nothing to follow: {}",
+        r.text
+    );
     assert!(
         r.json["checks"]
             .as_array()
