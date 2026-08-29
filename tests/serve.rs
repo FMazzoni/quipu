@@ -2134,6 +2134,28 @@ fn a_cohort_drains_on_the_server_despite_a_decoy_local_store() {
     let tmp = tempfile::tempdir().unwrap();
     let served = store(&tmp.path().join("served"));
     let decoy = store(&tmp.path().join("decoy"));
+    // The decoy is a second store of the SAME project, which is what a second
+    // machine's copy is. Left as a different project it would be refused by the
+    // wire identity guard before the barrier ever ran — correctly, but that is
+    // a different property, and it would make this test pass for the wrong
+    // reason once the guard exists.
+    {
+        let key: String = rusqlite::Connection::open(&served)
+            .unwrap()
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'project_key'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("the served store has a project key");
+        rusqlite::Connection::open(&decoy)
+            .unwrap()
+            .execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'project_key'",
+                [&key],
+            )
+            .expect("re-home the decoy onto the served project");
+    }
     let srv = Server::start(&served);
 
     // Server: one open `wave:1` slice, about to be completed.
