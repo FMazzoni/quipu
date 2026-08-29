@@ -57,6 +57,7 @@ pub fn call(
         .send(serde_json::to_vec(&body)?)
         .map_err(|e| wire::unavailable(format!("{url}: {e}"), &url))?;
     let status = resp.status().as_u16();
+    let served_by = quipu_version(resp.headers());
     let text = resp
         .body_mut()
         .with_config()
@@ -67,6 +68,7 @@ pub fn call(
         // is `unavailable` (exit 7) and never a conflict.
         .map_err(|e| wire::unavailable(format!("{url}: truncated response: {e}"), &url))?;
     if (200..300).contains(&status) {
+        served_by.ok_or_else(|| not_a_front_door(&url, status))?;
         return Ok(serde_json::from_str(&text)?);
     }
     Err(wire::error_from(status, &text, &url))
@@ -105,6 +107,53 @@ pub fn health(base: &str) -> Result<Value> {
     // reached and the caller must not read this as "nothing is listening".
     serde_json::from_str(&text)
         .map_err(|e| anyhow::anyhow!("{url} answered {status} with a body that is not JSON: {e}"))
+}
+
+/// The `X-Quipu-Version` a response carried, if it carried one.
+fn quipu_version(h: &ureq::http::HeaderMap) -> Option<String> {
+    h.get(wire::VERSION_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+    // A header with a value this client cannot read is still a header a
+    // quipu front door wrote, but treating it as absent is the safe way
+    // round: the check exists to refuse strangers, not to parse versions.
+}
+
+/// A 2xx from something that is not a quipu front door. Exit 1.
+///
+/// **`health` deliberately does not use this, and the reason is the diagnosis.**
+/// A front door old enough to predate [`wire::VERSION_HEADER`] would be reported
+/// by `qp remote doctor` as "not a quipu front door" instead of as the version
+/// skew it is — and telling those two apart is the whole job of the command. The
+/// probe therefore returns the body it got and lets the doctor judge it, which
+/// it already does far more thoroughly than a header check could. The silent
+/// failure this exists for is on the verb path, where nothing judged anything.
+///
+/// **The failure it closes.** Every 2xx whose body was valid JSON used to be
+/// accepted, of any shape. Against a service answering `200 {}` on every path —
+/// a misrouted reverse proxy, a health-check stub, the wrong port — `list`
+/// printed an empty table, `status` printed all zeros, and `show` rendered a
+/// fabricated blank ticket, all at exit 0. `qp remote doctor` never had the bug,
+/// because it checks the `/healthz` body is a quipu health payload; the ordinary
+/// client path did not check anything.
+///
+/// `invalid_input` (exit 1) and deliberately not `unavailable` (exit 7).
+/// Something answered — the front door named in the configuration was reached at
+/// the TCP level — so a caller must not read this as "nothing is listening" and
+/// go start a process on a port that is already held. What is wrong is the url,
+/// which is configuration, and no retry fixes it.
+///
+/// It is checked on 2xx only. A non-2xx from a foreign service is already loud:
+/// `wire::error_from` refuses a body that is not the error envelope. The silent
+/// case is exactly the successful-looking one.
+fn not_a_front_door(url: &str, status: u16) -> anyhow::Error {
+    crate::db::invalid_input(format!(
+        "`{url}` answered {status} but is not a quipu front door: no \
+         `{h}` header. Check that `--server`/`QP_SERVER`, or this store's \
+         recorded url, names a `qp serve` process — a service that answers \
+         anything else would be rendered as an empty board.",
+        h = wire::VERSION_HEADER
+    ))
 }
 
 /// Validates the endpoint and strips its trailing slash.

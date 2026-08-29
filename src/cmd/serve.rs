@@ -432,14 +432,31 @@ fn answer(
     query: &str,
     buf: &str,
 ) -> Result<serde_json::Value> {
+    // `invalid_input` (400, exit 1) and deliberately not `not_found` (404, exit
+    // 2). Run the wire contract's own decision procedure: could a different
+    // request *body* have worked? No — the path is wrong, and the body was
+    // never read. Is the thing addressed absent? That question is about a store
+    // entity, and this is a URL. So it is neither retryable nor a statement
+    // about the store, and 400 is the only row left.
+    //
+    // The cost of getting it wrong was concrete: exit 2 is, by the README's own
+    // table, "wrong state / lost race — retry may succeed", and the wire
+    // contract encourages retrying on it. A skill following the documentation
+    // therefore looped forever against a base url that could never work.
     let Some(verb) = path.strip_prefix(wire::API_PREFIX) else {
-        return Err(db::not_found(format!("no endpoint at `{path}`"), None));
+        return Err(db::invalid_input(format!(
+            "no endpoint at `{path}`; a quipu front door answers `{p}<verb>`. \
+             If the url names a subpath, whatever is in front of this process \
+             has to strip it before forwarding.",
+            p = wire::API_PREFIX
+        )));
     };
     let Some(handler) = route::lookup(verb) else {
-        return Err(db::not_found(
-            format!("`{verb}` is not a verb this front door serves"),
-            None,
-        ));
+        return Err(db::invalid_input(format!(
+            "`{verb}` is not a verb this front door serves; this server is \
+             quipu {v}",
+            v = env!("CARGO_PKG_VERSION")
+        )));
     };
     if method != "POST" {
         return Err(db::invalid_input(format!(
@@ -537,12 +554,22 @@ fn write_response(
     status: u16,
     bytes: Vec<u8>,
 ) -> std::result::Result<(), std::io::Error> {
-    let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+    let ct = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
         .expect("static header");
+    // Names the process that wrote this, on every response including the
+    // failures. It is what lets a client tell "quipu answered" from "something
+    // answered": a service that returns `200 {}` on every path used to be
+    // accepted, and every read then rendered as an empty board at exit 0.
+    let version = tiny_http::Header::from_bytes(
+        wire::VERSION_HEADER.as_bytes(),
+        env!("CARGO_PKG_VERSION").as_bytes(),
+    )
+    .expect("static header");
     rq.respond(
         tiny_http::Response::from_data(bytes)
             .with_status_code(status)
-            .with_header(header),
+            .with_header(ct)
+            .with_header(version),
     )
 }
 

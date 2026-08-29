@@ -39,8 +39,44 @@ impl crate::route::Served for StatusArgs {
 /// The state → count object, with every state present even at zero.
 #[derive(Serialize, Deserialize)]
 #[serde(transparent)]
-#[cfg_attr(test, derive(Default))]
-pub(crate) struct StatusView(Value);
+pub(crate) struct StatusView(#[serde(deserialize_with = "body_is_the_view")] Value);
+
+/// Refuses a response body that is not the object this view renders.
+///
+/// See `wire::expect_object`. The named keys are the ones `human()` reads, so
+/// their absence is exactly the case that used to render as a blank view at
+/// exit 0.
+fn body_is_the_view<'de, D>(d: D) -> std::result::Result<Value, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    crate::wire::expect_object(
+        Value::deserialize(d)?,
+        &[
+            "pending",
+            "ready",
+            "assigned",
+            "running",
+            "done",
+            "cancelled",
+        ],
+    )
+    .map_err(D::Error::custom)
+}
+
+/// A minimal valid sample; see `list.rs` for why this is not derived.
+#[cfg(test)]
+impl Default for StatusView {
+    fn default() -> Self {
+        StatusView(Value::Object(
+            STATES
+                .iter()
+                .map(|s| ((*s).to_string(), Value::from(0)))
+                .collect(),
+        ))
+    }
+}
 
 impl Outcome for StatusView {
     fn human(&self) -> String {

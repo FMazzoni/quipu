@@ -61,6 +61,40 @@ behalf of many agent ids, and connection-derived identity would need one
 connection per agent. It is also unauthenticated — anything that can reach the
 port can assert any agent — which is why the server binds loopback by default.
 
+<<<<<<< HEAD
+## A 2xx is not by itself an answer
+
+Every 2xx whose body was valid JSON used to be accepted, of any shape, and the
+read views render a mismatch as *empty*. So a service answering `200 {}` on
+every path produced an empty table from `list`, all zeros from `status`, and a
+fabricated blank ticket from `show` — all at exit 0. `qp remote doctor` never
+had the bug, because it checks the `/healthz` body is a quipu health payload;
+this path checked nothing.
+
+`call` now requires `wire::VERSION_HEADER` on a 2xx. The
+refusal is `invalid_input` (exit 1) and not `unavailable` (exit 7): something
+answered, so the front door was reached, and a caller that read this as "nothing
+is listening" would send an operator to start a process on a port already held.
+It is checked on 2xx only — a non-2xx from a foreign service is already loud,
+because `wire::error_from` refuses a body that is not the error envelope.
+
+`health` deliberately does not check it. A front door old enough to predate the
+header would then be reported by `qp remote doctor` as "not a quipu front door"
+rather than as the version skew it is, and telling those two apart is the whole
+job of that command. The probe returns the body and the doctor judges it, which
+it already does more thoroughly than a header check could.
+
+## The path in a `--server` url is kept, and a subpath is supported
+
+`check_url` preserves the path and `call` appends `/v1/<verb>`, so
+`--server https://ops.example.com/qp` issues `POST /qp/v1/list`. That is the
+ordinary reverse-proxy deployment and it is supported; what it requires is that
+the proxy strips its own mount point before forwarding, because `qp serve`
+routes on `/v1/<verb>` and has no notion of a base path. A prefix that reaches
+the process unstripped is refused as `invalid_input` (exit 1) with the remedy
+named — never as `not_found`, which is exit 2 and which the documentation tells
+a skill to retry.
+=======
 ## The other identity: which PROJECT, not which agent
 
 `--as` says who is asking. `project_key` says which project they think they are
@@ -78,3 +112,4 @@ holds the rule and the reasoning. A client with no store on disk sends nothing,
 and the guard does not apply to it: a storeless worker has no recorded key to
 be wrong about, so `--project alpha` *defines* alpha as whatever that front door
 calls alpha.
+>>>>>>> origin/main

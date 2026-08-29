@@ -38,8 +38,37 @@ const STATES: &[&str] = &["ready", "assigned", "running", "pending"];
 /// most-polled orchestrator view the most expensive one.
 #[derive(Serialize, Deserialize)]
 #[serde(transparent)]
-#[cfg_attr(test, derive(Default))]
-pub(crate) struct WaveView(Value);
+pub(crate) struct WaveView(#[serde(deserialize_with = "body_is_the_view")] Value);
+
+/// Refuses a response body that is not the object this view renders.
+///
+/// See `wire::expect_object`. The named keys are the ones `human()` reads, so
+/// their absence is exactly the case that used to render as a blank view at
+/// exit 0.
+fn body_is_the_view<'de, D>(d: D) -> std::result::Result<Value, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    crate::wire::expect_object(
+        Value::deserialize(d)?,
+        &["ready", "assigned", "running", "pending"],
+    )
+    .map_err(D::Error::custom)
+}
+
+/// A minimal valid sample; see `list.rs` for why this is not derived.
+#[cfg(test)]
+impl Default for WaveView {
+    fn default() -> Self {
+        WaveView(Value::Object(
+            STATES
+                .iter()
+                .map(|s| ((*s).to_string(), Value::Array(vec![])))
+                .collect(),
+        ))
+    }
+}
 
 impl Outcome for WaveView {
     fn human(&self) -> String {

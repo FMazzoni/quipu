@@ -2,11 +2,11 @@
 //!
 #![doc = include_str!("../../docs/modules/watch.md")]
 
-use crate::db;
-use crate::store::{self, EventFilter};
+use crate::cmd::timeline::TimelineArgs;
+use crate::poll::Interval;
+use crate::route::{self, Ctx};
 use anyhow::Result;
 use clap::Args;
-use std::time::Duration;
 
 #[derive(Args, Debug)]
 pub struct WatchArgs {
@@ -16,6 +16,10 @@ pub struct WatchArgs {
     /// Poll interval in milliseconds.
     #[arg(long, default_value_t = 500)]
     pub interval_ms: u64,
+    /// Ceiling the interval backs off to while the log is quiet. Defaults to
+    /// ten times `--interval-ms`; set it equal to `--interval-ms` to disable.
+    #[arg(long)]
+    pub max_interval_ms: Option<u64>,
     /// Emit JSON lines (default true since watch is for agents).
     #[arg(long, default_value_t = true)]
     pub json: bool,
@@ -30,47 +34,55 @@ pub struct WatchArgs {
     pub kinds: Vec<String>,
 }
 
-pub fn run(db_path: &std::path::Path, a: WatchArgs) -> Result<()> {
-    let conn = db::open(db_path)?;
-    let task_id = a
-        .task
-        .as_deref()
-        .map(|s| crate::id::resolve(&conn, s))
-        .transpose()?;
-
+pub fn run(ctx: &Ctx, a: WatchArgs) -> Result<()> {
     let mut last_seen = a.since;
     let mut ticks: u64 = 0;
+    let mut interval = Interval::new(a.interval_ms, a.max_interval_ms);
     loop {
-        let filter = EventFilter {
-            since_id: Some(last_seen),
-            task_id,
-            kinds: &a.kinds,
-            auto_only: false,
-        };
-        let rows = store::events(&conn, &filter)?;
-        for e in rows {
-            let v = serde_json::json!({
-                "id": e.id, "task": e.task, "ts": e.ts, "kind": e.kind,
-                "agent_id": e.agent, "payload": e.payload,
-            });
+        // One `timeline` per tick, narrowed by `since` on the store side, so a
+        // caught-up poller transfers an empty array rather than the log.
+        // Materialised, never streamed: the rows are a `Vec` before the response
+        // exists, so no read cursor can outlive it and pin a WAL checkpoint.
+        let view = route::fetch::<TimelineArgs>(
+            ctx,
+            TimelineArgs {
+                task: a.task.clone(),
+                json: false,
+                kinds: a.kinds.clone(),
+                since: last_seen,
+            },
+        )?;
+        let events = view
+            .events()
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        for e in events {
             if a.json {
-                println!("{}", serde_json::to_string(&v)?);
+                println!("{}", serde_json::to_string(e)?);
             } else {
                 println!(
                     "{}\t{}\t{}\t{}\t{}",
-                    e.ts,
-                    e.task.unwrap_or_else(|| "-".into()),
-                    e.kind,
-                    e.agent.unwrap_or_else(|| "-".into()),
-                    e.payload
+                    e["ts"].as_str().unwrap_or(""),
+                    e["task"].as_str().unwrap_or("-"),
+                    e["kind"].as_str().unwrap_or(""),
+                    e["agent_id"].as_str().unwrap_or("-"),
+                    e["payload"]
                 );
             }
-            last_seen = e.id;
+            if let Some(id) = e["id"].as_i64() {
+                last_seen = last_seen.max(id);
+            }
         }
         ticks += 1;
         if a.max_ticks > 0 && ticks >= a.max_ticks {
             return Ok(());
         }
-        std::thread::sleep(Duration::from_millis(a.interval_ms));
+        if events.is_empty() {
+            interval.saw_nothing();
+        } else {
+            interval.saw_change();
+        }
+        interval.wait();
     }
 }

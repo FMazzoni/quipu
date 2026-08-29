@@ -15,6 +15,7 @@ mod id;
 mod lease;
 mod merge;
 mod outcome;
+mod poll;
 mod project;
 mod registry;
 mod remote;
@@ -449,7 +450,7 @@ fn resolve_server(
     if explicit.is_some() {
         return Ok(explicit);
     }
-    if !route::is_served(cmd) {
+    if !route::is_served(cmd) && !route::is_client_poll(cmd) {
         return Ok(None);
     }
     remote::recorded_server(db_path)
@@ -516,7 +517,8 @@ fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
     // A client pointed at a front door has no store on this disk and must not
     // be refused for lacking one. `route::is_served` is generated from the same
     // list the dispatch arms below use, so the two cannot drift apart.
-    let remote = server.is_some() && route::is_served(&cli.cmd);
+    let remote =
+        server.is_some() && (route::is_served(&cli.cmd) || route::is_client_poll(&cli.cmd));
     if needs_store(&cli.cmd) && !remote {
         db::require_attached(&db_path, cli.db.is_some())?;
     }
@@ -581,8 +583,8 @@ fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
         Cmd::Status(a) => route::dispatch::<cmd::status::StatusArgs>(&ctx, a),
         Cmd::List(a) => route::dispatch::<cmd::list::ListArgs>(&ctx, a),
         Cmd::Wave(a) => route::dispatch::<cmd::wave::WaveArgs>(&ctx, a),
-        Cmd::Wait(a) => cmd::wait::run(&db_path, a),
-        Cmd::Watch(a) => cmd::watch::run(&db_path, a),
+        Cmd::Wait(a) => cmd::wait::run(&ctx, a),
+        Cmd::Watch(a) => cmd::watch::run(&ctx, a),
         Cmd::InstallSkills(a) => cmd::install_skills::run(a),
         Cmd::Depends(a) => route::dispatch::<cmd::depends::DependsArgs>(&ctx, a),
         Cmd::Contains(a) => route::dispatch::<cmd::contains::ContainsArgs>(&ctx, a),
