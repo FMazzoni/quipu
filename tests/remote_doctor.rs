@@ -362,7 +362,17 @@ fn a_server_that_is_not_listening_is_the_unreachable_fault() {
     );
     assert!(
         fix.contains("qp remote clear --front-door"),
-        "and how to get back to the local store: {fix}"
+        "and it must still name the way back to local-only: {fix}"
+    );
+    // Naming it is not recommending it. Since the recorded url became the
+    // default front door, clearing it re-points every future command at a file
+    // other machines have been writing to, and answering from that quietly is
+    // the failure a loud `unavailable` exists to prevent. The remedy must say
+    // so, or an operator follows it out of a transport error into a stale read
+    // that looks like success.
+    assert!(
+        fix.contains("stale read"),
+        "the remedy must not recommend clearing as the workaround: {fix}"
     );
     // Nothing after it may claim to know anything.
     for later in ["version", "serves"] {
