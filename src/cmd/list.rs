@@ -61,7 +61,6 @@ pub(crate) struct ListView {
     with_description: bool,
 }
 
-
 /// Refuses a response body that is not the array this view renders.
 ///
 /// The whole argument is on `wire::expect_array`; the short version is that a
@@ -89,6 +88,13 @@ impl Default for ListView {
             rows: Value::Array(vec![]),
             with_description: false,
         }
+    }
+}
+
+impl ListView {
+    /// The rows, for `wait`, which counts them rather than rendering them.
+    pub(crate) fn rows(&self) -> &Value {
+        &self.rows
     }
 }
 

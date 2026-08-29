@@ -47,7 +47,6 @@ impl crate::route::Served for TimelineArgs {
 #[serde(transparent)]
 pub(crate) struct TimelineView(#[serde(deserialize_with = "body_is_an_array")] Value);
 
-
 /// Refuses a response body that is not the array this view renders.
 ///
 /// The whole argument is on `wire::expect_array`; the short version is that a
@@ -68,6 +67,13 @@ where
 impl Default for TimelineView {
     fn default() -> Self {
         TimelineView(Value::Array(vec![]))
+    }
+}
+
+impl TimelineView {
+    /// The events, for `watch`, which prints them one JSON line at a time.
+    pub(crate) fn events(&self) -> &Value {
+        &self.0
     }
 }
 

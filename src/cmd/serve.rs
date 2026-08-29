@@ -378,8 +378,9 @@ fn answer(
     let Some(handler) = route::lookup(verb) else {
         return Err(db::invalid_input(format!(
             "`{verb}` is not a verb this front door serves; this server is \
-             quipu {v}"
-        , v = env!("CARGO_PKG_VERSION"))));
+             quipu {v}",
+            v = env!("CARGO_PKG_VERSION")
+        )));
     };
     if method != "POST" {
         return Err(db::invalid_input(format!(

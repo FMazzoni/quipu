@@ -419,9 +419,9 @@ a read endpoint changes latency, not semantics.
 Neither should become a streaming endpoint under this contract. Server-sent
 events or long-polling wants an async runtime, and CLAUDE.md forbids one.
 
-**Implemented as: a third bucket in the routing table, and a refusal before the
-poll existed.** This section describes the destination correctly and understates
-what the interval between here and there cost. `wait` and `watch` are neither
+**Implemented as: a third bucket in the routing table, and it was needed before
+the polls were.** This section describes the destination correctly and
+understates what the interval between here and there cost. `wait` and `watch` are neither
 served nor local-only, so `route::is_served` — which gates the attach check, the
 recorded-url tier of `resolve_server`, and `warn_unserved` — answered `false`
 for them, and every one of those gates then treated an invocation pointed at a
@@ -430,6 +430,19 @@ answer: `qp wait --tag wave:1 --empty` against a front door holding six open
 tickets exited 0 in seven milliseconds, having polled the store on the client's
 own disk. `route::is_client_poll` is the third bucket, and it is the thing this
 section's two bullet points needed and did not name.
+
+Both verbs are now polls over `list` and `timeline` exactly as described, with
+`route::fetch` on the same code path local and served, so the two cannot
+disagree about what a drained cohort or a caught-up tail is. Two things this
+section left open and the build settled. `wait`'s `--tag` becomes a glob,
+because `list`'s filter is `GLOB` where the old `COUNT` was `=`; for every tag
+quipu writes the two agree, and one filter with one meaning is worth the
+widening. And a transport failure inside either loop exits 7 immediately rather
+than being retried — a barrier that absorbed `unavailable` would report exit 3,
+"the deadline passed", about a front door it never reached. The count-only
+endpoint this section's read-side sibling deliberately did not build was
+measured and still not built: a six-ticket cohort's `list` body is 1441 bytes
+and the server spends at most 1 ms on it.
 
 ## 4. Collateral state changes
 

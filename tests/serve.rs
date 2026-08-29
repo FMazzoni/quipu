@@ -1586,6 +1586,7 @@ fn stalled_request_bodies_do_not_wedge_the_front_door() {
         })
         .collect();
     // Every worker has dequeued one by now; none of them can ever finish.
+    let opened = std::time::Instant::now();
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     let began = std::time::Instant::now();
@@ -1614,6 +1615,18 @@ fn stalled_request_bodies_do_not_wedge_the_front_door() {
     // The stalls were held open for that whole window rather than dying on
     // their own: sending the promised body now still reaches the server, and
     // the answer is the refusal the deadline wrote rather than a created task.
+    //
+    // Wait the deadline out explicitly rather than inferring it from how long
+    // the probe took. The probe is slow *because* every worker is inside a
+    // deadline, so on a loaded machine — several of these tests run at once —
+    // it can be answered by a worker that had not yet dequeued a stall, and
+    // then the late body arrives well inside the five seconds and is quite
+    // correctly run. That is a wrong assumption in this test, not a server
+    // fault, and it produced a failure that looked like one.
+    let deadline = std::time::Duration::from_millis(5_500);
+    if let Some(left) = deadline.checked_sub(opened.elapsed()) {
+        std::thread::sleep(left);
+    }
     let mut late = stalled.pop().expect("a stalled connection");
     late.set_read_timeout(Some(std::time::Duration::from_secs(20)))
         .expect("read timeout");
@@ -1901,75 +1914,279 @@ fn a_plaintext_url_off_loopback_is_refused_and_names_the_remedy() {
 // the client-side polls
 // ---------------------------------------------------------------------------
 
-/// `wait` and `watch` refuse a resolved front door rather than answer locally.
+/// A cohort that drains on the server is seen to drain by a client with a decoy.
 ///
-/// The live silent-wrong-answer this closes: with a front door in play these
-/// two polled the store on *this* disk, where a cohort the operator never filed
-/// is trivially empty, and `wait --empty` returned 0 in milliseconds against a
-/// server holding six open tickets. The only signal was prose on stderr, which
-/// orchestration scripts routinely discard.
+/// **The decoy is the whole test.** The client's own store holds the opposite
+/// state — a `wave:1` ticket that is still open — so a `wait` that answered from
+/// the local file would block until its timeout and exit 3, and a `wait` that
+/// answered from the server exits 0. Without it the test passes against a
+/// binary that never talks to the server at all, which is the exact bug this
+/// slice exists to close: `qp wait --tag wave:1 --empty` used to return 0 in
+/// seven milliseconds against a front door holding six open tickets, because it
+/// polled a store where nobody had filed the cohort.
 ///
-/// **Stdout is the assertion that matters.** An orchestrator branches on the
-/// exit code and reads stdout; `wait` writes nothing on stdout in either the
-/// true or the false case, and `watch` writes a stream of events that looks
-/// exactly like a real tail. So each case here asserts stdout is empty as well
-/// as that the exit code is 1.
-///
-/// The decoy is the whole test. Both stores hold state, and the *local* one is
-/// arranged so that answering from it would look like success.
+/// The barrier is released by a *concurrent* completion rather than by state
+/// that was already terminal, so the poll is doing its job rather than reading
+/// a settled answer once.
 #[test]
-fn a_resolved_front_door_makes_wait_and_watch_refuse() {
+fn a_cohort_drains_on_the_server_despite_a_decoy_local_store() {
     let tmp = tempfile::tempdir().unwrap();
     let served = store(&tmp.path().join("served"));
     let decoy = store(&tmp.path().join("decoy"));
     let srv = Server::start(&served);
 
-    // The front door holds an open cohort; the decoy holds none of it, so a
-    // local answer is "drained" and a local tail is empty.
+    // Server: one open `wave:1` slice, about to be completed.
     assert_eq!(remote(&srv, &["add", "slice one"]).code, 0);
-    assert_eq!(remote(&srv, &["tag", "QP-1", "--json", "add", "wave:1"]).code, 0);
-    local(&decoy, &["add", "something else entirely"]);
+    assert_eq!(
+        remote(&srv, &["tag", "QP-1", "--json", "add", "wave:1"]).code,
+        0
+    );
+    assert_eq!(remote(&srv, &["assign", "QP-1", "--to", "w-a"]).code, 0);
+    assert_eq!(remote(&srv, &["claim", "QP-1", "--as", "w-a"]).code, 0);
 
-    for (args, what) in [
-        (
-            ["wait", "--tag", "wave:1", "--empty", "--timeout-secs", "5"].as_slice(),
+    // Decoy: a `wave:1` ticket that never drains. If the client reads this
+    // file, every assertion below fails.
+    local(&decoy, &["add", "a decoy the barrier must never see"]);
+    local(&decoy, &["tag", "QP-1", "--json", "add", "wave:1"]);
+
+    let mut waiter = std::process::Command::new(qp_bin())
+        .env("QP_SERVER", &srv.url)
+        .env("QP_DB", &decoy)
+        .args([
             "wait",
+            "--tag",
+            "wave:1",
+            "--cohort-done",
+            "--interval-ms",
+            "100",
+            "--timeout-secs",
+            "20",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn qp wait");
+
+    // The child must be *alive* before anything is concluded from it. A `wait`
+    // that died on argv exits immediately, and a test that only observes it
+    // from outside would read that as a barrier holding.
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    assert!(
+        waiter.try_wait().expect("try_wait").is_none(),
+        "the barrier released before the cohort drained, or the child died on argv"
+    );
+
+    // Now drain it, on the server.
+    assert_eq!(
+        remote(&srv, &["complete", "QP-1", "--as", "w-a"]).code,
+        0,
+        "completing on the server"
+    );
+
+    let out = waiter.wait_with_output().expect("wait for the barrier");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the barrier must release from the *server*'s state: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "",
+        "wait writes nothing on stdout, served or not"
+    );
+
+    // And the decoy really would have said otherwise.
+    let still_open = unflagged(&decoy, &["list", "--tag", "wave:1"]);
+    assert_eq!(still_open.payload()[0]["state"], "ready");
+}
+
+/// A caught-up `watch` gets nothing, and polls rather than spins.
+///
+/// Two properties in one run, because the second is only interesting given the
+/// first. The tail is caught up, so every poll's body is the two bytes `[]` —
+/// `--since` is an exclusive lower bound and it is a SQL clause on the server.
+/// And the number of requests the server logs is the number of ticks, not a
+/// number bounded only by how fast the client can loop.
+#[test]
+fn a_caught_up_watch_gets_nothing_and_does_not_spin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = store(tmp.path());
+    let srv = Server::start_with(&db, &["--access-log"]);
+    assert_eq!(remote(&srv, &["add", "one event source"]).code, 0);
+
+    // Catch up first, so the ticks under test are the empty ones.
+    let caught_up = std::process::Command::new(qp_bin())
+        .env("QP_SERVER", &srv.url)
+        .env("QP_DB", "/nonexistent/quipu/db.sqlite")
+        .args(["watch", "--max-ticks", "1", "--interval-ms", "1"])
+        .output()
+        .expect("run watch");
+    assert!(caught_up.status.success());
+    let last: i64 = String::from_utf8_lossy(&caught_up.stdout)
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| v["id"].as_i64())
+        .max()
+        .expect("the tail must have printed something to be caught up from");
+
+    let before = requests_to(&srv, "/v1/timeline");
+    let began = std::time::Instant::now();
+    let ticks = 5;
+    let out = std::process::Command::new(qp_bin())
+        .env("QP_SERVER", &srv.url)
+        .env("QP_DB", "/nonexistent/quipu/db.sqlite")
+        .args([
+            "watch",
+            "--since",
+            &last.to_string(),
+            "--max-ticks",
+            &ticks.to_string(),
+            "--interval-ms",
+            "150",
+            "--max-interval-ms",
+            "150",
+        ])
+        .output()
+        .expect("run watch");
+    let elapsed = began.elapsed();
+    assert!(out.status.success(), "{:?}", out);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "",
+        "a caught-up tail prints nothing"
+    );
+    // `ticks - 1` sleeps: the loop checks the tick count before sleeping.
+    assert!(
+        elapsed >= std::time::Duration::from_millis(150 * (ticks - 1)),
+        "{ticks} ticks finished in {elapsed:?}; the poll is spinning"
+    );
+    let polls = srv.wait_for_lines("/v1/timeline", before + ticks as usize) - before;
+    assert_eq!(
+        polls, ticks as usize,
+        "one request per tick, not a request per iteration of a hot loop"
+    );
+}
+
+/// `wait`'s three exit codes agree local and served, on all three paths.
+///
+/// The property the whole wire contract rests on, applied to the one command
+/// that owns exit codes above 2 and exits from inside its own module. A skill
+/// branching on 0 / 3 / 4 must not be able to tell there is a socket in the
+/// path — and the codes must stay disjoint from `unavailable`'s 7, which is why
+/// a transport failure leaves the loop rather than being retried into a timeout.
+#[test]
+fn waits_exit_codes_agree_local_and_served() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = store(tmp.path());
+    let srv = Server::start(&db);
+    // One drained cohort and one that never drains, in the same store, so the
+    // local and served runs read identical state.
+    local(&db, &["add", "drained"]);
+    local(&db, &["tag", "QP-1", "--json", "add", "wave:done"]);
+    local(&db, &["assign", "QP-1", "--to", "w-a"]);
+    local(&db, &["claim", "QP-1", "--as", "w-a"]);
+    local(&db, &["complete", "QP-1", "--as", "w-a"]);
+    local(&db, &["add", "still open"]);
+    local(&db, &["tag", "QP-2", "--json", "add", "wave:open"]);
+
+    let cases: &[(&[&str], i32)] = &[
+        // Drained: exit 0.
+        (
+            &[
+                "wait",
+                "--tag",
+                "wave:done",
+                "--cohort-done",
+                "--timeout-secs",
+                "5",
+            ],
+            0,
         ),
-        (["watch", "--max-ticks", "1"].as_slice(), "watch"),
-    ] {
-        // Tier 1/2: the front door named in the environment.
+        // The deadline elapses with the cohort still open: exit 3.
+        (
+            &[
+                "wait",
+                "--tag",
+                "wave:open",
+                "--cohort-done",
+                "--interval-ms",
+                "100",
+                "--timeout-secs",
+                "1",
+            ],
+            3,
+        ),
+        // No task carries the tag at all: exit 4, never mistaken for success.
+        (
+            &[
+                "wait",
+                "--tag",
+                "wave:absent",
+                "--cohort-done",
+                "--timeout-secs",
+                "5",
+            ],
+            4,
+        ),
+    ];
+    for (args, want) in cases {
+        let l = unflagged_prose(&db, args);
+        assert_eq!(l.code, *want, "local {args:?}: {}", l.stderr);
+        assert_eq!(l.stdout, "", "local {args:?} wrote on stdout");
+
         let mut c = std::process::Command::new(qp_bin());
-        c.env("QP_SERVER", &srv.url).env("QP_DB", &decoy);
+        c.env("QP_SERVER", &srv.url)
+            .env("QP_DB", "/nonexistent/quipu/db.sqlite");
         let r = run_prose(&mut c, args);
         assert!(
             !r.stderr.contains("unexpected argument"),
-            "{what} died on argv, so nothing below tests anything: {}",
+            "{args:?} died on argv: {}",
             r.stderr
         );
-        assert_eq!(r.code, 1, "{what} must refuse, exit 1: {r:?}", r = r.stderr);
         assert_eq!(
-            r.stdout, "",
-            "{what} must write nothing on stdout; an orchestrator reads it"
-        );
-        assert!(
-            r.stderr.contains(&srv.url),
-            "the refusal must name the front door it would not have used: {}",
+            r.code, *want,
+            "served {args:?} must exit as the local run did: {}",
             r.stderr
         );
-
-        // Tier 3: the recorded url, which is the case that warned about
-        // nothing at all before this existed.
-        record_front_door(&decoy, &srv.url);
-        let r = unflagged_prose(&decoy, args);
-        assert_eq!(
-            r.code, 1,
-            "a *recorded* front door must refuse too: {r:?}",
-            r = r.stderr
-        );
-        assert_eq!(r.stdout, "", "{what} must write nothing on stdout");
-        let cleared = unflagged(&decoy, &["remote", "clear", "--front-door"]);
-        assert_eq!(cleared.code, 0, "clear failed: {}", cleared.stderr);
+        assert_eq!(r.stdout, "", "served {args:?} wrote on stdout");
     }
+}
+
+/// A front door that is down is exit 7, never exit 3 and never a local answer.
+///
+/// The distinction `unavailable` exists for, applied to the barrier: a poll that
+/// absorbed a transport failure and kept looping would report "the deadline
+/// passed" about a store it never reached, and a caller cannot tell that from a
+/// cohort that genuinely did not drain.
+#[test]
+fn a_barrier_against_a_dead_front_door_is_a_transport_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = store(tmp.path());
+    let url = {
+        let srv = Server::start(&db);
+        srv.url.clone()
+    }; // killed; the port is free again
+       // The local store would have said "drained" instantly. Exit 7 is a refusal
+       // to give that answer, not an empty store answering.
+    record_front_door(&db, &url);
+
+    let r = unflagged_prose(
+        &db,
+        &[
+            "wait",
+            "--tag",
+            "anything",
+            "--empty",
+            "--timeout-secs",
+            "5",
+        ],
+    );
+    assert_eq!(r.code, 7, "a dead front door is exit 7: {}", r.stderr);
+    assert_eq!(r.stdout, "");
+    let r = unflagged_prose(&db, &["watch", "--max-ticks", "1"]);
+    assert_eq!(r.code, 7, "a dead front door is exit 7: {}", r.stderr);
+    assert_eq!(r.stdout, "");
 }
 
 /// With no front door resolved, both polls behave exactly as they always did.
@@ -2155,16 +2372,20 @@ fn subpath_proxy(target: u16, prefix: &'static str) -> (u16, Arc<std::sync::atom
                 let mut buf = [0u8; 8192];
                 // One read is enough: `qp` writes headers and body in one call
                 // and the bodies here are a few hundred bytes.
-                let Ok(n) = inbound.read(&mut buf) else { return };
+                let Ok(n) = inbound.read(&mut buf) else {
+                    return;
+                };
                 req.extend_from_slice(&buf[..n]);
                 let text = String::from_utf8_lossy(&req).into_owned();
                 // Strip the mount point, and force the upstream connection
                 // closed. Without the second half the proxy's `read_to_end`
                 // below never returns: `tiny_http` keeps a keep-alive
                 // connection open, and `qp` does not ask it not to.
-                let rewritten = text
-                    .replacen(&format!(" {prefix}/"), " /", 1)
-                    .replacen("\r\n", "\r\nConnection: close\r\n", 1);
+                let rewritten = text.replacen(&format!(" {prefix}/"), " /", 1).replacen(
+                    "\r\n",
+                    "\r\nConnection: close\r\n",
+                    1,
+                );
                 let Ok(mut out) = TcpStream::connect(("127.0.0.1", target)) else {
                     return;
                 };

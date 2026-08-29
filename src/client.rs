@@ -98,10 +98,9 @@ fn quipu_version(h: &ureq::http::HeaderMap) -> Option<String> {
     h.get(wire::VERSION_HEADER)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string)
-        // A header with a value this client cannot read is still a header a
-        // quipu front door wrote, but treating it as absent is the safe way
-        // round: the check exists to refuse strangers, not to parse versions.
-
+    // A header with a value this client cannot read is still a header a
+    // quipu front door wrote, but treating it as absent is the safe way
+    // round: the check exists to refuse strangers, not to parse versions.
 }
 
 /// A 2xx from something that is not a quipu front door. Exit 1.

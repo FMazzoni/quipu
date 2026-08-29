@@ -46,7 +46,6 @@ impl crate::route::Served for DecisionsArgs {
 #[serde(transparent)]
 pub(crate) struct DecisionsView(#[serde(deserialize_with = "body_is_an_array")] Value);
 
-
 /// Refuses a response body that is not the array this view renders.
 ///
 /// The whole argument is on `wire::expect_array`; the short version is that a

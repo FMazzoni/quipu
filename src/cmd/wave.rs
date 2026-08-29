@@ -40,7 +40,6 @@ const STATES: &[&str] = &["ready", "assigned", "running", "pending"];
 #[serde(transparent)]
 pub(crate) struct WaveView(#[serde(deserialize_with = "body_is_the_view")] Value);
 
-
 /// Refuses a response body that is not the object this view renders.
 ///
 /// See `wire::expect_object`. The named keys are the ones `human()` reads, so
@@ -51,14 +50,23 @@ where
     D: serde::Deserializer<'de>,
 {
     use serde::de::Error as _;
-    crate::wire::expect_object(Value::deserialize(d)?, &["ready", "assigned", "running", "pending"]).map_err(D::Error::custom)
+    crate::wire::expect_object(
+        Value::deserialize(d)?,
+        &["ready", "assigned", "running", "pending"],
+    )
+    .map_err(D::Error::custom)
 }
 
 /// A minimal valid sample; see `list.rs` for why this is not derived.
 #[cfg(test)]
 impl Default for WaveView {
     fn default() -> Self {
-        WaveView(Value::Object(STATES.iter().map(|s| ((*s).to_string(), Value::Array(vec![]))).collect()))
+        WaveView(Value::Object(
+            STATES
+                .iter()
+                .map(|s| ((*s).to_string(), Value::Array(vec![])))
+                .collect(),
+        ))
     }
 }
 

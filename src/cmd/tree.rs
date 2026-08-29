@@ -66,7 +66,6 @@ pub(crate) struct TreeView {
     with_description: bool,
 }
 
-
 /// Refuses a response body that is not the array this view renders.
 ///
 /// The whole argument is on `wire::expect_array`; the short version is that a

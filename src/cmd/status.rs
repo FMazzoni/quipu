@@ -41,7 +41,6 @@ impl crate::route::Served for StatusArgs {
 #[serde(transparent)]
 pub(crate) struct StatusView(#[serde(deserialize_with = "body_is_the_view")] Value);
 
-
 /// Refuses a response body that is not the object this view renders.
 ///
 /// See `wire::expect_object`. The named keys are the ones `human()` reads, so
@@ -52,14 +51,30 @@ where
     D: serde::Deserializer<'de>,
 {
     use serde::de::Error as _;
-    crate::wire::expect_object(Value::deserialize(d)?, &["pending", "ready", "assigned", "running", "done", "cancelled"]).map_err(D::Error::custom)
+    crate::wire::expect_object(
+        Value::deserialize(d)?,
+        &[
+            "pending",
+            "ready",
+            "assigned",
+            "running",
+            "done",
+            "cancelled",
+        ],
+    )
+    .map_err(D::Error::custom)
 }
 
 /// A minimal valid sample; see `list.rs` for why this is not derived.
 #[cfg(test)]
 impl Default for StatusView {
     fn default() -> Self {
-        StatusView(Value::Object(STATES.iter().map(|s| ((*s).to_string(), Value::from(0))).collect()))
+        StatusView(Value::Object(
+            STATES
+                .iter()
+                .map(|s| ((*s).to_string(), Value::from(0)))
+                .collect(),
+        ))
     }
 }
 

@@ -54,38 +54,70 @@ are waiting on. The trade is latency: release is detected within one interval,
 not at the instant of the transition. Nothing here is notification-driven — see
 `cmd/watch.rs` for the event-stream side.
 
-## A resolved front door is a refusal, not a local answer
+## A front door is polled, not answered around
 
-`wait` has no route. That is deliberate — a served barrier means a request that
-blocks for the length of a wave, and with four workers that is the whole pool —
-but until it polls a front door itself, an invocation with one resolved must
-**refuse**, exit 1, rather than answer from the store on this disk.
+`wait` has no route of its own and will not get one. A served barrier is a
+request that blocks for the length of a wave, and with four workers that is the
+whole pool; a streaming endpoint wants an async runtime, which CLAUDE.md
+forbids. So it is a *client-side poll* over the served `list`, and the same code
+runs whether the store is on this disk or behind a socket — `route::fetch`
+decides, and this module never learns which happened.
 
-The failure it replaces was live and silent. `qp wait --tag wave:1 --empty`
-against a front door holding six open tickets returned 0 in seven milliseconds:
-it polled the *local* store, where a cohort nobody filed there is trivially
-empty. An orchestrator branching on that exit code proceeds to the next phase
-with every ticket still open. There was a warning on stderr, and that is not a
-signal — `wait`'s entire output is an exit code, stdout is empty in both the
-true and the false case, and orchestration scripts routinely discard stderr.
+That structure is the point rather than a convenience. The two paths cannot
+disagree about what a drained cohort is, because there is one predicate over one
+payload; the alternative — a local `COUNT` and a separate remote poll — is two
+implementations of one definition, and they drift.
 
-Three properties of the refusal, each of which was a choice:
+### The failure this replaced
 
-- **Refuse, do not warn.** `warn_unserved` is right for `export` and `sync`:
-  those name a path on the caller's disk, so running locally is what the
-  operator meant. A barrier has no such reading, and an exit code cannot carry
-  a caveat.
-- **Key on a *resolved* front door, not on an explicit `--server`.** The
-  recorded-url tier is the case that produced no warning at all, because
-  `resolve_server` did not consult it for a verb with no route. `is_client_poll`
-  in `route.rs` puts `wait` and `watch` on the served side of that gate, which
-  is what makes a configured store reach this refusal instead of answering in
-  silence.
-- **Refuse before the attach check.** A storeless client already got the right
-  answer (`no_store`, exit 6); the betrayed case is the client that *has* a
-  store. Two exit codes for one misconfiguration is a distinction nothing
-  downstream wants, so both now get exit 1.
+With a front door resolved and no route, `wait` polled the store on *this* disk.
+`qp wait --tag wave:1 --empty` against a front door holding six open `wave:1`
+tickets returned 0 in seven milliseconds, because the cohort is trivially empty
+in a store nobody filed it into. An orchestrator branching on that exit code
+proceeds to the next phase with every ticket still open, and stdout is empty in
+both the true and the false case, so the only signal was prose on a stderr that
+orchestration scripts routinely discard. The configuration is not exotic: this
+project's own wave flow runs agents in worktrees that resolve to the project's
+`.quipu` through the git-common-dir fallback, which is exactly "a client with a
+local store, pointed at a server".
 
-The configuration is not exotic: this project's own wave flow runs agents in
-worktrees that resolve to the project's `.quipu` through the git-common-dir
-fallback, which is exactly "a client with a local store, pointed at a server".
+`route::is_client_poll` is what makes the front door reach this command at all:
+it puts `wait` and `watch` on the served side of the three gates in `real_main`
+that ask "does this invocation talk to a server" — the attach check, the
+recorded-url tier of `resolve_server`, and `warn_unserved`. Without it a
+recorded url was not even consulted, which is why that tier produced no warning
+whatsoever.
+
+### `--tag` is a glob now, because `list`'s is
+
+The filter crosses the wire as `ListArgs::tag`, and `store::tasks` matches tags
+with `GLOB` where this module's old `COUNT` used `=`. For every tag quipu itself
+writes the two are the same — a glob with no metacharacter is an exact match —
+and the widening is deliberate: one filter, one meaning, in argv and in SQL and
+on the wire. A tag containing `*`, `?` or `[` now matches more than it did.
+
+### Why one `list` and not a count endpoint
+
+Measured against a loopback front door: the `list` body for a six-ticket
+`wave:1` cohort is **1441 bytes**, and the server spends at most **1 ms** on the
+query. At the default interval that is under 3 KB/s for a barrier, and a
+count-only endpoint would save about 1.4 KB per poll in exchange for a second
+protocol surface with exactly one caller. The filters already cross the wire and
+are SQL clauses on the server, so a poll transfers the cohort and never the
+store — which is the property that makes the trade this way round. If a
+measurement ever argues for the endpoint, the number to beat is the per-poll
+body of the cohort being waited on.
+
+## Exit codes, and what a socket must not turn them into
+
+Three exits, unchanged: 0 drained, 3 the deadline elapsed, 4 an empty cohort.
+The two `std::process::exit` sites stay in this module, so those codes never
+need an HTTP status and the server never learns they exist.
+
+**A transport failure leaves the loop immediately, as exit 7.** It is not
+retried and not absorbed into the timeout. A barrier that swallowed
+`unavailable` and kept polling would eventually report exit 3 — "the deadline
+passed" — about a front door it never reached, and confusing "nothing happened"
+with "nothing was asked" is exactly what `unavailable` was introduced to
+prevent. The cost is that a front door restarted mid-barrier ends the wait; the
+process contract's answer applies, and it is the caller's to make.

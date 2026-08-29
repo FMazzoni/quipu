@@ -61,7 +61,6 @@ fn ids(v: &Value, key: &str) -> Vec<String> {
         .collect()
 }
 
-
 /// Refuses a response body that is not the object this view renders.
 ///
 /// See `wire::expect_object`. The named keys are the ones `human()` reads, so
@@ -72,7 +71,8 @@ where
     D: serde::Deserializer<'de>,
 {
     use serde::de::Error as _;
-    crate::wire::expect_object(Value::deserialize(d)?, &["display_id", "state", "tags"]).map_err(D::Error::custom)
+    crate::wire::expect_object(Value::deserialize(d)?, &["display_id", "state", "tags"])
+        .map_err(D::Error::custom)
 }
 
 /// A minimal valid sample; see `list.rs` for why this is not derived.
