@@ -26,6 +26,7 @@ pub mod relation;
 pub mod remote;
 pub mod render;
 pub mod report;
+pub mod serve;
 pub mod show;
 pub mod status;
 pub mod sync;

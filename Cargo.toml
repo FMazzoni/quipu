@@ -74,9 +74,33 @@ url = "2"
 # rather than the aspirational one — it is not on the cold-start path at all,
 # since only `qp project` and `qp remote doctor` ask where the registry is.
 dirs = "6"
+# The HTTP front door (`src/cmd/serve.rs`). SYNCHRONOUS and thread-based: it
+# hands each `recv` to a worker thread, so the no-async-runtime rule is
+# satisfied without contortion — tokio/hyper/axum are ruled out by the
+# cold-start budget, which every one of the thousands of sub-30 ms CLI
+# invocations pays and none of them would use.
+#
+# Measured: four new crates in `cargo tree` (`ascii`, `chunked_transfer`,
+# `httpdate`, and `tiny_http` itself). `log` is NOT new — `rustls` already
+# pulls it in through `ureq` — so nothing here adds a logging facade that was
+# not already linked, and quipu still writes its own lines with `eprintln!`.
+#
+# Default features off: they are all TLS backends. TLS termination is a reverse
+# proxy's job and the wire contract says so; `qp` speaks plaintext to loopback
+# behind one, which is the deployment the loopback rule was written for.
+#
+# Hand-rolling HTTP over `TcpListener` was rejected. Parsing requests is a
+# security surface, and CLAUDE.md's rule is the smallest crate that does the job
+# *properly* — not the smallest binary.
+tiny_http = { version = "0.12", default-features = false }
 
 [dev-dependencies]
 assert_cmd = "2"
+# Already a runtime dependency; named here so `tests/serve.rs` can shrink a
+# socket's receive buffer and force a RESET. The SIGPIPE regression it pins is
+# invisible otherwise: a small response fits the kernel buffers and completes
+# before the peer is gone, so the test passes against the bug.
+libc = "0.2"
 predicates = "3"
 tempfile = "3"
 

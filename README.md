@@ -457,6 +457,49 @@ id carries the head of the origin store's uuid. `--json` carries the project key
 and the full origin pair on every row, so a dashboard over the whole ledger can
 attribute a ticket without guessing.
 
+## Serving a store over HTTP
+
+    qp serve --bind 127.0.0.1:8787                   # the store this directory resolves to
+    qp serve --bind 127.0.0.1:8787 --project alpha --project beta
+
+    qp --server http://127.0.0.1:8787 add "wire it up"
+    qp --server http://127.0.0.1:8787 --project alpha claim QP-7 --as w-a
+
+`qp serve` fronts stores that already exist with an HTTP listener, in the
+foreground, so that a machine which cannot reach the store file can still act on
+it. Four verbs are served today — `add`, `assign`, `claim`, `complete` — and the
+client sends them when `--server` (or `QP_SERVER`) is set; everything else runs
+locally exactly as before. A `--project` naming a store the server did not open
+at startup is `no_store`, exit 6.
+
+**The server is not the writer.** Serialisation comes from `BEGIN IMMEDIATE`
+inside SQLite and always has, so a `qp` running in a terminal against the same
+file stays correct while it is being served: a store behind a server is a store
+with one more writer, not a store with one writer. Racing clients get exactly
+one winner and a typed `conflict` for the rest, which is the same answer they
+get with no server anywhere.
+
+**The exit codes do not change.** A conflict is exit 2 whether the store was on
+this disk or behind a socket, so a script that branches on the exit code needs no
+change. One code is new to the client side: **exit 7, `unavailable`** — the
+front door could not be reached, so no store saw the request. Treat it as
+*unknown outcome*, not as *did not happen*: read the ticket back before
+re-issuing a write.
+
+**It is unauthenticated.** `--as` is unvalidated free text, so anything that can
+reach the port can act as any agent — which is no worse than anything that can
+write the file, and is exactly why the bind default is loopback and `http://` is
+refused for any host that is not a loopback literal. To reach it from elsewhere,
+put a reverse proxy in front that terminates TLS and speaks plaintext to
+loopback.
+
+Startup is fail-fast: every project is resolved and opened before the listener
+binds, so a misconfiguration is a failed process with a message rather than one
+that looks healthy and answers `no_store` forever. The process writes one JSON
+object per line to stderr and takes no log file — `qp serve 2>> <path>` if you
+want one, or let a supervisor capture it. `GET /healthz` answers from memory and
+touches no store.
+
 ## Install skills into Claude Code
 
     qp install-skills                          # symlinks skills/* into ~/.claude/skills/qp-*

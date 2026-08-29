@@ -11,8 +11,13 @@ what was rejected, so that reopening one is an argument rather than a guess.
 > as `architecture.md`: treat it as a map. Claims about current behaviour are
 > checkable against the source and should be checked.
 
-No server, client, or HTTP code exists yet. The only code this document ships
-is the `unavailable` error kind, reserved so a later slice cannot renumber it.
+When this document was written no server, client or HTTP code existed; the only
+code it shipped was the `unavailable` error kind, reserved so a later slice
+could not renumber it. The vertical slice has since built the first four verbs —
+`add`, `assign`, `claim`, `complete` — against it, in `src/cmd/serve.rs`,
+`src/route.rs`, `src/wire.rs` and `src/client.rs`. Two notes from that build are
+marked **implemented as** below, where the shipped answer is narrower or
+different from what this document assumed.
 
 ## The server is not the writer
 
@@ -26,9 +31,22 @@ directly, dozens of call sites call `db::open` with no layer in between, and
 nothing in this design removes them. A store fronted by a server is a store
 with one more writer, not a store with one writer.
 
-So the server is an HTTP front door for N existing stores. It holds one
-connection per store file it serves and `--project` selects among them, but it
-is not a source of truth, not a lock manager, and not a gatekeeper. Every
+So the server is an HTTP front door for N existing stores. `--project` selects
+among them, but it is not a source of truth, not a lock manager, and not a
+gatekeeper.
+
+**Implemented as: a connection per request, not one per store.** This paragraph
+originally said the server "holds one connection per store file it serves", and
+the vertical slice departed from it deliberately. One mutexed connection per
+project serialises reads behind writes, which is exactly what the WAL work went
+to trouble to avoid; a per-request connection cannot outlive its response, so it
+also cannot pin a checkpoint and grow the WAL; and the measurement this section
+rests on — that N in-process connections behave exactly as N processes under
+`BEGIN IMMEDIATE` — is what makes per-request connections as correct as
+per-process ones. What the sentence was protecting is the process contract's
+fail-fast rule, and that is honoured exactly: every project is resolved and
+opened, migrations and all, before the listener binds, and the store set is
+fixed from that moment. Every
 guarded transition stays a single conditional `UPDATE ... WHERE state IN (...)`
 plus a `changes() == 1` check, exactly as it is today, and it stays that way
 *because* a concurrent local `qp` may be doing the same thing at the same
@@ -435,8 +453,16 @@ implementation is a pure function of its own struct's fields.** No `Connection`,
 no path lookup, no environment read, no I/O of any kind, across all of them. The
 decision is implementable as stated.
 
-**The cost, which is real: every `Outcome` struct derives `Serialize` only —
-never `Deserialize` — and every one is private to its `cmd` module.** The client
+*Since resolved — kept as the record of what the decision cost.* The change
+below landed before the first endpoint was written: every payload now derives
+`Deserialize`, is reachable from outside its module, and is held there by a
+registry test that fails when a new one is added without them. The count was
+29, not the 28 stated here — one implementation is spelled through the full
+path and a plain grep misses it. Read the rest of this section as a cost
+statement, not as work outstanding.
+
+**The cost, which was real: every `Outcome` struct derived `Serialize` only —
+never `Deserialize` — and every one was private to its `cmd` module.** The client
 cannot reconstruct a payload to call `human()` on it. Making them
 round-trippable means `#[derive(Serialize, Deserialize)]` and `pub` (or a
 `pub(crate)` re-export) on every one, plus their nested types: `take`'s inner
@@ -500,8 +526,9 @@ is satisfied exactly as written.
 
 ## Still open
 
-One thing this contract deliberately does not do, recorded here so it is not
-lost: **the leanness rule in `CLAUDE.md` still says "zero daemons", and it has
-not been amended.** That line must be amended, with reasoning, in the same
-commit that first introduces a server — the way the binary-size rule was — which
-is the vertical slice's job, not this one's.
+One thing this contract deliberately did not do, recorded here because the
+follow-through is worth being able to find: **the leanness rule in `CLAUDE.md`
+said "zero daemons", and this document did not amend it.** It was amended in the
+commit that first introduced the server — the way the binary-size rule was — to
+allow exactly one optional daemon while keeping "zero async runtime" and "zero
+external services" intact.

@@ -534,7 +534,7 @@ fn plaintext_requested() -> bool {
 /// `127.0.0.0/8`, `::1`, and the literal `localhost`. Anything else is a real
 /// endpoint as far as this decision is concerned, including a name that happens
 /// to resolve to loopback right now.
-fn is_loopback_literal(authority: &str) -> bool {
+pub fn is_loopback_literal(authority: &str) -> bool {
     let host = host_without_port(authority);
     if host.eq_ignore_ascii_case("localhost") {
         return true;

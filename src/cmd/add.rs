@@ -3,34 +3,53 @@
 #![doc = include_str!("../../docs/modules/add.md")]
 
 use crate::effects::{self, Effect};
-use crate::outcome::{emit, Outcome};
+use crate::outcome::Outcome;
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AddArgs {
     pub title: String,
     #[arg(long)]
+    #[serde(default)]
     pub tier: Option<String>,
     #[arg(long)]
+    #[serde(default)]
     pub description: Option<String>,
     #[arg(long = "depends-on", value_name = "TASK_ID")]
+    #[serde(default)]
     pub depends_on: Vec<String>,
     /// Container this task is part of. Note the direction: unlike
     /// `--depends-on`, the *named* task is the one that ends up waiting.
     #[arg(long = "part-of", value_name = "TASK_ID")]
+    #[serde(default)]
     pub part_of: Vec<String>,
     #[arg(long, value_name = "NAME")]
+    #[serde(default)]
     pub tag: Vec<String>,
     /// Required with `--part-of` when the container is assigned/running: the
     /// container is the row that gains an edge, so its owner has to be named.
     #[arg(long = "as")]
+    #[serde(default)]
     pub agent: Option<String>,
     #[arg(long)]
+    #[serde(skip)]
     pub json: bool,
+}
+
+impl crate::route::Served for AddArgs {
+    const VERB: &'static str = "add";
+    type Out = Created;
+    fn wants_json(&self) -> bool {
+        self.json
+    }
+    fn exec(db_path: &std::path::Path, a: Self) -> Result<Self::Out> {
+        exec(db_path, a)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -79,7 +98,7 @@ impl Outcome for Created {
 ///
 /// The new task is not always unaffected: attaching it to a container that is
 /// itself blocked puts it inside a frozen subtree, so it arrives `pending`.
-pub fn run(db_path: &std::path::Path, a: AddArgs) -> Result<()> {
+pub fn exec(db_path: &std::path::Path, a: AddArgs) -> Result<Created> {
     let mut conn = db::open(db_path)?;
     // Pre-resolve deps outside tx; errors early.
     let mut dep_ids = Vec::with_capacity(a.depends_on.len());
@@ -225,7 +244,7 @@ pub fn run(db_path: &std::path::Path, a: AddArgs) -> Result<()> {
         })
     })?;
 
-    emit(a.json, &created)
+    Ok(created)
 }
 
 #[cfg(test)]
