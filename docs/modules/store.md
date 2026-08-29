@@ -73,3 +73,30 @@ about promotion and demotion applies only to the four dep-side ones.
 state actually being added and one of the three being missed in the process, or
 the guarded-`UPDATE` exclusion itself being revisited. Any of those turns three
 hand-written copies from a defensible call into an accident waiting to repeat.
+
+## Materialize before responding
+
+Every function here returns an owned `Vec`, `HashMap` or `HashSet`. None hands
+back a `Rows`, a `MappedRows` or an `impl Iterator`, and
+`every_public_query_returns_an_owned_collection` fails the build if one starts
+to.
+
+This is not a style preference. A cursor that is still open holds a read
+transaction, and one open read transaction anywhere in the process pins the WAL
+checkpoint for every writer — the WAL then grows without bound, and closing the
+cursor afterwards does not give the space back. `docs/modules/db.md` has the
+measurements. In a long-lived process the obvious shape of the bug is streaming
+a query straight into an HTTP response while writes land behind it: nothing
+errors, every write succeeds, and the disk fills.
+
+The rule was already satisfied when it was written down; the test exists so it
+cannot be quietly un-satisfied. A reviewer who does not know why a signature
+must not return an iterator is exactly the reader the test is for.
+
+**What it does not cover.** It scans this module's own `pub fn` signatures and
+nothing else. Most command modules still issue rusqlite directly rather than
+going through here (see the layering note at the top of this file), so the
+guard's reach grows only as those queries migrate. Until then it is a boundary
+that holds where the read layer exists, not a property of the whole binary — a
+`cmd/*.rs` that streams a live cursor would pin the checkpoint just as
+effectively and nothing here would notice.
