@@ -21,12 +21,28 @@ const MAX_HEALTH_BODY: u64 = 64 * 1024;
 /// Every non-2xx answer and every transport failure comes back as the typed
 /// error the CLI would have produced locally, so the caller's exit code is
 /// unchanged by there being a socket in the path.
-pub fn call(base: &str, verb: &str, project: Option<&str>, body: Value) -> Result<Value> {
+pub fn call(
+    base: &str,
+    verb: &str,
+    project: Option<&str>,
+    project_key: Option<&str>,
+    body: Value,
+) -> Result<Value> {
     let base = check_url(base)?;
     let mut url = format!("{base}{}{verb}", wire::API_PREFIX);
-    if let Some(p) = project {
-        url.push_str("?project=");
-        url.push_str(&encode(p));
+    // Both parameters ADDRESS the store rather than argue the verb, which is
+    // why neither is a body field: `project` says which store, `project_key`
+    // says which project that store had better be. A body field would have to
+    // be added to every served args struct, all of which set
+    // `deny_unknown_fields`, and would then read as an argument to the command.
+    let mut sep = '?';
+    for (k, v) in [("project", project), ("project_key", project_key)] {
+        let Some(v) = v else { continue };
+        url.push(sep);
+        sep = '&';
+        url.push_str(k);
+        url.push('=');
+        url.push_str(&encode(v));
     }
     // `http_status_as_error(false)` for the same reason `s3.rs` sets it: the
     // response body is the only place the cause lives, and turning a 409 into

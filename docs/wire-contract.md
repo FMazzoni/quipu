@@ -419,6 +419,7 @@ a read endpoint changes latency, not semantics.
 Neither should become a streaming endpoint under this contract. Server-sent
 events or long-polling wants an async runtime, and CLAUDE.md forbids one.
 
+<<<<<<< HEAD
 **Implemented as: a third bucket in the routing table, and it was needed before
 the polls were.** This section describes the destination correctly and
 understates what the interval between here and there cost. `wait` and `watch` are neither
@@ -443,6 +444,31 @@ than being retried — a barrier that absorbed `unavailable` would report exit 3
 endpoint this section's read-side sibling deliberately did not build was
 measured and still not built: a six-ticket cohort's `list` body is 1441 bytes
 and the server spends at most 1 ms on it.
+=======
+**Retracted: "it becomes a client-side loop over the served read endpoint."**
+Both sentences describe a change that has not been made. Neither `wait` nor
+`watch` is in `route::served!`, neither consults `resolve_server`, and both open
+the store on the caller's own disk exactly as they did before there was a
+server. With `--server` set, `main.rs` prints `warning: --server is set but this
+verb is not served yet; it ran against the local store` and runs them locally —
+which is checked behaviour, not a reading of the source.
+
+The retraction is worth keeping because the consequence is the failure this
+whole document is organised around, and it is silent. On a machine with no store
+the result is loud: exit 6, no store here. On a coordinator that has *both* a
+local store and a front door — the tier-3 arrangement `remote set --front-door`
+exists to create — `qp wait` answers from the file on disk while every other
+verb answers from the socket. That is one process reading two boards and
+reporting neither, and a wave barrier is the worst possible place for it,
+because the barrier's whole job is to say when the other machines are done.
+
+The paragraph above is still right that neither verb is *semantically* broken
+over HTTP — both are already polls, and moving the poll to a read endpoint
+changes latency rather than meaning. What was wrong was the tense. Until the
+change is made, the skills teach a polled `qp list` as the barrier behind a
+front door (`skills/wave/SKILL.md`, "What is not served"), and `watch` is
+documented as a local-store command.
+>>>>>>> origin/main
 
 ## 4. Collateral state changes
 
@@ -542,6 +568,76 @@ behalf of* many different agent ids. Deriving identity from the connection makes
 that impossible without one connection per agent, which defeats the
 one-connection-per-store design outright. Carrying it in the body also preserves
 the CLI shape exactly: `--as` becomes `agent` and nothing else moves.
+
+### A second identity: which PROJECT, not which agent
+
+*Added after the first four verbs shipped, because a two-machine review found
+the gap a same-host test structurally cannot.* Section 5 above is about **who is
+asking**. This is about **which project they are asking about**, and the two are
+unrelated concepts that share a word.
+
+**Decision: `project_key` crosses the wire as a query parameter beside
+`project`, and the server refuses a request whose asserted key is not the key of
+the store that name reaches.**
+
+A project **name** is machine-local by construction: a registry maps a name to a
+path *per machine*. Two hosts each holding their own `alpha` is therefore the
+ordinary case, and on one host it cannot even be built — the registry refuses two
+projects of one name. That is precisely why this survived every test: the health
+payload carried only the name, `project_key` and `project_uuid` crossed the
+socket nowhere at all, and a client pointed at the wrong host's front door took
+work from a project it had never seen and exited 0.
+
+**`project_key` and not `project_uuid`.** The key is the value a set of stores
+*share*, which is exactly what "the same project on another machine" means. The
+uuid is per-store, so comparing uuids would fail the *correct* case — one
+project, two machines, two stores — every time.
+
+**In the query string, not the body.** `project` and `project_key` are both
+*addressing*: one says which store, the other says which project that store had
+better be. Neither is an argument to the verb, and a body field would have to be
+added to every served args struct — all of which set `deny_unknown_fields` — to
+carry a property of the invocation rather than of the command.
+
+**Compared on every request, at the cost of a string compare.** The alternative
+— once per client run, against `/healthz` — costs an extra round trip on every
+`qp` invocation, and `qp` is invoked thousands of times per session. Per-request
+is cheaper *and* stricter, because the server reads each store's key once at
+startup, from the same connection that proves it openable; an identity fixed
+before the listener binds cannot drift, so there is nothing to query per request
+and nothing to invalidate.
+
+**A mismatch is `no_store`, exit 6.** Not `not_found` and not `conflict`: exit 2
+means "look again, it may change", and this never changes, because the store set
+is fixed before the listener binds and no request can add to it. Exit 6 already
+carries "this front door is not attached to the project you mean" for a project
+the process never opened, and this is the same statement with a subtler cause.
+The **local** twin, `db::init`'s `project_key_mismatch`, is a `conflict` because
+there it genuinely is a state conflict — `qp init` refusing to re-home a store —
+while here nothing is being changed by anyone.
+
+**A client asserts its key only when it is naming its own project.** Two cases:
+`--project <n>` where this store answers to `<n>`, and no `--project` at all
+with a store on this disk (a machine that holds a store and names a front door
+means its own project; that is what `qp remote set --front-door` records). The
+deliberate third case: `--project <n>` naming something this store is *not*
+asserts nothing, because that caller has said out loud that it is addressing
+another project — and that is the escape hatch the refusal message names.
+
+**A client with no local store asserts nothing, and the guard does not apply to
+it.** Stated plainly because "the guard silently does not apply on the machine
+that needs it most" is a real failure shape. It is not fixable here: a storeless
+worker has no recorded key of its own, so `--project alpha` *defines* alpha as
+whatever that front door calls alpha. An identity such a caller could compare
+against would have to come from whatever dispatched it, which is a different
+design and not this one.
+
+**The health payload gained `project_keys`**, a name-to-key map beside
+`projects`. Additive rather than a rewrite of `projects` into objects, because
+`remote::probe_server` reads that list to decide the thing answering is a quipu
+front door at all. `qp remote doctor`'s `serves` check now compares the key: the
+name comparison it used to make passes against a front door serving a different
+project of the same name, which was the second half of the same defect.
 
 ### This is unauthenticated today
 

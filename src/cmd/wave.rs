@@ -82,17 +82,11 @@ impl Outcome for WaveView {
             for r in arr {
                 // The stale marker trails the title rather than taking a column:
                 // the four columns here are load-bearing elsewhere, and a hold
-                // that has gone quiet is worth a sentence, not a flag.
-                let stale = if r["stale"].as_bool().unwrap_or(false) {
-                    let host = r["hold"]["host"].as_str().unwrap_or("unknown host");
-                    format!(
-                        "   [STALE — quiet since {}, on {}]",
-                        r["hold"]["last_contact"].as_str().unwrap_or("?"),
-                        host
-                    )
-                } else {
-                    String::new()
-                };
+                // that has gone quiet is worth a sentence, not a flag. The text
+                // itself is `lease::stale_marker`, shared with `list`, so the
+                // two board views cannot describe one stranded ticket
+                // differently.
+                let stale = lease::stale_marker(&r["hold"]);
                 lines.push(format!(
                     "  {:>7}  {:<14}  {:<10}  {}{}",
                     r["display_id"].as_str().unwrap_or(""),

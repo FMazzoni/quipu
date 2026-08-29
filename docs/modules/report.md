@@ -57,3 +57,27 @@ ask whose disk the path is on.
 a *value*, not a location, so it crosses the wire and is parsed on the server.
 `24h` therefore resolves against the server's clock, which is correct because it
 is bounding that store's own `event.ts` values.
+
+## Staleness on the board payload
+
+Each entry in `tasks` carries `stale` and `hold`, spelled exactly as
+`wave --json` and `list --json` spell them: a boolean beside the row, and the
+hold object (`agent`, `host`, `last_contact`, `lease_seconds`, `expires_at`,
+`stale`) under `hold`, or `null` when nothing holds the task. A renderer written
+against one of the three views reads the others unchanged.
+
+This exists because the dashboard reads this payload and nothing else. Without
+it a ticket stranded by a machine that died renders as a `running` row
+indistinguishable from work in progress — which is the whole failure the lease
+was built to make visible.
+
+The holds come from `lease::holds_by_task`, one statement for the page rather
+than one per row, and it embeds the same `LIVE_HOLD` predicate `reclaim` breaks
+holds with, so a board cannot call something stale that `reclaim` would refuse
+to take. A hold that stated no expiry is never stale.
+
+The per-ticket modes (`--ticket`, `--all-tickets`) deliberately do not carry it.
+They are the forensic view of one ticket's history, `qp show` already answers
+the liveness question for a single ticket with the same `hold` object, and
+adding it to `--all-tickets` would put a per-row query where the board payload
+has one.

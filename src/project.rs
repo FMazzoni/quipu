@@ -397,6 +397,31 @@ pub fn read(conn: &Connection) -> Result<Option<String>> {
     Ok(v.filter(|s| !s.is_empty()))
 }
 
+/// The name and project key a store on disk answers to, without opening it for use.
+///
+/// The client-side half of the served identity guard. It is a *peek*, not an
+/// open: `db::open` migrates, and a command that is about to talk to a front
+/// door must not create or alter a store on the caller's disk to do it — a
+/// client pointed at `--server` is routinely a machine with no store at all,
+/// which is why the `path.exists()` guard is load-bearing rather than tidy
+/// (`Connection::open` creates the file it is handed).
+///
+/// `None` whenever either half is missing, because a partial identity cannot be
+/// asserted: a key with no name cannot be matched against a `--project`, and a
+/// name with no key names nothing another machine could agree with. The same
+/// shape and the same reasoning as `db::read_project_uuid`, which peeks for the
+/// local twin of this guard.
+pub fn peek(path: &Path) -> Option<(String, String)> {
+    if !path.exists() {
+        return None;
+    }
+    let conn = Connection::open(path).ok()?;
+    Some((
+        read_name(&conn).ok().flatten()?,
+        read(&conn).ok().flatten()?,
+    ))
+}
+
 /// Reads the key, or fails loudly rather than letting a caller guess one.
 pub fn require(conn: &Connection) -> Result<String> {
     read(conn)?.ok_or_else(|| {

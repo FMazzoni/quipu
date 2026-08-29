@@ -3,7 +3,7 @@
 #![doc = include_str!("../../docs/modules/report.md")]
 
 use crate::outcome::Outcome;
-use crate::{db, id, store};
+use crate::{db, id, lease, store};
 use anyhow::Result;
 use clap::Args;
 use serde::{Deserialize, Serialize};
@@ -376,15 +376,27 @@ fn collect_json(
     let mut tags_by = store::tags_by_task(conn, &task_ids)?;
     let mut blockers_by = store::unresolved_blockers_by_task(conn, &task_ids)?;
     let mut last_event_by = store::last_event_by_task(conn, &task_ids)?;
+    // The dashboard reads this payload, and a ticket stranded by a machine that
+    // died has to be visible in it — otherwise the board shows a `running` row
+    // indistinguishable from work in progress. One statement for the whole
+    // page, and the same `LIVE_HOLD` predicate `reclaim` breaks holds with, so
+    // what a renderer calls stale and what `reclaim` will take cannot drift.
+    let holds = lease::holds_by_task(conn, &task_ids)?;
 
     let mut tasks: Vec<Value> = Vec::with_capacity(core.len());
     for t in core {
+        let hold = holds.get(&t.id);
         let mut obj = serde_json::json!({
             "id": t.id, "display_id": t.display_id, "title": t.title, "state": t.state, "tier": t.tier,
             "agent": t.agent,
             "tags": tags_by.remove(&t.id).unwrap_or_default(),
             "blocked_by": blockers_by.remove(&t.id).unwrap_or_default(),
             "last_event": last_event_by.remove(&t.id),
+            // Spelled exactly as `wave --json` and `list --json` spell it — a
+            // flag beside the row and the whole hold object under `hold` — so a
+            // renderer written against one view reads the others unchanged.
+            "stale": hold.is_some_and(|h| h.stale),
+            "hold": hold.map(lease::Hold::to_json),
         });
         if let Some(d) = t.description {
             obj.as_object_mut()

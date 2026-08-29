@@ -8616,3 +8616,213 @@ fn reclaim_omits_effects_when_only_the_named_task_returned() {
     assert_eq!(v["state"], "ready");
     assert!(v.get("_effects").is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Staleness in the board views a dashboard and a `list` reader actually see.
+//
+// `show` and `wave` flagged a stranded hold from the start; `list` and `report`
+// did not, so a ticket whose machine died was invisible in two of the four
+// views and in the dashboard entirely. These pin that it is visible in both,
+// that a live hold is not marked in either, and that a hold which never stated
+// an expiry is never marked at all.
+// ---------------------------------------------------------------------------
+
+/// The `tasks` entry for one display id out of a board payload.
+fn report_task(db: &std::path::Path, want: &str) -> serde_json::Value {
+    let a = qp(db).args(["report", "--json"]).assert().success();
+    json_stdout(&a)["tasks"]
+        .as_array()
+        .expect("report payload has a tasks array")
+        .iter()
+        .find(|t| t["display_id"] == want)
+        .unwrap_or_else(|| panic!("{want} missing from the board payload"))
+        .clone()
+}
+
+/// The `list` line for one display id, human mode.
+fn list_line(db: &std::path::Path, want: &str) -> String {
+    let a = qp(db).args(["list"]).assert().success();
+    let s = String::from_utf8(a.get_output().stdout.clone()).unwrap();
+    s.lines()
+        .find(|l| l.starts_with(&format!("{want}\t")))
+        .unwrap_or_else(|| panic!("{want} missing from list:\n{s}"))
+        .to_string()
+}
+
+fn list_row(db: &std::path::Path, want: &str) -> serde_json::Value {
+    let a = qp(db).args(["list", "--json"]).assert().success();
+    json_stdout(&a)
+        .as_array()
+        .expect("list --json is an array")
+        .iter()
+        .find(|t| t["display_id"] == want)
+        .unwrap_or_else(|| panic!("{want} missing from list --json"))
+        .clone()
+}
+
+#[test]
+fn a_lapsed_hold_is_visible_in_list_and_in_the_board_payload() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "stranded"]).assert().success();
+    qp(&db).args(["add", "in progress"]).assert().success();
+    for (t, who) in [("QP-1", "dead"), ("QP-2", "alive")] {
+        qp(&db).args(["assign", t, "--to", who]).assert().success();
+        qp(&db)
+            .args(["claim", t, "--as", who, "--for", "45m"])
+            .assert()
+            .success();
+    }
+
+    // Only the first one's machine went quiet past its stated length.
+    age_hold(&db, 1, 46 * 60);
+
+    // `list`, human. The marker trails TITLE and takes no column: `show`'s
+    // header is pinned to this column set, so the tab count must not move.
+    let stranded = list_line(&db, "QP-1");
+    assert!(
+        stranded.contains("STALE"),
+        "no marker on a lapsed hold: {stranded}"
+    );
+    assert!(
+        stranded.contains("host.invalid"),
+        "the marker must name the machine: {stranded}"
+    );
+    let live = list_line(&db, "QP-2");
+    assert!(
+        !live.contains("STALE"),
+        "a live hold must not be marked: {live}"
+    );
+    assert_eq!(
+        stranded.matches('\t').count(),
+        live.matches('\t').count(),
+        "the marker became a column; `show`'s header mirrors these:\n{stranded}\n{live}"
+    );
+    assert_eq!(
+        stranded.matches('\t').count(),
+        4,
+        "list is a five-column TSV: {stranded}"
+    );
+
+    // `list --json`, spelled as `wave --json` spells it.
+    let row = list_row(&db, "QP-1");
+    assert_eq!(row["stale"], true);
+    assert_eq!(row["hold"]["agent"], "dead");
+    assert_eq!(row["hold"]["host"], "host.invalid");
+    assert_eq!(list_row(&db, "QP-2")["stale"], false);
+
+    // The board payload the dashboard reads, same spelling again.
+    let t1 = report_task(&db, "QP-1");
+    assert_eq!(
+        t1["stale"], true,
+        "a stranded ticket is invisible on the board: {t1}"
+    );
+    assert_eq!(t1["hold"]["agent"], "dead");
+    assert!(t1["hold"]["expires_at"].is_string());
+    let t2 = report_task(&db, "QP-2");
+    assert_eq!(t2["stale"], false, "a live hold must not be marked: {t2}");
+}
+
+#[test]
+fn a_hold_with_no_stated_expiry_is_never_stale_in_list_or_the_board_payload() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "old claim"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+
+    // The shape every open claim written before leases existed is in. Absent is
+    // not expired, and reading it as expired is the easy mistake: it would hand
+    // `reclaim` every hold in a store that predates the columns.
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE assignment SET lease_seconds = NULL, last_contact = NULL
+              WHERE completed_at IS NULL",
+            [],
+        )
+        .unwrap();
+    }
+
+    let line = list_line(&db, "QP-1");
+    assert!(
+        !line.contains("STALE"),
+        "a claim promised no expiry was marked: {line}"
+    );
+    assert_eq!(list_row(&db, "QP-1")["stale"], false);
+    let t = report_task(&db, "QP-1");
+    assert_eq!(
+        t["stale"], false,
+        "a claim promised no expiry was marked: {t}"
+    );
+    assert!(
+        t["hold"]["expires_at"].is_null(),
+        "an expiry was invented: {t}"
+    );
+}
+
+/// A page of held tickets costs one liveness query, not one per row.
+///
+/// The statement count is not observable from outside the process, so what is
+/// asserted here is the behaviour a bulk query has to have: one invocation
+/// answers correctly for every row of a page, with the aged ones marked and the
+/// rest not. The single `lease::holds_by_task` call in each of `list::exec` and
+/// `report::collect_json` is the structural half.
+#[test]
+fn a_page_of_holds_is_answered_by_one_listing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    const N: i64 = 24;
+    for i in 1..=N {
+        qp(&db).args(["add", &format!("t{i}")]).assert().success();
+        let t = format!("QP-{i}");
+        qp(&db).args(["assign", &t, "--to", "w"]).assert().success();
+        qp(&db)
+            .args(["claim", &t, "--as", "w", "--for", "45m"])
+            .assert()
+            .success();
+        // Every other one has gone quiet past its lease.
+        if i % 2 == 0 {
+            age_hold(&db, i, 46 * 60);
+        }
+    }
+
+    let a = qp(&db).args(["list", "--json"]).assert().success();
+    let rows = json_stdout(&a);
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len() as i64, N);
+    for r in rows {
+        let id: i64 = r["display_id"]
+            .as_str()
+            .unwrap()
+            .trim_start_matches("QP-")
+            .parse()
+            .unwrap();
+        assert_eq!(
+            r["stale"],
+            id % 2 == 0,
+            "wrong liveness for {}",
+            r["display_id"]
+        );
+    }
+
+    let a = qp(&db).args(["report", "--json"]).assert().success();
+    let payload = json_stdout(&a);
+    let tasks = payload["tasks"].as_array().unwrap();
+    assert_eq!(tasks.len() as i64, N);
+    let stale = tasks.iter().filter(|t| t["stale"] == true).count();
+    assert_eq!(
+        stale as i64,
+        N / 2,
+        "the board payload disagrees with `list`"
+    );
+}

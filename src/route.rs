@@ -70,6 +70,14 @@ pub(crate) struct Ctx {
     pub db_path: PathBuf,
     pub server: Option<String>,
     pub project: Option<String>,
+    /// The project identity this caller asserts the front door had better serve.
+    ///
+    /// `None` on a machine with no store, and on a caller naming a project its
+    /// own store is not — see `main::asserted_project_key`. It is carried here
+    /// rather than recomputed per verb because it is a property of the
+    /// invocation, like `server` and `project`, and reading it twice would be
+    /// two peeks at the store for one request.
+    pub project_key: Option<String>,
 }
 
 /// Runs one served verb, locally or through the front door, and prints it.
@@ -94,7 +102,13 @@ pub(crate) fn fetch<S: Served>(ctx: &Ctx, a: S) -> Result<S::Out> {
     match &ctx.server {
         Some(base) => {
             let body = serde_json::to_value(&a)?;
-            let v = crate::client::call(base, S::VERB, ctx.project.as_deref(), body)?;
+            let v = crate::client::call(
+                base,
+                S::VERB,
+                ctx.project.as_deref(),
+                ctx.project_key.as_deref(),
+                body,
+            )?;
             let mut out: S::Out = serde_json::from_value(v).map_err(|e| {
                 anyhow::anyhow!(
                     "`{}` response is not a payload this client understands: {e}",

@@ -175,6 +175,7 @@ while `unavailable` means none did.
 `/healthz` sits outside the verb namespace on purpose, so a project named
 `healthz` can never collide with it.
 
+<<<<<<< HEAD
 ## Every response names the process that wrote it
 
 `write_response` attaches `wire::VERSION_HEADER` alongside the content type, on
@@ -193,3 +194,48 @@ the README's table calls a lost race that a retry may win, so a reverse proxy
 mounted at a subpath it does not strip produced an infinite retry loop against a
 base url that could never work. `not_found` is about entities in a store; a
 routing failure is about the request.
+=======
+It also carries `project_keys`, a name-to-`project_key` map, added beside
+`projects` rather than folded into it: `projects` is what `remote::probe_server`
+reads to decide this is a quipu front door at all, so turning that list into
+objects would make every existing consumer wrong at once. It costs nothing to
+answer — the keys were read at startup with everything else — and it is what
+`qp remote doctor` needs, because a name comparison passes against a front door
+serving a different project of the same name.
+
+## A name is not an identity
+
+A project **name** is machine-local by construction: a registry maps a name to a
+path *per machine*. So two hosts each serving their own `alpha` is the ordinary
+case rather than an exotic one, and on one machine it cannot even be reproduced
+— the registry refuses two projects of one name, which is exactly why this gap
+survived every same-host test.
+
+Before the key crossed the socket, pointing a client at the wrong host's front
+door took work from a project the caller had never seen and reported exit 0. So
+`State::store` takes the caller's asserted key alongside the name, and
+`check_identity` is the served twin of `db::init`'s `project_key_mismatch`.
+
+`project_key` and not `project_uuid`: the key is the value a set of stores
+*share*, which is what "the same project on another machine" means. The uuid is
+per-store, so comparing uuids would fail the correct case — one project, two
+machines, two stores — every single time.
+
+The comparison is a string compare against a value read once, from the same
+connection that proved the store openable before the listener bound. An identity
+fixed before the first accept cannot drift, so there is no per-request query and
+nothing to invalidate.
+
+A mismatch is `no_store` — exit 6 — and deliberately neither `not_found` nor
+`conflict`. Exit 2 means "look again, it may change"; this never changes,
+because the store set is fixed before the listener binds and no request can add
+to it. That is the same thing exit 6 already says for a project this process
+never opened. The local twin is a `conflict` because there it genuinely is a
+state conflict — `qp init` refusing to re-home a store — while here nothing is
+being changed by anyone.
+
+A caller that asserts no key is not checked, and that is not a hole this side
+can close: see `main::asserted_project_key` for which callers assert and why a
+client with no store of its own cannot.
+
+>>>>>>> origin/main
