@@ -2,9 +2,11 @@
 //!
 #![doc = include_str!("../../docs/modules/report.md")]
 
+use crate::outcome::Outcome;
 use crate::{db, id, store};
 use anyhow::Result;
 use clap::Args;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::io::Write;
@@ -12,31 +14,83 @@ use time::{
     format_description::well_known::Rfc3339, macros::format_description, OffsetDateTime, UtcOffset,
 };
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReportArgs {
     /// Filter events to this window. Accepts `24h`, `7d`, or RFC3339 date (e.g. `2026-05-20`).
     #[arg(long)]
+    #[serde(default)]
     pub since: Option<String>,
     /// Scope to a wave: restrict to the given task + its transitive dep subtree.
     #[arg(long)]
+    #[serde(default)]
     pub wave: Option<String>,
     /// Emit JSON. This is the only supported output format now; the flag is
     /// accepted for backward compatibility (existing scripts pass it) but has
     /// no effect — report always emits JSON.
     #[arg(long)]
+    #[serde(skip)]
     pub json: bool,
     /// Write to this path instead of stdout.
     #[arg(long)]
+    #[serde(skip)]
     pub output: Option<std::path::PathBuf>,
     /// Single-ticket mode: emit the full detail (incl. parents/children/uncapped events) for one ticket.
     #[arg(long, conflicts_with = "all_tickets")]
+    #[serde(default)]
     pub ticket: Option<String>,
     /// Bulk mode: emit a JSON array of per-ticket detail objects, scoped by `--since`/`--wave`.
     #[arg(long = "all-tickets", conflicts_with = "ticket")]
+    #[serde(default)]
     pub all_tickets: bool,
 }
 
-pub fn run(db_path: &std::path::Path, a: ReportArgs) -> Result<()> {
+impl crate::route::Served for ReportArgs {
+    const VERB: &'static str = "report";
+    type Out = ReportView;
+    fn wants_json(&self) -> bool {
+        self.json
+    }
+    fn exec(db_path: &std::path::Path, a: Self) -> Result<Self::Out> {
+        exec(db_path, a)
+    }
+}
+
+/// The snapshot, in whichever of the three shapes the flags selected.
+///
+/// `human()` is the JSON, because `report` has no prose form and never had one:
+/// `--json` is documented as accepted-and-ignored. That makes the two `emit`
+/// branches byte-identical here, which is the honest encoding of "this command
+/// emits JSON".
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct ReportView(Value);
+
+impl Outcome for ReportView {
+    fn human(&self) -> String {
+        serde_json::to_string(&self.0).unwrap_or_default()
+    }
+}
+
+/// Fetches the snapshot, then writes it where the *caller* asked.
+///
+/// `--output` names a path on this machine's disk, so it is `#[serde(skip)]` and
+/// the write happens client-side: served, it would drop the batch on the
+/// server's filesystem and hand the caller an empty directory. That is the same
+/// test the wire contract applies to `export` and `init` — ask whose disk the
+/// path is on — and it is why `report` calls `route::fetch` and does its own
+/// output rather than going through `route::dispatch`.
+pub fn run(ctx: &crate::route::Ctx, a: ReportArgs) -> Result<()> {
+    let (json, output) = (a.json, a.output.clone());
+    let view = crate::route::fetch::<ReportArgs>(ctx, a)?;
+    match output {
+        Some(path) => write_output(Some(&path), &view.human()),
+        None => crate::outcome::emit(json, &view),
+    }
+}
+
+fn exec(db_path: &std::path::Path, a: ReportArgs) -> Result<ReportView> {
     let conn = db::open(db_path)?;
     let since_iso = a.since.as_deref().map(parse_since).transpose()?;
     let subtree = a
@@ -49,9 +103,7 @@ pub fn run(db_path: &std::path::Path, a: ReportArgs) -> Result<()> {
     if let Some(tref) = a.ticket.as_deref() {
         let resolved = id::resolve_full(&conn, tref)?;
         let detail = collect_ticket(&conn, resolved.id)?;
-        let body = serde_json::to_string(&ticket_detail_json(&detail))?;
-        write_output(a.output.as_deref(), &body)?;
-        return Ok(());
+        return Ok(ReportView(ticket_detail_json(&detail)));
     }
 
     // Bulk mode: array of per-ticket detail, scoped.
@@ -62,16 +114,15 @@ pub fn run(db_path: &std::path::Path, a: ReportArgs) -> Result<()> {
             let detail = collect_ticket(&conn, tid)?;
             arr.push(ticket_detail_json(&detail));
         }
-        let body = serde_json::to_string(&Value::Array(arr))?;
-        write_output(a.output.as_deref(), &body)?;
-        return Ok(());
+        return Ok(ReportView(Value::Array(arr)));
     }
 
     // Default: board payload.
-    let payload = collect_json(&conn, since_iso.as_deref(), subtree.as_ref())?;
-    let body = serde_json::to_string(&payload)?;
-    write_output(a.output.as_deref(), &body)?;
-    Ok(())
+    Ok(ReportView(collect_json(
+        &conn,
+        since_iso.as_deref(),
+        subtree.as_ref(),
+    )?))
 }
 
 fn write_output(path: Option<&std::path::Path>, body: &str) -> Result<()> {
@@ -327,14 +378,7 @@ fn collect_json(
                 _ => continue,
             }
         }
-        events.push(serde_json::json!({
-            "id": e.id,
-            "task": e.task,
-            "ts": e.ts,
-            "kind": e.kind,
-            "agent_id": e.agent,
-            "payload": e.payload,
-        }));
+        events.push(crate::cmd::render::event_json(&e));
         if events.len() >= 200 {
             break;
         }

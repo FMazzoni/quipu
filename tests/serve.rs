@@ -495,10 +495,17 @@ fn an_unserved_verb_says_it_ran_locally() {
     let db = store(tmp.path());
     let srv = Server::start(&store(&tmp.path().join("served")));
 
+    // `export` rather than a read verb: the wire contract puts it permanently
+    // in the local-only bucket — `--out` names a directory on the *caller's*
+    // disk — so this test cannot be invalidated by the next fan-out slice the
+    // way it was when `list` became served.
+    let out_dir = tmp.path().join("batches");
     let out = std::process::Command::new(qp_bin())
         .env("QP_SERVER", &srv.url)
         .env("QP_DB", &db)
-        .args(["list", "--json"])
+        .args(["export", "--out"])
+        .arg(&out_dir)
+        .arg("--json")
         .output()
         .unwrap();
     assert!(out.status.success());

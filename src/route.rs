@@ -32,6 +32,17 @@ pub(crate) trait Served: clap::Args + Serialize + DeserializeOwned + Sized {
     /// This is the old `run` minus the `emit`, and nothing in it knows about
     /// HTTP.
     fn exec(db_path: &Path, a: Self) -> Result<Self::Out>;
+    /// Puts the caller's rendering options back onto a payload from the wire.
+    ///
+    /// Only `#[serde(skip)]` fields may be touched: the server never sees them,
+    /// so a rendering flag never enters the protocol. `--with-description` and
+    /// `--show-tags` change how many lines `human()` prints and nothing about
+    /// the data, and a response that differed by them would make the body
+    /// depend on how the caller's tty was going to render it — the same
+    /// argument that keeps `--json` off the wire. Empty for every verb whose
+    /// human view has no options; the local path never needs it, because
+    /// `exec` still has the args in hand.
+    fn restore_view(&self, _out: &mut Self::Out) {}
 }
 
 /// What the server does with one request body, with the verb's types erased.
@@ -68,20 +79,33 @@ pub(crate) struct Ctx {
 /// never the prose. See the wire contract's "Human output ownership".
 pub(crate) fn dispatch<S: Served>(ctx: &Ctx, a: S) -> Result<()> {
     let json = a.wants_json();
-    let out: S::Out = match &ctx.server {
+    let out = fetch(ctx, a)?;
+    emit(json, &out)
+}
+
+/// Produces one payload, locally or through the front door, and prints nothing.
+///
+/// Split out of `dispatch` for the one verb whose result does not go to stdout:
+/// `report --output <PATH>` names a file on the *caller's* disk, so the write
+/// has to happen client-side however the payload was obtained. Exactly one
+/// round trip either way — the whole read side rests on that, and the shape of
+/// this function is why it is structural rather than a rule to remember.
+pub(crate) fn fetch<S: Served>(ctx: &Ctx, a: S) -> Result<S::Out> {
+    match &ctx.server {
         Some(base) => {
             let body = serde_json::to_value(&a)?;
             let v = crate::client::call(base, S::VERB, ctx.project.as_deref(), body)?;
-            serde_json::from_value(v).map_err(|e| {
+            let mut out: S::Out = serde_json::from_value(v).map_err(|e| {
                 anyhow::anyhow!(
                     "`{}` response is not a payload this client understands: {e}",
                     S::VERB
                 )
-            })?
+            })?;
+            a.restore_view(&mut out);
+            Ok(out)
         }
-        None => S::exec(&ctx.db_path, a)?,
-    };
-    emit(json, &out)
+        None => S::exec(&ctx.db_path, a),
+    }
 }
 
 /// Declares the served verbs once, for the server table and the client gate.
@@ -92,7 +116,7 @@ pub(crate) fn dispatch<S: Served>(ctx: &Ctx, a: S) -> Result<()> {
 /// inserting adjacent single lines into one 30-arm match is the worst merge
 /// shape there is, and it has already happened in this repository.
 macro_rules! served {
-    ($($variant:ident => $args:path),+ $(,)?) => {
+    ($($variant:ident $(if $guard:path)? => $args:path),+ $(,)?) => {
         /// Every verb the front door answers, in one table.
         pub(crate) const ROUTES: &[Route] = &[$(
             Route { verb: <$args as Served>::VERB, handler: handle::<$args> },
@@ -105,8 +129,21 @@ macro_rules! served {
         /// therefore has to name exactly the set `real_main` actually
         /// dispatches remotely, which is why it is generated from this list
         /// rather than written out beside it.
+        ///
+        /// The optional `if <path>` guard is for a subcommand group the front
+        /// door answers only part of: `qp relation list` is served while
+        /// `relation add`/`rm` are not, and one `Cmd` variant carries all
+        /// three. Without the guard this would claim `--server qp relation add`
+        /// goes over the wire, and `real_main` would then run it against the
+        /// local store with the attach check already skipped — reading and
+        /// writing the wrong file, silently, which is the exact failure the
+        /// check exists to prevent.
         pub(crate) fn is_served(cmd: &crate::Cmd) -> bool {
-            matches!(cmd, $(crate::Cmd::$variant(_))|+)
+            #[allow(unused_variables)]
+            match cmd {
+                $( crate::Cmd::$variant(a) => true $( && $guard(a) )?, )+
+                _ => false,
+            }
         }
     };
 }
@@ -116,6 +153,15 @@ served! {
     Assign => crate::cmd::assign::AssignArgs,
     Claim => crate::cmd::claim::ClaimArgs,
     Complete => crate::cmd::complete::CompleteArgs,
+    List => crate::cmd::list::ListArgs,
+    Show => crate::cmd::show::ShowArgs,
+    Tree => crate::cmd::tree::TreeArgs,
+    Timeline => crate::cmd::timeline::TimelineArgs,
+    Wave => crate::cmd::wave::WaveArgs,
+    Status => crate::cmd::status::StatusArgs,
+    Report => crate::cmd::report::ReportArgs,
+    Decisions => crate::cmd::decisions::DecisionsArgs,
+    Relation if crate::cmd::relation::is_list => crate::cmd::relation::RelationListArgs,
 }
 
 /// The handler for a verb, or `None` if the front door does not answer it.
@@ -135,7 +181,24 @@ mod tests {
         verbs.sort_unstable();
         verbs.dedup();
         assert_eq!(verbs.len(), n, "two routes share a verb");
-        assert_eq!(verbs, ["add", "assign", "claim", "complete"]);
+        assert_eq!(
+            verbs,
+            [
+                "add",
+                "assign",
+                "claim",
+                "complete",
+                "decisions",
+                "list",
+                "relation/list",
+                "report",
+                "show",
+                "status",
+                "timeline",
+                "tree",
+                "wave",
+            ]
+        );
         for v in &verbs {
             assert!(lookup(v).is_some(), "{v} is in ROUTES but not resolvable");
         }

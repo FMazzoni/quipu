@@ -7,6 +7,7 @@ use crate::{db, id};
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Args, Debug)]
 pub struct RelationArgs {
@@ -30,11 +31,114 @@ pub enum RelOp {
         #[arg(long)]
         json: bool,
     },
-    List {
-        task: String,
-        #[arg(long)]
-        json: bool,
-    },
+    List(RelationListArgs),
+}
+
+/// `qp relation list <task>` — the one relation op the front door answers.
+///
+/// A struct rather than an inline variant because `route::Served` is bound by
+/// `clap::Args`, which an enum variant is not. The CLI surface is unchanged.
+#[derive(Args, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelationListArgs {
+    pub task: String,
+    #[arg(long)]
+    #[serde(skip)]
+    pub json: bool,
+}
+
+/// Whether this `relation` invocation is the served `list` op.
+///
+/// One `Cmd` variant carries all three ops and only this one goes over the
+/// wire, so `is_served` needs the distinction: without it a `--server relation
+/// add` would skip the attach check and then write the *local* store.
+pub fn is_list(a: &RelationArgs) -> bool {
+    matches!(a.op, RelOp::List(_))
+}
+
+impl crate::route::Served for RelationListArgs {
+    /// Nested under the group it belongs to.
+    ///
+    /// A flattened name could collide with a future top-level `list`-shaped
+    /// verb; this one cannot.
+    const VERB: &'static str = "relation/list";
+    type Out = RelationList;
+    fn wants_json(&self) -> bool {
+        self.json
+    }
+    fn exec(db_path: &std::path::Path, a: Self) -> Result<Self::Out> {
+        exec_list(db_path, a)
+    }
+}
+
+/// The two directions of a task's relation edges, in one object.
+///
+/// One endpoint, not two: `incoming` and `outgoing` are the same question asked
+/// from both ends and every caller wants both — `qp relation list QP-1` after a
+/// `supersedes` link is exactly the audit trail that has to work from either
+/// side.
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct RelationList(Value);
+
+impl Outcome for RelationList {
+    fn human(&self) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        for o in self.0["outgoing"].as_array().into_iter().flatten() {
+            lines.push(format!(
+                "→ {} {}",
+                o["kind"].as_str().unwrap_or(""),
+                o["to"].as_str().unwrap_or("")
+            ));
+        }
+        for i in self.0["incoming"].as_array().into_iter().flatten() {
+            lines.push(format!(
+                "← {} {}",
+                i["kind"].as_str().unwrap_or(""),
+                i["from"].as_str().unwrap_or("")
+            ));
+        }
+        lines.join("\n")
+    }
+}
+
+fn exec_list(db_path: &std::path::Path, a: RelationListArgs) -> Result<RelationList> {
+    let conn = db::open(db_path)?;
+    let task_id = id::resolve(&conn, &a.task)?;
+    let outgoing: Vec<Value> = {
+        let mut s = conn.prepare(
+            "SELECT t.display_id, r.kind FROM relation r
+               JOIN task t ON t.id = r.to_task_id
+              WHERE r.from_task_id = ? ORDER BY r.kind, t.id",
+        )?;
+        let x = s
+            .query_map([task_id], |r| {
+                Ok(serde_json::json!({
+                    "to": r.get::<_, String>(0)?, "kind": r.get::<_, String>(1)?
+                }))
+            })?
+            .collect::<Result<_, _>>()?;
+        x
+    };
+    let incoming: Vec<Value> = {
+        let mut s = conn.prepare(
+            "SELECT t.display_id, r.kind FROM relation r
+               JOIN task t ON t.id = r.from_task_id
+              WHERE r.to_task_id = ? ORDER BY r.kind, t.id",
+        )?;
+        let x = s
+            .query_map([task_id], |r| {
+                Ok(serde_json::json!({
+                    "from": r.get::<_, String>(0)?, "kind": r.get::<_, String>(1)?
+                }))
+            })?
+            .collect::<Result<_, _>>()?;
+        x
+    };
+    Ok(RelationList(
+        serde_json::json!({"outgoing": outgoing, "incoming": incoming}),
+    ))
 }
 
 impl RelationArgs {
@@ -43,7 +147,8 @@ impl RelationArgs {
     /// Lets `main`'s error path match the stream format the success path uses.
     pub fn json(&self) -> bool {
         match &self.op {
-            RelOp::Add { json, .. } | RelOp::Rm { json, .. } | RelOp::List { json, .. } => *json,
+            RelOp::Add { json, .. } | RelOp::Rm { json, .. } => *json,
+            RelOp::List(a) => a.json,
         }
     }
 }
@@ -174,57 +279,13 @@ pub fn run(db_path: &std::path::Path, a: RelationArgs) -> Result<()> {
                 },
             )?;
         }
-        RelOp::List { task, json } => {
-            let task_id = id::resolve(&conn, &task)?;
-            let outgoing: Vec<serde_json::Value> = {
-                let mut s = conn.prepare(
-                    "SELECT t.display_id, r.kind FROM relation r
-                       JOIN task t ON t.id = r.to_task_id
-                      WHERE r.from_task_id = ? ORDER BY r.kind, t.id",
-                )?;
-                let x = s
-                    .query_map([task_id], |r| {
-                        Ok(serde_json::json!({
-                            "to": r.get::<_, String>(0)?, "kind": r.get::<_, String>(1)?
-                        }))
-                    })?
-                    .collect::<Result<_, _>>()?;
-                x
-            };
-            let incoming: Vec<serde_json::Value> = {
-                let mut s = conn.prepare(
-                    "SELECT t.display_id, r.kind FROM relation r
-                       JOIN task t ON t.id = r.from_task_id
-                      WHERE r.to_task_id = ? ORDER BY r.kind, t.id",
-                )?;
-                let x = s
-                    .query_map([task_id], |r| {
-                        Ok(serde_json::json!({
-                            "from": r.get::<_, String>(0)?, "kind": r.get::<_, String>(1)?
-                        }))
-                    })?
-                    .collect::<Result<_, _>>()?;
-                x
-            };
-            let bundle = serde_json::json!({"outgoing": outgoing, "incoming": incoming});
-            if json {
-                println!("{}", serde_json::to_string(&bundle)?);
-            } else {
-                for o in &outgoing {
-                    println!(
-                        "→ {} {}",
-                        o["kind"].as_str().unwrap(),
-                        o["to"].as_str().unwrap()
-                    );
-                }
-                for i in &incoming {
-                    println!(
-                        "← {} {}",
-                        i["kind"].as_str().unwrap(),
-                        i["from"].as_str().unwrap()
-                    );
-                }
-            }
+        // Served, and dispatched from `real_main` before this function is
+        // reached. The arm stays so the match is exhaustive and so a reader
+        // finding `relation list` here is sent to the one implementation.
+        RelOp::List(a) => {
+            let json = a.json;
+            let out = exec_list(db_path, a)?;
+            emit(json, &out)?;
         }
     }
     Ok(())

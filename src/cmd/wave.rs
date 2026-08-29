@@ -2,20 +2,86 @@
 //!
 #![doc = include_str!("../../docs/modules/wave.md")]
 
+use crate::outcome::Outcome;
 use crate::{db, lease, store};
 use anyhow::Result;
 use clap::Args;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WaveArgs {
     #[arg(long)]
+    #[serde(skip)]
     pub json: bool,
+}
+
+impl crate::route::Served for WaveArgs {
+    const VERB: &'static str = "wave";
+    type Out = WaveView;
+    fn wants_json(&self) -> bool {
+        self.json
+    }
+    fn exec(db_path: &std::path::Path, a: Self) -> Result<Self::Out> {
+        exec(db_path, a)
+    }
 }
 
 /// The four state groups shown by `qp wave`, in display order.
 const STATES: &[&str] = &["ready", "assigned", "running", "pending"];
 
-pub fn run(db_path: &std::path::Path, a: WaveArgs) -> Result<()> {
+/// The four groups, keyed by state, each already carrying its hold.
+///
+/// One object rather than four endpoints: the whole view is four filtered task
+/// queries plus their last events and holds, and splitting it would make the
+/// most-polled orchestrator view the most expensive one.
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct WaveView(Value);
+
+impl Outcome for WaveView {
+    fn human(&self) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        for &label in STATES {
+            let arr = self.0.get(label).and_then(Value::as_array);
+            let Some(arr) = arr.filter(|a| !a.is_empty()) else {
+                continue;
+            };
+            lines.push(format!("## {label}"));
+            for r in arr {
+                // The stale marker trails the title rather than taking a column:
+                // the four columns here are load-bearing elsewhere, and a hold
+                // that has gone quiet is worth a sentence, not a flag.
+                let stale = if r["stale"].as_bool().unwrap_or(false) {
+                    let host = r["hold"]["host"].as_str().unwrap_or("unknown host");
+                    format!(
+                        "   [STALE — quiet since {}, on {}]",
+                        r["hold"]["last_contact"].as_str().unwrap_or("?"),
+                        host
+                    )
+                } else {
+                    String::new()
+                };
+                lines.push(format!(
+                    "  {:>7}  {:<14}  {:<10}  {}{}",
+                    r["display_id"].as_str().unwrap_or(""),
+                    r["agent"].as_str().unwrap_or("-"),
+                    r["last_kind"].as_str().unwrap_or("-"),
+                    r["title"].as_str().unwrap_or(""),
+                    stale
+                ));
+            }
+        }
+        if lines.is_empty() {
+            return "nothing in flight — run `qp status` for full state, or `qp list --state done` to see what shipped".to_string();
+        }
+        lines.join("\n")
+    }
+}
+
+pub fn exec(db_path: &std::path::Path, _a: WaveArgs) -> Result<WaveView> {
     let conn = db::open(db_path)?;
     let mut out = serde_json::Map::new();
     for &label in STATES {
@@ -48,7 +114,7 @@ pub fn run(db_path: &std::path::Path, a: WaveArgs) -> Result<()> {
         // A stranded ticket has to be legible in the view an orchestrator
         // already reads, or finding it needs a command nobody thinks to run.
         let holds = lease::holds_by_task(&conn, &ids)?;
-        let arr: Vec<serde_json::Value> = rows
+        let arr: Vec<Value> = rows
             .iter()
             .map(|r| {
                 let ev = last_event.get(&r.id);
@@ -65,47 +131,7 @@ pub fn run(db_path: &std::path::Path, a: WaveArgs) -> Result<()> {
                 })
             })
             .collect();
-        out.insert(label.to_string(), serde_json::Value::Array(arr));
+        out.insert(label.to_string(), Value::Array(arr));
     }
-    let v = serde_json::Value::Object(out);
-    if a.json {
-        println!("{}", serde_json::to_string(&v)?);
-    } else {
-        let mut any = false;
-        for &label in STATES {
-            let arr = v[label].as_array().unwrap();
-            if arr.is_empty() {
-                continue;
-            }
-            any = true;
-            println!("## {label}");
-            for r in arr {
-                // The stale marker trails the title rather than taking a column:
-                // the four columns here are load-bearing elsewhere, and a hold
-                // that has gone quiet is worth a sentence, not a flag.
-                let stale = if r["stale"].as_bool().unwrap_or(false) {
-                    let host = r["hold"]["host"].as_str().unwrap_or("unknown host");
-                    format!(
-                        "   [STALE — quiet since {}, on {}]",
-                        r["hold"]["last_contact"].as_str().unwrap_or("?"),
-                        host
-                    )
-                } else {
-                    String::new()
-                };
-                println!(
-                    "  {:>7}  {:<14}  {:<10}  {}{}",
-                    r["display_id"].as_str().unwrap_or(""),
-                    r["agent"].as_str().unwrap_or("-"),
-                    r["last_kind"].as_str().unwrap_or("-"),
-                    r["title"].as_str().unwrap_or(""),
-                    stale
-                );
-            }
-        }
-        if !any {
-            println!("nothing in flight — run `qp status` for full state, or `qp list --state done` to see what shipped");
-        }
-    }
-    Ok(())
+    Ok(WaveView(Value::Object(out)))
 }

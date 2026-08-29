@@ -20,7 +20,13 @@ const SCHEMA: &str = include_str!("schema.sql");
 /// clap's default `ValueEnum` rendering is kebab-case, which for these
 /// single-word variants is identical to `as_str()`'s lowercase spelling;
 /// `state_enum_values_match_as_str` in the test module below pins that down.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, clap::ValueEnum)]
+/// The wire spelling is `as_str()`'s, pinned by `state_enum_values_match_as_str`:
+/// `--state` is a served filter, so the same word has to name the same state in
+/// argv, in the `state` column, and in a request body.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, clap::ValueEnum, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum State {
     Pending,
     Ready,

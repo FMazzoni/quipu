@@ -2,28 +2,102 @@
 //!
 #![doc = include_str!("../../docs/modules/list.md")]
 
+use crate::outcome::Outcome;
 use crate::{db, store};
 use anyhow::Result;
 use clap::Args;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListArgs {
     /// Glob pattern (e.g. claude-code:*)
     #[arg(long = "assigned-to")]
+    #[serde(default)]
     pub assigned_to: Option<String>,
     #[arg(long = "state")]
+    #[serde(default)]
     pub state: Option<db::State>,
     /// Glob pattern (e.g. commit:5c5b30*); repeatable, all must match
     #[arg(long)]
+    #[serde(default)]
     pub tag: Vec<String>,
     #[arg(long)]
+    #[serde(skip)]
     pub json: bool,
     /// Print each task's description on indented continuation lines.
     #[arg(long = "with-description")]
+    #[serde(skip)]
     pub with_description: bool,
 }
 
-pub fn run(db_path: &std::path::Path, a: ListArgs) -> Result<()> {
+impl crate::route::Served for ListArgs {
+    const VERB: &'static str = "list";
+    type Out = ListView;
+    fn wants_json(&self) -> bool {
+        self.json
+    }
+    fn exec(db_path: &std::path::Path, a: Self) -> Result<Self::Out> {
+        exec(db_path, a)
+    }
+    fn restore_view(&self, out: &mut Self::Out) {
+        out.with_description = self.with_description;
+    }
+}
+
+/// The rows `qp list` renders, exactly as `--json` has always emitted them.
+///
+/// `#[serde(transparent)]` is load-bearing: the wire body is the bare array the
+/// CLI already printed, so a consumer that piped `qp list --json` into `jq`
+/// reads the same bytes from the socket. `with_description` is skipped because
+/// it changes how many lines `human` prints and nothing about the data.
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct ListView {
+    rows: Value,
+    #[serde(skip)]
+    with_description: bool,
+}
+
+impl Outcome for ListView {
+    fn human(&self) -> String {
+        let mut out = String::from("ID\tSTATE\tAGENT\tTAGS\tTITLE");
+        for r in self.rows.as_array().into_iter().flatten() {
+            out.push('\n');
+            out.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}",
+                r["display_id"].as_str().unwrap_or(""),
+                r["state"].as_str().unwrap_or(""),
+                r["agent"].as_str().unwrap_or("-"),
+                r["tags"]
+                    .as_array()
+                    .map(|a| a
+                        .iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(","))
+                    .unwrap_or_default(),
+                r["title"].as_str().unwrap_or("")
+            ));
+            if self.with_description {
+                if let Some(d) = r
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
+                    for line in crate::cmd::show::wrap_text(d, 80).iter().take(3) {
+                        out.push_str(&format!("\n    {line}"));
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+pub fn exec(db_path: &std::path::Path, a: ListArgs) -> Result<ListView> {
     let conn = db::open(db_path)?;
     let filter = store::TaskFilter {
         state: a.state.map(|s| s.as_str()),
@@ -51,39 +125,8 @@ pub fn run(db_path: &std::path::Path, a: ListArgs) -> Result<()> {
         });
         out.push(obj);
     }
-    if a.json {
-        println!("{}", serde_json::to_string(&out)?);
-    } else {
-        println!("ID\tSTATE\tAGENT\tTAGS\tTITLE");
-        for r in &out {
-            println!(
-                "{}\t{}\t{}\t{}\t{}",
-                r["display_id"].as_str().unwrap_or(""),
-                r["state"].as_str().unwrap_or(""),
-                r["agent"].as_str().unwrap_or("-"),
-                r["tags"]
-                    .as_array()
-                    .map(|a| a
-                        .iter()
-                        .filter_map(|x| x.as_str())
-                        .collect::<Vec<_>>()
-                        .join(","))
-                    .unwrap_or_default(),
-                r["title"].as_str().unwrap_or("")
-            );
-            if a.with_description {
-                if let Some(d) = r
-                    .get("description")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                {
-                    let lines = crate::cmd::show::wrap_text(d, 80);
-                    for line in lines.iter().take(3) {
-                        println!("    {}", line);
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
+    Ok(ListView {
+        rows: Value::Array(out),
+        with_description: a.with_description,
+    })
 }

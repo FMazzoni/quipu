@@ -4,6 +4,30 @@
 
 use serde_json::Value;
 
+/// The wire and `--json` shape of one event-log row.
+///
+/// Three views emit it byte-identically — `timeline`, `decisions`, and
+/// `report`'s board payload — and they did so from three hand-written copies of
+/// this `json!`. That is the divergence risk `store.rs` names for its queries,
+/// one layer up: an added field that reaches two of the three is a shape a
+/// consumer cannot rely on.
+///
+/// Deriving `Serialize` on `store::EventRow` was the alternative and it is
+/// rejected here, not merely unimplemented: a derive emits fields in
+/// declaration order, `json!` builds a `serde_json::Map` that orders them
+/// alphabetically, and switching would rewrite the bytes of every existing
+/// `--json` consumer's input for no gain.
+pub fn event_json(e: &crate::store::EventRow) -> Value {
+    serde_json::json!({
+        "id": e.id,
+        "task": e.task,
+        "ts": e.ts,
+        "kind": e.kind,
+        "agent_id": e.agent,
+        "payload": e.payload,
+    })
+}
+
 /// Render an event payload as a short human-readable line, keyed on `kind`.
 ///
 /// Shared by `timeline` and `show`.

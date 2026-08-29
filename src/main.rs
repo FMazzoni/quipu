@@ -431,26 +431,35 @@ fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
         Cmd::Reclaim(a) => cmd::reclaim::run(&db_path, a),
         Cmd::Log(a) => cmd::log::run(&db_path, a),
         Cmd::Tag(a) => cmd::tag::run(&db_path, a),
-        Cmd::Relation(a) => cmd::relation::run(&db_path, a),
+        Cmd::Relation(a) => match a.op {
+            // The one op of this group the front door answers. The other two
+            // are the write fan-out's, and they stay local until it lands.
+            cmd::relation::RelOp::List(la) => {
+                route::dispatch::<cmd::relation::RelationListArgs>(&ctx, la)
+            }
+            op => cmd::relation::run(&db_path, cmd::relation::RelationArgs { op }),
+        },
         Cmd::Remote(a) => cmd::remote::run(&db_path, a),
         Cmd::Project(a) => cmd::project::run(&db_path, a),
-        Cmd::Timeline(a) => cmd::timeline::run(&db_path, a),
-        Cmd::Decisions(a) => cmd::decisions::run(&db_path, a),
-        Cmd::Tree(a) => cmd::tree::run(&db_path, a),
-        Cmd::Status(a) => cmd::status::run(&db_path, a),
-        Cmd::List(a) => cmd::list::run(&db_path, a),
-        Cmd::Wave(a) => cmd::wave::run(&db_path, a),
+        Cmd::Timeline(a) => route::dispatch::<cmd::timeline::TimelineArgs>(&ctx, a),
+        Cmd::Decisions(a) => route::dispatch::<cmd::decisions::DecisionsArgs>(&ctx, a),
+        Cmd::Tree(a) => route::dispatch::<cmd::tree::TreeArgs>(&ctx, a),
+        Cmd::Status(a) => route::dispatch::<cmd::status::StatusArgs>(&ctx, a),
+        Cmd::List(a) => route::dispatch::<cmd::list::ListArgs>(&ctx, a),
+        Cmd::Wave(a) => route::dispatch::<cmd::wave::WaveArgs>(&ctx, a),
         Cmd::Wait(a) => cmd::wait::run(&db_path, a),
         Cmd::Watch(a) => cmd::watch::run(&db_path, a),
         Cmd::InstallSkills(a) => cmd::install_skills::run(a),
         Cmd::Depends(a) => cmd::depends::run(&db_path, a),
         Cmd::Contains(a) => cmd::contains::run(&db_path, a),
         Cmd::Edit(a) => cmd::edit::run(&db_path, a),
-        Cmd::Report(a) => cmd::report::run(&db_path, a),
+        // Not `dispatch`: `--output` names a file on the caller's disk, so the
+        // write stays client-side however the payload was obtained.
+        Cmd::Report(a) => cmd::report::run(&ctx, a),
         Cmd::Export(a) => cmd::export::run(&db_path, a),
         Cmd::Import(a) => cmd::import::run(&db_path, a),
         Cmd::Sync(a) => cmd::sync::run(&db_path, a),
-        Cmd::Show(a) => cmd::show::run(&db_path, a),
+        Cmd::Show(a) => route::dispatch::<cmd::show::ShowArgs>(&ctx, a),
         Cmd::Ledger(a) => cmd::ledger::run(&db_path, a),
         Cmd::Serve(a) => cmd::serve::run(&db_path, a, &cli.project),
         #[allow(unreachable_patterns)]
