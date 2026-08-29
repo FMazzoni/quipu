@@ -112,10 +112,21 @@ macro_rules! served {
 }
 
 served! {
+    Abandon => crate::cmd::abandon::AbandonArgs,
     Add => crate::cmd::add::AddArgs,
     Assign => crate::cmd::assign::AssignArgs,
+    Block => crate::cmd::block::BlockArgs,
+    Cancel => crate::cmd::cancel::CancelArgs,
     Claim => crate::cmd::claim::ClaimArgs,
     Complete => crate::cmd::complete::CompleteArgs,
+    Contains => crate::cmd::contains::ContainsArgs,
+    Depends => crate::cmd::depends::DependsArgs,
+    Edit => crate::cmd::edit::EditArgs,
+    Log => crate::cmd::log::LogArgs,
+    Reclaim => crate::cmd::reclaim::ReclaimArgs,
+    Relation => crate::cmd::relation::RelationArgs,
+    Tag => crate::cmd::tag::TagArgs,
+    Take => crate::cmd::take::TakeArgs,
 }
 
 /// The handler for a verb, or `None` if the front door does not answer it.
@@ -135,7 +146,15 @@ mod tests {
         verbs.sort_unstable();
         verbs.dedup();
         assert_eq!(verbs.len(), n, "two routes share a verb");
-        assert_eq!(verbs, ["add", "assign", "claim", "complete"]);
+        assert_eq!(
+            verbs,
+            [
+                "abandon", "add", "assign", "block", "cancel", "claim", "complete", "contains",
+                "depends", "edit", "log", "reclaim", "relation", "tag", "take",
+            ],
+            "every write verb the wire contract's triage lists as served, and \
+             nothing else"
+        );
         for v in &verbs {
             assert!(lookup(v).is_some(), "{v} is in ROUTES but not resolvable");
         }

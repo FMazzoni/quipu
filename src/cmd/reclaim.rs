@@ -3,23 +3,38 @@
 #![doc = include_str!("../../docs/modules/reclaim.md")]
 
 use crate::effects::{self, Effect};
-use crate::outcome::{emit, Outcome};
+use crate::outcome::Outcome;
 use crate::{db, id, lease};
 use anyhow::Result;
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReclaimArgs {
     pub task: String,
     #[arg(long)]
+    #[serde(default)]
     pub reason: Option<String>,
     /// Break a hold that is still live. Without it only a stale hold — one
     /// whose holder has been quiet past its lease — can be released.
     #[arg(long)]
+    #[serde(default)]
     pub force: bool,
     #[arg(long)]
+    #[serde(skip)]
     pub json: bool,
+}
+
+impl crate::route::Served for ReclaimArgs {
+    const VERB: &'static str = "reclaim";
+    type Out = Reclaimed;
+    fn wants_json(&self) -> bool {
+        self.json
+    }
+    fn exec(db_path: &std::path::Path, a: Self) -> Result<Self::Out> {
+        exec(db_path, a)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -39,7 +54,7 @@ impl Outcome for Reclaimed {
     }
 }
 
-pub fn run(db_path: &std::path::Path, a: ReclaimArgs) -> Result<()> {
+pub fn exec(db_path: &std::path::Path, a: ReclaimArgs) -> Result<Reclaimed> {
     let mut conn = db::open(db_path)?;
     let resolved = id::resolve_full(&conn, &a.task)?;
     let task_id = resolved.id;
@@ -140,14 +155,11 @@ pub fn run(db_path: &std::path::Path, a: ReclaimArgs) -> Result<()> {
         }
         Ok((resulting, effects))
     })?;
-    emit(
-        a.json,
-        &Reclaimed {
-            display_id: resolved.display_id,
-            state: resulting,
-            reason: a.reason,
-            forced: a.force,
-            effects,
-        },
-    )
+    Ok(Reclaimed {
+        display_id: resolved.display_id,
+        state: resulting,
+        reason: a.reason,
+        forced: a.force,
+        effects,
+    })
 }

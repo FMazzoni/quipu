@@ -3,21 +3,35 @@
 #![doc = include_str!("../../docs/modules/abandon.md")]
 
 use crate::effects::{self, Effect};
-use crate::outcome::{emit, Outcome};
+use crate::outcome::Outcome;
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AbandonArgs {
     pub task: String,
     #[arg(long = "as")]
     pub agent: String,
     #[arg(long)]
+    #[serde(default)]
     pub reason: Option<String>,
     #[arg(long)]
+    #[serde(skip)]
     pub json: bool,
+}
+
+impl crate::route::Served for AbandonArgs {
+    const VERB: &'static str = "abandon";
+    type Out = Abandoned;
+    fn wants_json(&self) -> bool {
+        self.json
+    }
+    fn exec(db_path: &std::path::Path, a: Self) -> Result<Self::Out> {
+        exec(db_path, a)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -36,7 +50,7 @@ impl Outcome for Abandoned {
     }
 }
 
-pub fn run(db_path: &std::path::Path, a: AbandonArgs) -> Result<()> {
+pub fn exec(db_path: &std::path::Path, a: AbandonArgs) -> Result<Abandoned> {
     let mut conn = db::open(db_path)?;
     let resolved = id::resolve_full(&conn, &a.task)?;
     let task_id = resolved.id;
@@ -127,13 +141,10 @@ pub fn run(db_path: &std::path::Path, a: AbandonArgs) -> Result<()> {
         }
         Ok((resulting, effects))
     })?;
-    emit(
-        a.json,
-        &Abandoned {
-            display_id: resolved.display_id,
-            state: resulting,
-            reason: a.reason,
-            effects,
-        },
-    )
+    Ok(Abandoned {
+        display_id: resolved.display_id,
+        state: resulting,
+        reason: a.reason,
+        effects,
+    })
 }
