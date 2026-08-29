@@ -316,12 +316,6 @@ fn only_an_object_store_url_can_be_a_ledger() {
             "`{bad}` was refused without naming the url form: {err}"
         );
     }
-    // The authority is a different url with a different transport, and is
-    // unaffected: claims stay on git, deliberately.
-    qp(&db, &store)
-        .args(["remote", "set", "--authority", "ssh://host.example/a.git"])
-        .assert()
-        .success();
 }
 
 // ---------------------------------------------------------------------------

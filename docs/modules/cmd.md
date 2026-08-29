@@ -57,7 +57,7 @@ task is `running`; otherwise the event carries no agent. See
 [`remote`](remote/index.html), [`export`](export/index.html),
 [`import`](import/index.html), [`sync`](sync/index.html) and
 [`ledger`](ledger/index.html) act on the *store* rather than on a task. `remote`
-writes the optional authority and ledger urls into `meta`; `export` serialises
+writes the optional ledger url into `meta`; `export` serialises
 the event log to disk; `import` replays a ledger back; `sync` is the two of them
 with a wire between; `ledger` reads every project the shared ledger holds into a
 throwaway projection and writes nothing at all. None appears in the table below,

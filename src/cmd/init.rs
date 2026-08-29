@@ -263,7 +263,7 @@ pub fn run(db_path: &Path, a: InitArgs) -> Result<()> {
         prefix: db::display_prefix(&conn)?,
         project_name,
         schema_version: db::SCHEMA_VERSION.to_string(),
-        project_uuid: crate::claimref::project_uuid(&conn)?,
+        project_uuid: crate::project::store_uuid(&conn)?,
         project_key: project::require(&conn)?,
         identity: identity.to_string(),
     };

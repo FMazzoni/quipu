@@ -80,16 +80,17 @@ pub const STATE_READY: &str = State::Ready.as_str();
 /// `main` matches on the variant to pick an exit code and (in `--json` mode) a
 /// `kind` string for the `{"error": {...}}` envelope.
 ///
-/// Six buckets, deliberately — not one variant per failure site. The
+/// Seven buckets, deliberately — not one variant per failure site. The
 /// *variant* is what a calling agent branches retry-vs-give-up on; the *code*
 /// string inside `Conflict`/`Invariant` is for logs and precise skill
 /// authoring, and can grow additively without breaking existing matchers.
 ///
-/// The `--json` envelope carries a seventh `kind`, `internal`, which is not a
+/// The `--json` envelope carries an eighth `kind`, `internal`, which is not a
 /// variant here: `main.rs` emits it for any error that does not downcast to
 /// this type. Adding a variant means updating `kind()`, `exit_code()`,
 /// `README.md`'s envelope table and the exit-code table in
-/// `docs/architecture.md` together.
+/// `docs/architecture.md` together — `kind_and_exit_code_are_a_contract` in
+/// this module's tests is what makes forgetting one of them fail.
 #[derive(Debug, Error)]
 pub enum QuipuError {
     /// Wrong state / lost race — retrying may succeed once state settles. Exit 2.
@@ -129,6 +130,26 @@ pub enum QuipuError {
         message: String,
         path: Option<String>,
     },
+    /// The server front door could not be reached — the store never answered. Exit 7.
+    ///
+    /// A transport failure, not a verdict. Nothing constructs it in the CLI
+    /// today; it exists so the client half of the wire contract has somewhere
+    /// to land that is neither `internal` (exit 1, which the docs call
+    /// unretryable) nor `conflict` (exit 2, which asserts a store looked at
+    /// the request and refused it). A store that was never reached refused
+    /// nothing, and a caller that retries on 2 must not conclude the write
+    /// lost a race.
+    ///
+    /// `allow(dead_code)`: reserved ahead of the code that raises it, on
+    /// purpose. Two slices independently reaching for "the next free exit
+    /// code" is how codes collide, so 7 is claimed and pinned by
+    /// `kind_and_exit_code_are_a_contract` before anything needs it.
+    #[allow(dead_code)]
+    #[error("{message}")]
+    Unavailable {
+        message: String,
+        endpoint: Option<String>,
+    },
 }
 
 impl QuipuError {
@@ -141,21 +162,26 @@ impl QuipuError {
             Self::Invariant { .. } => "invariant",
             Self::InvalidInput(_) => "invalid_input",
             Self::NoStore { .. } => "no_store",
+            Self::Unavailable { .. } => "unavailable",
         }
     }
 
     /// Exit code contract, tabulated in `docs/architecture.md` under "Exit codes".
     ///
     /// 1 is "your input was wrong", 2 is "the store said no — retrying may
-    /// succeed", 6 is "there is no store to say anything". 6 is deliberately
-    /// not 2: a skill that retries on 2 would loop forever against a machine
-    /// that will never grow a store on its own. 3/4 (`wait`) and 5
-    /// (`remote doctor`) are exited directly by those commands and never
+    /// succeed", 6 is "there is no store to say anything", 7 is "nothing was
+    /// asked, because nothing answered". 6 is deliberately not 2: a skill that
+    /// retries on 2 would loop forever against a machine that will never grow a
+    /// store on its own. 7 is deliberately neither 1 nor 2: a transport failure
+    /// is retryable (unlike 1) but asserts nothing about the store's state
+    /// (unlike 2), so a caller must not read it as a lost race. 3/4 (`wait`)
+    /// and 5 (`remote doctor`) are exited directly by those commands and never
     /// reach this table.
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::InvalidInput(_) => 1,
             Self::NoStore { .. } => 6,
+            Self::Unavailable { .. } => 7,
             _ => 2,
         }
     }
@@ -188,6 +214,9 @@ impl QuipuError {
             }),
             Self::NoStore { message, path } => serde_json::json!({
                 "kind": self.kind(), "message": message, "path": path,
+            }),
+            Self::Unavailable { message, endpoint } => serde_json::json!({
+                "kind": self.kind(), "message": message, "endpoint": endpoint,
             }),
         }
     }
@@ -264,6 +293,20 @@ pub fn no_store(msg: impl Into<String>, path: Option<String>) -> anyhow::Error {
     anyhow::Error::from(QuipuError::NoStore {
         message: msg.into(),
         path,
+    })
+}
+
+/// The front door did not answer: no store looked at this request.
+///
+/// `endpoint` is the url that failed, when there is one to name. Kept out of
+/// the message so a caller can branch on it without parsing prose.
+///
+/// Unused outside tests today — see the note on `QuipuError::Unavailable`.
+#[allow(dead_code)]
+pub fn unavailable(msg: impl Into<String>, endpoint: Option<String>) -> anyhow::Error {
+    anyhow::Error::from(QuipuError::Unavailable {
+        message: msg.into(),
+        endpoint,
     })
 }
 
@@ -517,7 +560,14 @@ fn read_project_uuid(path: &Path) -> Result<Option<String>> {
 /// which is what makes the migration inert — every pre-existing open claim
 /// lands with no stated expiry, and a claim with no stated expiry never
 /// expires.
-pub const SCHEMA_VERSION: &str = "7";
+///
+/// "8" adds no DDL at all. It exists to run the one-off `DELETE` in [`migrate`]
+/// that drops the git claim authority's `meta` rows — `remote.authority` and
+/// the `remote.claimsha.*` cache — on a store that was configured before claims
+/// moved back to a single writer. Left in place they are config nothing reads,
+/// that `qp remote show` no longer prints and `qp remote clear` no longer
+/// removes, sitting on the exact key a future kind of remote would reach for.
+pub const SCHEMA_VERSION: &str = "8";
 
 /// How long a writer waits at the door of a contended store.
 ///
@@ -742,6 +792,15 @@ fn migrate(
                 ('display_prefix', ?3), \
                 ('project_key', ?4)",
             rusqlite::params![uuid::Uuid::new_v4().to_string(), SCHEMA_VERSION, p, key],
+        )?;
+        // Version-gated rather than ungated like the backfills below: this is a
+        // WRITE with nothing to heal on a healthy store, and running it on every
+        // open would take the write lock on the read path of every command.
+        // Once per store, on the upgrade that moves the stamp, is enough.
+        conn.execute(
+            "DELETE FROM meta WHERE key = 'remote.authority' \
+             OR key LIKE 'remote.claimsha.%'",
+            [],
         )?;
         // schema_version must advance even on existing stores being migrated forward.
         conn.execute(
@@ -1531,6 +1590,93 @@ impl Movements {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every `kind` string and exit code, pinned.
+    ///
+    /// The taxonomy is a published contract: agents branch on `kind`, shells
+    /// branch on the exit code, and both are tabulated in `README.md` and
+    /// `docs/architecture.md`. A renumbering or a rename is a breaking change
+    /// to every skill in the wild, so it has to be a deliberate edit to this
+    /// list rather than a silent consequence of adding a variant. In
+    /// particular `unavailable` is 7 and must stay 7: 6 was taken while the
+    /// wire contract was still being written, and two people independently
+    /// picking "the next free code" is how they collide.
+    #[test]
+    fn kind_and_exit_code_are_a_contract() {
+        let cases: &[(QuipuError, &str, i32)] = &[
+            (
+                QuipuError::Conflict {
+                    code: "already_claimed",
+                    message: String::new(),
+                    task: None,
+                },
+                "conflict",
+                2,
+            ),
+            (
+                QuipuError::NotOwner {
+                    message: String::new(),
+                    task: None,
+                    owner: None,
+                },
+                "not_owner",
+                2,
+            ),
+            (
+                QuipuError::NotFound {
+                    message: String::new(),
+                    task: None,
+                },
+                "not_found",
+                2,
+            ),
+            (
+                QuipuError::Invariant {
+                    code: "dependency_cycle",
+                    message: String::new(),
+                },
+                "invariant",
+                2,
+            ),
+            (QuipuError::InvalidInput(String::new()), "invalid_input", 1),
+            (
+                QuipuError::NoStore {
+                    message: String::new(),
+                    path: None,
+                },
+                "no_store",
+                6,
+            ),
+            (
+                QuipuError::Unavailable {
+                    message: String::new(),
+                    endpoint: None,
+                },
+                "unavailable",
+                7,
+            ),
+        ];
+        for (err, kind, code) in cases {
+            assert_eq!(&err.kind(), kind);
+            assert_eq!(err.exit_code(), *code);
+            assert_eq!(err.to_json()["kind"], *kind);
+        }
+    }
+
+    /// `unavailable` carries the endpoint as its own field, not inside the message.
+    #[test]
+    fn unavailable_envelope_names_the_endpoint() {
+        let e = unavailable(
+            "front door not answering",
+            Some("https://host.invalid:7777".into()),
+        );
+        let q = e.downcast_ref::<QuipuError>().expect("downcasts");
+        assert_eq!(q.kind(), "unavailable");
+        assert_eq!(q.exit_code(), 7);
+        let body = q.to_json();
+        assert_eq!(body["endpoint"], "https://host.invalid:7777");
+        assert_eq!(body["message"], "front door not answering");
+    }
 
     #[test]
     fn state_str_round_trip() {

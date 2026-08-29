@@ -4,7 +4,7 @@
 
 use crate::effects::{self, Effect};
 use crate::outcome::{emit, Outcome};
-use crate::{claimref, db, id};
+use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
 use serde::{Deserialize, Serialize};
@@ -38,10 +38,6 @@ pub fn run(db_path: &std::path::Path, a: CancelArgs) -> Result<()> {
     let mut conn = db::open(db_path)?;
     let resolved = id::resolve_full(&conn, &a.task)?;
     let task_id = resolved.id;
-    // Resolved before the transaction: the ref is deleted only once the
-    // local release has committed. `None` on a local-only store, which is
-    // what keeps this edge offline and unchanged.
-    let release = claimref::release_for(db_path, &conn, task_id, &resolved.display_id)?;
     let effects = db::with_tx(&mut conn, |tx| {
         // The `state` value being set is a bound `db::State` param (see below); the
         // `NOT IN ('done','cancelled')` guard stays a literal on purpose — multi-state
@@ -90,9 +86,6 @@ pub fn run(db_path: &std::path::Path, a: CancelArgs) -> Result<()> {
         let promoted = db::refresh_ready_logged(tx, None, "cancel")?;
         effects::collateral(tx, &[task_id], "cancel", &db::Movements::promoted(promoted))
     })?;
-    if let Some(r) = &release {
-        r.finish(&conn);
-    }
     emit(
         a.json,
         &Cancelled {

@@ -4,7 +4,7 @@
 
 use crate::effects::{self, Effect};
 use crate::outcome::{emit, Outcome};
-use crate::{claimref, db, id};
+use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
 use serde::{Deserialize, Serialize};
@@ -51,11 +51,6 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
     let mut conn = db::open(db_path)?;
     let resolved = id::resolve_full(&conn, &a.task)?;
     let task_id = resolved.id;
-    // `block` releases the claim like the other four release edges do: it is
-    // `assigned`/`running` -> `pending`, so leaving the ref behind would strand
-    // the ticket as unclaimable with nobody holding it.
-    let release = claimref::release_for(db_path, &conn, task_id, &a.agent)?;
-
     // Empty means "caller expressed no taxonomy", so fall back to the convention.
     // Dedup+sort so the emitted `blocker_tags` matches what actually landed in the
     // table (INSERT OR IGNORE would otherwise let a repeated --tag show up twice).
@@ -240,9 +235,6 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
         )?;
         Ok((blocker_display, effects))
     })?;
-    if let Some(r) = &release {
-        r.finish(&conn);
-    }
     emit(
         a.json,
         &Blocked {

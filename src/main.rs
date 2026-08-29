@@ -1,8 +1,11 @@
 //! `qp` — quipu CLI entry point. Parses subcommands and dispatches to `src/cmd/<name>.rs`.
 //!
 #![doc = include_str!("../docs/architecture.md")]
+//!
+#![doc = include_str!("../docs/wire-contract.md")]
+//!
+#![doc = include_str!("../docs/process-contract.md")]
 
-mod claimref;
 mod cmd;
 mod db;
 mod doctor;

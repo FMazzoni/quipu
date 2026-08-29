@@ -170,7 +170,7 @@ fn register(db_path: &Path, json: bool) -> Result<()> {
         name: name.clone(),
         path: absolute(db_path)?,
         project_key: crate::project::require(&conn)?,
-        project_uuid: crate::claimref::project_uuid(&conn)?,
+        project_uuid: crate::project::store_uuid(&conn)?,
     };
     let mut reg = registry::load()?;
     let result = reg.register(entry.clone())?;
