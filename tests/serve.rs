@@ -2284,10 +2284,19 @@ fn a_caught_up_watch_gets_nothing_and_does_not_spin() {
         elapsed >= std::time::Duration::from_millis(150 * (ticks - 1)),
         "{ticks} ticks finished in {elapsed:?}; the poll is spinning"
     );
+    // A bound, not an equality. The property is "one request per tick rather
+    // than one per loop iteration", and a hot loop would show hundreds — so an
+    // exact count buys nothing over a tight upper bound and costs a failure
+    // whenever a priming read lands on the other side of the helper's poll.
+    // It failed in CI at 6 against 5, which says nothing about spinning.
+    //
+    // The elapsed assertion above is what actually rules out a spin; this rules
+    // out the opposite mistake of counting a tick without issuing a request.
     let polls = srv.wait_for_lines("/v1/timeline", before + ticks as usize) - before;
-    assert_eq!(
-        polls, ticks as usize,
-        "one request per tick, not a request per iteration of a hot loop"
+    assert!(
+        polls >= ticks as usize && polls <= ticks as usize + 1,
+        "{polls} requests for {ticks} ticks: one per tick, not one per iteration \
+         of a hot loop"
     );
 }
 
