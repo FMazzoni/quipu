@@ -147,6 +147,30 @@ impl Hold {
     }
 }
 
+/// The human marker a stale hold trails behind a row's last column.
+///
+/// One spelling, shared by `list` and `wave`, so two views of the same
+/// stranded ticket cannot describe it differently. It *trails* rather than
+/// taking a column of its own: `list`'s column set is pinned to `show`'s
+/// header line by `show_header_mirrors_list_columns_and_tier_is_labelled`, so
+/// a fifth column is a positional change every reader of both views inherits,
+/// and the marker earns a sentence rather than that.
+///
+/// Takes the `hold` object [`Hold::to_json`] emits, which carries `stale`
+/// itself — reading liveness out of the same object that names the holder is
+/// what keeps a caller from pairing this text with some other row's flag. A
+/// missing or `null` hold renders nothing.
+pub fn stale_marker(hold: &serde_json::Value) -> String {
+    if !hold["stale"].as_bool().unwrap_or(false) {
+        return String::new();
+    }
+    format!(
+        "   [STALE — quiet since {}, on {}]",
+        hold["last_contact"].as_str().unwrap_or("?"),
+        hold["host"].as_str().unwrap_or("unknown host")
+    )
+}
+
 const HOLD_COLUMNS: &str = "a.task_id, a.agent_id, a.holder_host, a.last_contact, a.lease_seconds";
 
 fn hold_from_row(r: &rusqlite::Row) -> rusqlite::Result<(i64, Hold)> {

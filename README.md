@@ -106,8 +106,11 @@ along the way never goes stale. One that was claimed by a machine that then died
 does. Say it twice: the limit is on silence, not on duration.
 
 Nothing sweeps on a timer. Expiry is evaluated when someone asks, so a stale hold
-shows up in `qp show` and `qp wave` the next time a human or an orchestrator
-looks, and `qp reclaim` releases it. A claim recorded before leases existed
+shows up the next time a human or an orchestrator looks, and `qp reclaim`
+releases it. Every board view answers: `qp show` and `qp wave` say so in prose,
+`qp list` trails the row with `[STALE — quiet since …]`, and `qp list --json`
+and `qp report --json` carry `stale` beside each row with the hold under
+`hold`. A claim recorded before leases existed
 states no expiry and therefore never expires — releasing one still takes
 `--force`.
 
