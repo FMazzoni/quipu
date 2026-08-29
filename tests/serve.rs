@@ -25,7 +25,11 @@
 //! 5. **A client that leaves mid-response does not kill the process.** With
 //!    `SIGPIPE` at its CLI disposition that write is a remote shutdown of a
 //!    process serving everyone else.
-//! 6. **An empty queue is not a failure.** `take` chooses, and choosing nothing
+//! 6. **A stalled client costs one worker for a bounded time, not forever.**
+//!    Four connections that promise a body and never send it used to hold every
+//!    worker indefinitely, and a closed laptop lid mid-`POST` is enough to
+//!    produce that. A healthy client must still be answered.
+//! 7. **An empty queue is not a failure.** `take` chooses, and choosing nothing
 //!    is exit 0 with a null payload and a 200 on the status line. A poller that
 //!    read "no work" as "something broke" would retry forever.
 //! 7. **The reach path is refused where it must be.** A plaintext url to a host
@@ -1521,6 +1525,112 @@ fn a_dependency_cycle_is_422_invariant() {
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(status, 422, "a cycle is 422: {body}");
     assert_eq!(v["error"]["kind"], "invariant");
+}
+
+// ---------------------------------------------------------------------------
+// stalled clients
+// ---------------------------------------------------------------------------
+
+/// Workers must not be held by a client that promises a body and never sends it.
+///
+/// This is the mirror image of every other client-side failure test here: not
+/// "the server misbehaves, does the client cope" but "the client misbehaves,
+/// does the server survive". It needs no malice — a closed laptop lid mid-POST
+/// produces exactly this, and a TCP peer that dies without a RST leaves the
+/// socket readable-forever from the server's side.
+///
+/// The stalls are held open for the whole probe on purpose. A version of this
+/// test that lets them time out on their own, or that lets the OS reset them,
+/// passes for reasons that have nothing to do with a deadline — so the last
+/// assertion sends the promised body afterwards and requires the connection to
+/// still be there, and to answer with the refusal the deadline produced.
+#[test]
+fn stalled_request_bodies_do_not_wedge_the_front_door() {
+    let tmp = tempfile::tempdir().unwrap();
+    let srv = Server::start(&store(tmp.path()));
+    let port = srv.port();
+
+    // Exactly the worker count: one stall per worker, so a healthy client waits
+    // behind at most one deadline expiry rather than a queue of them.
+    //
+    // The declared length has to exceed tiny_http's 1024-byte threshold, below
+    // which the crate buffers the whole body on its own connection thread
+    // before a worker ever sees the request. That smaller stall leaks a
+    // connection thread and is invisible from here; this one reaches the
+    // worker, which is the failure under test.
+    let promised: Vec<u8> = {
+        let pad = "x".repeat(4096 - br#"{"title":""#.len() - br#""}"#.len());
+        format!("{{\"title\":\"{pad}\"}}").into_bytes()
+    };
+    assert_eq!(
+        promised.len(),
+        4096,
+        "the stall must clear the buffering threshold"
+    );
+    let mut stalled: Vec<TcpStream> = (0..4)
+        .map(|_| {
+            let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            let head = format!(
+                "POST /v1/add HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n",
+                promised.len()
+            );
+            s.write_all(head.as_bytes()).expect("write headers");
+            s.flush().expect("flush headers");
+            s
+        })
+        .collect();
+    // Every worker has dequeued one by now; none of them can ever finish.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let began = std::time::Instant::now();
+    let mut probe = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    probe
+        .set_read_timeout(Some(std::time::Duration::from_secs(20)))
+        .expect("read timeout");
+    probe
+        .write_all(b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .expect("write probe");
+    let mut raw = String::new();
+    let read = probe.read_to_string(&mut raw);
+    let waited = began.elapsed();
+    assert!(
+        read.is_ok() && raw.contains(" 200 "),
+        "a healthy client got no answer in {waited:?} while four clients stalled \
+         mid-body. Every worker is blocked reading a request body that will never \
+         arrive, and `recv_timeout` bounds only the wait for a *new* request. \
+         read={read:?} raw={raw:?}"
+    );
+    assert!(
+        waited < std::time::Duration::from_secs(15),
+        "the front door took {waited:?} to answer a health probe"
+    );
+
+    // The stalls were held open for that whole window rather than dying on
+    // their own: sending the promised body now still reaches the server, and
+    // the answer is the refusal the deadline wrote rather than a created task.
+    let mut late = stalled.pop().expect("a stalled connection");
+    late.set_read_timeout(Some(std::time::Duration::from_secs(20)))
+        .expect("read timeout");
+    late.write_all(&promised)
+        .expect("the stall is still connected");
+    late.flush().expect("flush late body");
+    let mut answer = String::new();
+    late.read_to_string(&mut answer).expect("read late answer");
+    assert!(
+        answer.contains(" 400 ") && answer.contains("invalid_input"),
+        "a body that arrived after the deadline must be refused, not run: {answer:?}"
+    );
+
+    // And the process is still healthy with the remaining stalls still open.
+    let after = remote(&srv, &["add", "still serving"]);
+    assert_eq!(
+        after.code, 0,
+        "the server stopped serving: {}",
+        after.stderr
+    );
+    drop(stalled);
 }
 
 // ---------------------------------------------------------------------------

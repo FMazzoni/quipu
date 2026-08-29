@@ -398,6 +398,104 @@ A deeper check — "can this process actually read store X right now" — is a
 real operator need and a different tool. It is an explicit, manually-run
 command, not something a supervisor executes on a timer.
 
+## 8. Request deadlines, because a client can wedge a server without malice
+
+**Decision: a worker waits at most five seconds for a request body and at most
+thirty seconds for its response to reach the socket. Past either, it abandons
+the connection and goes back to serving. The worker count stays at four.**
+
+The failure this prevents needs no attacker. Four clients that open a
+connection, send headers with a `Content-Length`, and then stop — a closed
+laptop lid mid-`POST`, a peer that died without sending a RST, a link that went
+away between the headers and the body — used to occupy all four workers
+indefinitely. The listener's own `recv_timeout` bounds only the wait for a
+*new* request; it does nothing once a worker is inside a handler. In the
+topology this contract is written for, several machines polling over a long
+run, the probability of at least one half-open connection is not small.
+
+### The deadline cannot be enforced by the thread that is inside the read
+
+This is the fact the design follows from: a blocking socket read cannot be
+interrupted by the thread performing it, and the HTTP crate exposes no seam to
+set a timeout on an accepted socket. So the thread that gives up can never be
+the thread that is stuck, and the connection has to move to a thread of its own
+— body in, response out — while the worker keeps the store work and the clock.
+
+**The consequence to be explicit about: a worker that gives up frees itself,
+not the socket.** The abandoned thread stays blocked until the peer sends,
+closes, or the kernel's TCP keepalive gives up on it, which by default is
+hours. A stalled connection therefore costs one thread and one file descriptor
+for as long as the peer's own stack keeps it alive. That is a bounded, visible
+resource leak in place of an unbounded outage, and there is no third option
+without owning the socket.
+
+### The values, and what they are defended against
+
+- **Five seconds for the body.** It is two numbers at once — the longest a
+  legitimate slow client may take, and the longest a stalled one may cost a
+  worker — and the second is what keeps it small. A body is a handful of short
+  strings written in the same call as the headers, so it is already in flight
+  when a worker first sees the request. Five seconds is `wait`'s entire 500 ms
+  poll period ten times over, and carries the 1 MB body ceiling at 200 KB/s: a
+  client cannot be cut unless it is orders of magnitude slower at delivering a
+  few hundred bytes than it is at waiting between whole requests. Against that,
+  four simultaneously stalled clients cost one five-second hiccup that heals
+  itself, once per stall event, rather than a front door that never answers
+  again.
+- **Thirty seconds for the response.** A client that stops *reading* holds a
+  worker exactly as a stalled body does. It is bounded more loosely because the
+  legitimate case is larger and the failure rarer: the kernel send buffer
+  autotunes to megabytes and swallows every ordinary payload without blocking
+  at all, so a write still going after thirty seconds means the peer stopped
+  reading. The served *read* verbs are why this exists at all — a write verb's
+  payload could never reach the buffer's ceiling.
+
+### What a cut client sees
+
+A body that arrives after the deadline is **refused, never run**. The abandoned
+thread answers for itself the moment the read completes: `400` with
+`kind: "invalid_input"` and a message naming the deadline. That is the same
+kind an unreadable body already produced, and it says the true thing — the body
+the `Content-Length` promised was not delivered in time. It is deliberately not
+`unavailable`: this contract's exit 7 means no front door answered, and one did.
+
+A client that never sends at all sees nothing, because there is nothing to
+write to. Its own transport failure is `unavailable`/7 by the ordinary route.
+
+A response cut by the write deadline is the middle restart window of §4 with a
+different cause: the transaction committed and the caller did not hear it. The
+guidance there is unchanged — read the store, do not assume.
+
+### The worker count stays at four
+
+It was re-examined rather than left unexamined next to a bug it made worse, and
+nothing was changed. The useful concurrency is bounded by SQLite's write lock,
+not by the thread count: every request is one short `BEGIN IMMEDIATE`, so more
+workers buy contention on the same lock rather than throughput. And the fix
+removes the coupling that made four look too small — a socket thread never
+opens a store, so four still means "requests in flight against SQLite" exactly
+as it did before there was a deadline.
+
+### Two new log lines
+
+Both belong to the "log what SQLite does not record" rule of §5, because
+neither request became a transaction:
+
+- `read_timeout` (`warn`) — method, url, elapsed ms, the deadline. The only
+  record anywhere that the request existed.
+- The ordinary `request` line gains a `write_error` reading
+  `response not written within 30s` when the write deadline expires.
+
+### A stall smaller than 1 KB never reaches a worker at all
+
+Recorded because it looks like a hole in the above and is not. The HTTP crate
+buffers any body it is told is 1024 bytes or smaller on its own connection
+thread, before the request is handed to a worker. Such a stall costs a
+connection thread and is invisible to every deadline here — it cannot be fixed
+without forking the crate, and it does not need to be: it cannot wedge a
+worker, which is the property this section is about. Only a declared length
+above that threshold reaches the deadline, and that is what the test uses.
+
 ## An example supervision unit
 
 Generic and illustrative. Every path, user, port and project name below is a

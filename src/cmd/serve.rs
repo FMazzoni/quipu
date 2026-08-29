@@ -8,6 +8,7 @@ use clap::Args;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -20,6 +21,28 @@ const WORKERS: usize = 4;
 
 /// How long a worker blocks before re-reading the stop flag.
 const POLL: Duration = Duration::from_millis(200);
+
+/// How long a worker waits for a request body before abandoning the socket.
+///
+/// It is two numbers at once: the longest a legitimate slow client may take to
+/// deliver a body, and the longest a stalled one may cost a worker. The second
+/// is what keeps it small. A body is a handful of short strings that the client
+/// wrote in the same call as the headers, so it is already in flight when a
+/// worker first sees the request; five seconds is `wait`'s whole poll period
+/// ten times over, and carries the 1 MB ceiling at 200 KB/s. Against that, four
+/// simultaneously stalled clients cost one five-second hiccup that heals itself
+/// rather than a front door that never answers again.
+const READ_DEADLINE: Duration = Duration::from_secs(5);
+
+/// How long a worker waits for its response to reach the socket.
+///
+/// Longer than [`READ_DEADLINE`] because the failure it bounds is rarer and the
+/// legitimate case is larger: a kernel send buffer that autotunes to megabytes
+/// swallows every ordinary payload without blocking at all, so a write that is
+/// still going after thirty seconds means the peer stopped reading. The served
+/// read verbs — `list`, `report`, `timeline`, `tree` — are why this exists at
+/// all; a write verb's payload could never reach the buffer's ceiling.
+const WRITE_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Ceiling on a request body.
 ///
@@ -224,26 +247,62 @@ fn worker(server: &tiny_http::Server, state: &State) {
     }
 }
 
-fn handle(mut rq: tiny_http::Request, state: &State) {
+/// Runs one request: a socket thread holds the connection, this holds the store.
+///
+/// The split is forced by a fact about blocking sockets: a `read` cannot be
+/// interrupted by the thread that wants to give up on it. So the thread that
+/// applies the deadline can never be the thread that is inside the read, and
+/// the connection moves to a thread of its own for its whole life — body in,
+/// response out — while the worker keeps the store work and the deadlines.
+///
+/// What that buys is the invariant the worker count rests on: [`WORKERS`]
+/// still bounds the number of requests touching a store at once, because the
+/// socket thread never opens one. What it costs is one thread per request, and
+/// an abandoned socket thread outliving its worker.
+fn handle(rq: tiny_http::Request, state: &State) {
     let began = Instant::now();
-    let method = rq.method().as_str().to_string();
-    let raw_url = rq.url().to_string();
-    let (path, query) = split_once_or(&raw_url, '?');
+    let (msg_tx, msg_rx) = mpsc::channel();
+    let (reply_tx, reply_rx) = mpsc::channel();
+    std::thread::spawn(move || socket_thread(rq, &msg_tx, &reply_rx));
 
-    if path == wire::HEALTH_PATH {
+    let Ok(FromSocket::Head { method, url }) = msg_rx.recv() else {
+        return;
+    };
+    let body = match msg_rx.recv_timeout(READ_DEADLINE) {
+        Ok(FromSocket::Body(Ok(b))) => Ok(b),
+        Ok(FromSocket::Body(Err(e))) => {
+            Err(db::invalid_input(format!("unreadable request body: {e}")))
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            // The worker is now free; the socket thread is not, and answers for
+            // itself if the body ever turns up. This line is the only record
+            // that the request existed, because it never became a transaction.
+            log(
+                "warn",
+                "read_timeout",
+                serde_json::json!({
+                    "method": method,
+                    "url": url,
+                    "ms": began.elapsed().as_millis(),
+                    "deadline_s": READ_DEADLINE.as_secs(),
+                }),
+            );
+            return;
+        }
+        // The socket thread stops early only when the connection did, and it
+        // has already written whatever that leaves possible.
+        Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
+    };
+
+    let (path, query) = split_once_or(&url, '?');
+    let computed = if path == wire::HEALTH_PATH {
         // Process-local state only. A probe that opens a store runs migrations,
         // which is a probe that changes the thing it measures.
-        let body = serde_json::json!({
-            "version": env!("CARGO_PKG_VERSION"),
-            "bind": state.bound,
-            "uptime_s": state.started.elapsed().as_secs(),
-            "projects": state.projects.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
-        });
-        respond(rq, 200, &body, state, &method, &raw_url, None, began);
-        return;
-    }
-
-    let (status, body, kind) = match answer(&mut rq, state, &method, path, query) {
+        Ok(health(state))
+    } else {
+        body.and_then(|b| answer(state, &method, path, query, &b))
+    };
+    let (status, payload, kind) = match computed {
         Ok(v) => (200, v, None),
         Err(e) => {
             let (s, b) = wire::failure(&e);
@@ -254,16 +313,48 @@ fn handle(mut rq: tiny_http::Request, state: &State) {
             (s, b, Some(kind))
         }
     };
-    respond(rq, status, &body, state, &method, &raw_url, kind, began);
+
+    let bytes = serde_json::to_vec(&payload).unwrap_or_else(|_| b"{}".to_vec());
+    if reply_tx.send((status, bytes)).is_err() {
+        // The socket thread lost its race with this worker's own deadline and
+        // has already written the refusal. Logging here would claim a status
+        // that never reached anyone.
+        return;
+    }
+    let write_err = match msg_rx.recv_timeout(WRITE_DEADLINE) {
+        Ok(FromSocket::Wrote(e)) => e,
+        // A client that stopped reading holds the socket thread exactly as a
+        // stalled body does, and is released the same way. The store work is
+        // already committed, so this is the process contract's restart window:
+        // the caller has to treat an unanswered request as "may have landed".
+        Err(mpsc::RecvTimeoutError::Timeout) => Some(format!(
+            "response not written within {}s",
+            WRITE_DEADLINE.as_secs()
+        )),
+        Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Some("connection closed before the response was written".to_string())
+        }
+    };
+    log_request(state, &method, &url, status, kind, write_err, began);
+}
+
+/// The `/healthz` payload, all of it in memory since startup put it there.
+fn health(state: &State) -> serde_json::Value {
+    serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "bind": state.bound,
+        "uptime_s": state.started.elapsed().as_secs(),
+        "projects": state.projects.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
+    })
 }
 
 /// The request, from method check to payload. Every failure is a typed error.
 fn answer(
-    rq: &mut tiny_http::Request,
     state: &State,
     method: &str,
     path: &str,
     query: &str,
+    buf: &str,
 ) -> Result<serde_json::Value> {
     let Some(verb) = path.strip_prefix(wire::API_PREFIX) else {
         return Err(db::not_found(format!("no endpoint at `{path}`"), None));
@@ -280,11 +371,6 @@ fn answer(
         )));
     }
     let store = state.store(project_param(query).as_deref())?.clone();
-    let mut buf = String::new();
-    rq.as_reader()
-        .take(MAX_BODY as u64 + 1)
-        .read_to_string(&mut buf)
-        .map_err(|e| db::invalid_input(format!("unreadable request body: {e}")))?;
     if buf.len() > MAX_BODY {
         return Err(db::invalid_input(format!(
             "request body exceeds {MAX_BODY} bytes"
@@ -293,39 +379,104 @@ fn answer(
     let body: serde_json::Value = if buf.trim().is_empty() {
         serde_json::json!({})
     } else {
-        serde_json::from_str(&buf)
+        serde_json::from_str(buf)
             .map_err(|e| db::invalid_input(format!("request body is not JSON: {e}")))?
     };
     handler(&store, body)
 }
 
-/// Writes the response, then logs what the store could not have recorded.
+/// What a worker tells its socket thread, and what it hears back.
+///
+/// `Head` is sent before the body is read so that a request abandoned at the
+/// read deadline can still be logged as the request it was; without it the
+/// only account of a timed-out request would be a count.
+enum FromSocket {
+    Head { method: String, url: String },
+    Body(std::result::Result<String, String>),
+    Wrote(Option<String>),
+}
+
+/// Status and bytes, handed back for the socket thread to write.
+type Reply = (u16, Vec<u8>);
+
+/// Owns one connection for its whole life: body in, response out.
+///
+/// It never touches a store, which is what keeps [`WORKERS`] meaning "requests
+/// in flight against SQLite" after this thread was introduced.
+///
+/// Both places where the worker has gone converge on the same refusal rather
+/// than on a drop: `tiny_http` answers an unanswered request with a bare 500,
+/// and a slow client meeting a 500 would read a bug in the server where there
+/// was a bug in its own link. `invalid_input` is the same kind an unreadable
+/// body already produced, and it says the true thing — the body promised by
+/// `Content-Length` was not delivered.
+fn socket_thread(
+    mut rq: tiny_http::Request,
+    tx: &mpsc::Sender<FromSocket>,
+    rx: &mpsc::Receiver<Reply>,
+) {
+    let head = FromSocket::Head {
+        method: rq.method().as_str().to_string(),
+        url: rq.url().to_string(),
+    };
+    if tx.send(head).is_err() {
+        return;
+    }
+    let mut buf = String::new();
+    let body = rq
+        .as_reader()
+        .take(MAX_BODY as u64 + 1)
+        .read_to_string(&mut buf)
+        .map(|_| buf)
+        .map_err(|e| e.to_string());
+    if tx.send(FromSocket::Body(body)).is_ok() {
+        if let Ok((status, bytes)) = rx.recv() {
+            let err = write_response(rq, status, bytes)
+                .err()
+                .map(|e| e.to_string());
+            let _ = tx.send(FromSocket::Wrote(err));
+            return;
+        }
+    }
+    let (status, body) = wire::failure(&db::invalid_input(format!(
+        "request body did not arrive within {}s",
+        READ_DEADLINE.as_secs()
+    )));
+    let bytes = serde_json::to_vec(&body).unwrap_or_else(|_| b"{}".to_vec());
+    let _ = write_response(rq, status, bytes);
+}
+
+/// The one place a response reaches a socket.
 ///
 /// A write failure here is the client having gone away mid-response. It is an
 /// ordinary `EPIPE` because `ignore_sigpipe` ran at startup, so it costs this
 /// request and nothing else.
-#[allow(clippy::too_many_arguments)]
-fn respond(
+fn write_response(
     rq: tiny_http::Request,
     status: u16,
-    body: &serde_json::Value,
+    bytes: Vec<u8>,
+) -> std::result::Result<(), std::io::Error> {
+    let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+        .expect("static header");
+    rq.respond(
+        tiny_http::Response::from_data(bytes)
+            .with_status_code(status)
+            .with_header(header),
+    )
+}
+
+/// Logs what the store could not have recorded about one answered request.
+fn log_request(
     state: &State,
     method: &str,
     url: &str,
+    status: u16,
     kind: Option<String>,
+    write_err: Option<String>,
     began: Instant,
 ) {
-    let bytes = serde_json::to_vec(body).unwrap_or_else(|_| b"{}".to_vec());
-    let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-        .expect("static header");
-    let resp = tiny_http::Response::from_data(bytes)
-        .with_status_code(status)
-        .with_header(header);
-    let write_err = rq.respond(resp).err().map(|e| e.to_string());
-
-    let ms = began.elapsed().as_millis();
     let mut fields = serde_json::json!({
-        "method": method, "url": url, "status": status, "ms": ms,
+        "method": method, "url": url, "status": status, "ms": began.elapsed().as_millis(),
     });
     if let Some(k) = &kind {
         fields["kind"] = serde_json::json!(k);

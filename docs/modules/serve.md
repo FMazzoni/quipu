@@ -44,6 +44,58 @@ not served, and no request can make it appear, which is what makes a runtime
 `no_store` mean "this front door does not serve that project" rather than
 "something might be broken".
 
+## Deadlines, and the thread that holds the socket
+
+`WORKERS` threads call `recv_timeout` on the listener, and that timeout bounds
+only the wait for a *new* request. It used to do nothing once a worker was
+inside a handler, and the body was read there — so four clients that sent
+headers with a `Content-Length` and then stalled held every worker forever. No
+malice required: a closed laptop lid mid-`POST` produces it.
+
+The fix is shaped by one fact. **A blocking socket read cannot be interrupted
+by the thread performing it, and `tiny_http` exposes no seam to set a timeout
+on an accepted socket** — `Request` hands out a `&mut dyn Read` and nothing
+else, and `from_listener` still owns the `accept`. So the thread that applies
+the deadline can never be the thread inside the read. Each request therefore
+gets a socket thread of its own that owns the connection for its whole life —
+body in, response out — while the worker keeps the store work and the clock:
+
+- `READ_DEADLINE`, five seconds, from "a worker dequeued this request" to "the
+  body is here".
+- `WRITE_DEADLINE`, thirty seconds, from "the response bytes were handed over"
+  to "they reached the socket". A client that stops *reading* holds a worker
+  exactly as a stalled body does; the kernel send buffer autotunes to megabytes
+  and hides that for every ordinary payload, which is why the served *read*
+  verbs are the reason this one exists.
+
+`WORKERS` keeps meaning what it meant — requests in flight against SQLite —
+because a socket thread never opens a store. That is why the count stays at
+four: the useful concurrency is bounded by the write lock, every request is one
+short `BEGIN IMMEDIATE`, and more threads would buy contention rather than
+throughput.
+
+**A worker that gives up frees itself, not the socket.** The abandoned thread
+stays blocked until the peer sends, closes, or TCP keepalive expires, so a
+stalled connection costs one thread and one descriptor for as long as the
+peer's own stack keeps it alive. There is no third option without owning the
+socket; a bounded, visible leak replaces an unbounded outage.
+
+A body that arrives after the deadline is **refused, not run**: the abandoned
+thread answers for itself with `400` / `invalid_input` naming the deadline —
+the same kind an unreadable body already produced, and the same true statement,
+that the promised body was not delivered. Answering rather than dropping is
+deliberate: `tiny_http` writes a bare 500 for a request that is dropped
+unanswered, and a slow client meeting a 500 would read a bug in the server
+where there was a bug in its own link.
+
+One thing that looks like a hole and is not: `tiny_http` buffers any body it is
+told is **1024 bytes or smaller** on its own connection thread, before the
+request reaches a worker at all. A stall below that threshold costs a
+connection thread, is invisible to both deadlines, and cannot be fixed without
+forking the crate — and does not need to be, because it cannot wedge a worker.
+Only a declared length above it reaches the deadline, which is what the test in
+`tests/serve.rs` sends.
+
 ## Startup failure is not runtime failure
 
 Codes come from the existing table; none is added. A bad or busy bind address is
@@ -97,8 +149,8 @@ The rule that decides what is logged is: **log what SQLite does not record.**
 `insert_event` writes inside the same transaction as the mutation, so
 `qp timeline` is a better request log than any text file — transactional,
 queryable, and unable to disagree with the state it describes. So stderr carries
-startup, shutdown, every 4xx, every 5xx, a dropped response, and listener
-faults, and successful requests only behind `--access-log`. Request bodies are
+startup, shutdown, every 4xx, every 5xx, a dropped response, a request
+abandoned at its read deadline (`read_timeout`), and listener faults, and successful requests only behind `--access-log`. Request bodies are
 never logged: ticket titles and decision text are the user's content and have no
 business in an operational stream a supervisor ships elsewhere.
 
