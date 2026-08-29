@@ -54,6 +54,13 @@ Raw `cargo install --path .` works too; the `justfile` is just a shortcut layer.
     qp status
     qp watch
 
+Where several machines pull their own work rather than a coordinator handing it
+out, `qp take` replaces the `list`-then-`assign` pair with one atomic step —
+selection and assignment happen in a single statement, so two machines cannot
+choose the same ticket:
+
+    qp take --as alice --tag wave:1     # → assigned, or `taken: null` if the queue is drained
+
 ## Structure: what blocks what, what is part of what
 
 Both are `dep` edges and both make the depender wait, but they say different

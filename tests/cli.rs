@@ -413,6 +413,7 @@ fn help_lists_core_commands() {
         "edit",
         "report",
         "show",
+        "take",
     ] {
         assert!(out.contains(cmd), "help missing `{cmd}`:\n{out}");
     }
@@ -7451,4 +7452,159 @@ fn bare_integer_is_still_not_a_task_reference() {
     let out = qp(&db).args(["show", "1"]).assert().code(1);
     let s = String::from_utf8(out.get_output().stderr.clone()).unwrap();
     assert!(s.contains("invalid id"), "{s}");
+}
+
+/// `take` picks the oldest ready task and leaves it exactly where `assign` would.
+///
+/// "Same state as `assign`" is asserted by continuing the state machine from
+/// here: a task that `take` moved must be claimable by the agent it named, which
+/// is only true if both the `task.state` row and the `assignment` row landed.
+#[test]
+fn take_assigns_oldest_ready_task() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "first"]).assert().success();
+    qp(&db).args(["add", "second"]).assert().success();
+
+    qp(&db)
+        .args(["take", "--as", "w1", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""display_id":"QP-1""#))
+        .stdout(contains(r#""state":"assigned""#));
+
+    qp(&db)
+        .args(["show", "QP-1", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""state":"assigned""#));
+    // The assignment row landed too, or this cannot succeed.
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "w1"])
+        .assert()
+        .success();
+
+    // The next take gets the next-oldest, never the one already taken.
+    qp(&db)
+        .args(["take", "--as", "w2", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""display_id":"QP-2""#));
+}
+
+#[test]
+fn take_respects_the_tag_filter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "untagged"]).assert().success();
+    qp(&db)
+        .args(["add", "tagged", "--tag", "kind:slice"])
+        .assert()
+        .success();
+
+    // QP-1 is older, so only the filter can explain picking QP-2.
+    qp(&db)
+        .args(["take", "--as", "w1", "--tag", "kind:*", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""display_id":"QP-2""#));
+    // Filter that matches nothing ready: no work, and QP-1 is untouched.
+    qp(&db)
+        .args(["take", "--as", "w1", "--tag", "kind:*", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""taken":null"#));
+    qp(&db)
+        .args(["show", "QP-1", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""state":"ready""#));
+}
+
+/// A task with an unresolved dependency is never taken, however the store got
+/// into that shape.
+///
+/// Two arrangements, because they fail differently: a plain `pending` dependent
+/// is excluded by the `state = 'ready'` guard alone, while a task frozen by a
+/// blocker on the wave that contains it is excluded only by the `db::FROZEN`
+/// clause the candidate subquery repeats.
+#[test]
+fn take_never_takes_a_task_with_unresolved_deps() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db)
+        .args(["add", "dependent", "--depends-on", "QP-1"])
+        .assert()
+        .success();
+
+    // Only the prereq is takeable.
+    qp(&db)
+        .args(["take", "--as", "w1", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""display_id":"QP-1""#));
+    qp(&db)
+        .args(["take", "--as", "w2", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""taken":null"#));
+    qp(&db)
+        .args(["show", "QP-2", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""state":"pending""#));
+
+    // Resolving the prereq makes the dependent takeable, and not before.
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "w1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["complete", "QP-1", "--as", "w1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["take", "--as", "w2", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""display_id":"QP-2""#));
+}
+
+/// An empty queue is exit 0 with an explicit null, not an error.
+///
+/// The exit code is the load-bearing half: a poller retries on 2, so a drained
+/// queue answering 2 would hot-loop, and under `set -e` any non-zero code aborts
+/// the loop that polls for work. See `docs/modules/take.md`.
+#[test]
+fn take_on_an_empty_queue_exits_zero_and_mutates_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "done already"]).assert().success();
+    qp(&db)
+        .args(["cancel", "QP-1", "--reason", "r"])
+        .assert()
+        .success();
+
+    let before = qp(&db).args(["timeline", "--json"]).assert().success();
+    let before = String::from_utf8(before.get_output().stdout.clone()).unwrap();
+
+    qp(&db)
+        .args(["take", "--as", "w1", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""taken":null"#));
+    qp(&db)
+        .args(["take", "--as", "w1"])
+        .assert()
+        .success()
+        .stdout(contains("nothing to take"));
+
+    let after = qp(&db).args(["timeline", "--json"]).assert().success();
+    let after = String::from_utf8(after.get_output().stdout.clone()).unwrap();
+    assert_eq!(before, after, "a no-work take must write no events");
 }
