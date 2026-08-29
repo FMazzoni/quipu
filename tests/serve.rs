@@ -169,6 +169,32 @@ fn run(c: &mut std::process::Command, args: &[&str]) -> Run {
     }
 }
 
+/// `qp <args>` against a local store, with no `--json` appended.
+///
+/// The read side is the first thing on the wire whose prose is worth comparing:
+/// a write verb renders one line, and these render whole views the *client*
+/// assembles from a payload the server never rendered.
+fn local_prose(db: &Path, args: &[&str]) -> Run {
+    run_prose(std::process::Command::new(qp_bin()).env("QP_DB", db), args)
+}
+
+/// `qp <args>` through the front door, no `--json`, no local store in play.
+fn remote_prose(srv: &Server, args: &[&str]) -> Run {
+    let mut c = std::process::Command::new(qp_bin());
+    c.env("QP_SERVER", &srv.url)
+        .env("QP_DB", "/nonexistent/quipu/db.sqlite");
+    run_prose(&mut c, args)
+}
+
+fn run_prose(c: &mut std::process::Command, args: &[&str]) -> Run {
+    let out = c.args(args).output().expect("run qp");
+    Run {
+        code: out.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
 /// One raw HTTP POST, so the status line itself can be asserted.
 ///
 /// Hand-written rather than through a client crate: the status is what is under
@@ -808,4 +834,297 @@ fn a_project_with_no_store_refuses_to_start() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
+}
+
+// ---------------------------------------------------------------------------
+// the read side
+// ---------------------------------------------------------------------------
+
+/// A store with a wave, a claimed slice, a blocker, tags, and some history.
+///
+/// Deliberately built through the *local* CLI: the point of every assertion
+/// below is that a served read and a local read of the same file agree, so the
+/// fixture must not come from the thing under test.
+fn read_fixture(dir: &Path) -> PathBuf {
+    let db = store(dir);
+    local(&db, &["add", "the wave", "--tier", "wave"]);
+    local(
+        &db,
+        &[
+            "add",
+            "first slice",
+            "--part-of",
+            "QP-1",
+            "--tag",
+            "kind:code",
+            "--description",
+            "a description long enough that the human renderer has to wrap it \
+             somewhere past the eightieth column, which is the case worth pinning",
+        ],
+    );
+    local(&db, &["add", "second slice", "--depends-on", "QP-2"]);
+    local(&db, &["assign", "QP-2", "--to", "w-alpha"]);
+    local(&db, &["claim", "QP-2", "--as", "w-alpha"]);
+    local(
+        &db,
+        &["log", "QP-2", "decision", "picked the shape", "--auto"],
+    );
+    local(&db, &["log", "QP-2", "decision", "and then the other one"]);
+    local(&db, &["relation", "add", "QP-3", "supersedes", "QP-2"]);
+    db
+}
+
+/// Every read, both ways, byte for byte — prose and JSON.
+///
+/// This is the whole property of the slice. The server sends a payload it never
+/// rendered; the client renders `human()` from it; and neither view may differ
+/// from what the same command printed reading the file directly. Prose is
+/// checked as well as `--json` because the two are produced by different code
+/// on the remote path — the JSON is the response body, the prose is rebuilt
+/// from it — and only one of them would break if a view lost a field.
+#[test]
+fn every_read_is_identical_local_and_served() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = read_fixture(tmp.path());
+    let srv = Server::start(&db);
+
+    let reads: &[&[&str]] = &[
+        &["list"],
+        &["list", "--with-description"],
+        &["list", "--state", "pending"],
+        &["list", "--tag", "kind:*"],
+        &["list", "--assigned-to", "w-*"],
+        &["show", "QP-2"],
+        &["show", "QP-1"],
+        &["tree"],
+        &["tree", "QP-1"],
+        &["tree", "--show-tags", "--with-description"],
+        &["timeline"],
+        &["timeline", "QP-2"],
+        &["timeline", "--kind", "decision"],
+        &["timeline", "--since", "4"],
+        &["wave"],
+        &["status"],
+        &["report"],
+        &["report", "--ticket", "QP-2"],
+        &["report", "--all-tickets"],
+        &["report", "--wave", "QP-1"],
+        &["decisions"],
+        &["decisions", "--auto-only"],
+        &["relation", "list", "QP-2"],
+    ];
+
+    for args in reads {
+        let l = local_prose(&db, args);
+        let r = remote_prose(&srv, args);
+        assert_eq!(l.code, r.code, "exit code for {args:?}: {}", r.stderr);
+        assert_eq!(
+            l.stdout, r.stdout,
+            "prose for {args:?} differs local vs served"
+        );
+
+        let lj = local(&db, args);
+        let rj = remote(&srv, args);
+        assert_eq!(lj.code, rj.code, "exit code for {args:?} --json");
+        assert_eq!(
+            lj.stdout, rj.stdout,
+            "json for {args:?} differs local vs served"
+        );
+    }
+}
+
+/// An empty store's reads produce no output, over the wire as locally.
+///
+/// `emit` prints nothing for empty prose rather than a blank line, which is
+/// what `timeline` and `decisions` always did. A view that renders `""` and a
+/// view that renders `"\n"` are different bytes to anything counting lines.
+#[test]
+fn an_empty_store_reads_empty_through_the_front_door() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = store(tmp.path());
+    let srv = Server::start(&db);
+    for args in [
+        ["timeline"].as_slice(),
+        ["decisions"].as_slice(),
+        ["tree"].as_slice(),
+    ] {
+        let l = local_prose(&db, args);
+        let r = remote_prose(&srv, args);
+        assert_eq!(l.stdout, "", "{args:?} printed something on an empty store");
+        assert_eq!(l.stdout, r.stdout, "{args:?} differs local vs served");
+    }
+}
+
+/// How many requests this server logged whose url contains `needle`.
+///
+/// `--access-log` is what makes a *successful* request appear on stderr at all;
+/// without it the server logs only 4xx, 5xx and dropped responses.
+fn requests_to(srv: &Server, needle: &str) -> usize {
+    srv.lines()
+        .iter()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v["event"] == "request")
+        .filter(|v| v["url"].as_str().is_some_and(|u| u.contains(needle)))
+        .count()
+}
+
+/// Waits for at least one logged request, then lets any second one arrive.
+///
+/// The response is written before the log line, so a client that has already
+/// exited says nothing about how many lines the server has flushed. The settle
+/// is what makes "exactly one" an assertion rather than a race the extra
+/// request would win.
+fn settled_requests_to(srv: &Server, needle: &str) -> usize {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while requests_to(srv, needle) == 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    requests_to(srv, needle)
+}
+
+/// One round trip per read, whatever the view costs to build.
+///
+/// This is the design the slice exists to defend, asserted rather than
+/// eyeballed. Building `report`'s board is seven reads of the store and `show`
+/// is ten; `report --all-tickets` is six *per ticket* and unbounded. A protocol
+/// that exposed the read layer query-by-query would turn each of those into
+/// that many round trips over a link whose latency dwarfs every one of the
+/// queries. If a later change splits one of these endpoints, this test is what
+/// fails.
+#[test]
+fn each_read_is_exactly_one_round_trip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = read_fixture(tmp.path());
+    let srv = Server::start_with(&db, &["--access-log"]);
+
+    for (args, verb) in [
+        (["report", "--all-tickets"].as_slice(), "/v1/report"),
+        (["show", "QP-2"].as_slice(), "/v1/show"),
+        (["tree"].as_slice(), "/v1/tree"),
+        (["list"].as_slice(), "/v1/list"),
+    ] {
+        let before = requests_to(&srv, verb);
+        assert_eq!(before, 0, "{verb} was called before this case ran");
+        let r = remote(&srv, args);
+        assert_eq!(r.code, 0, "{args:?} failed: {}", r.stderr);
+        assert_eq!(
+            settled_requests_to(&srv, verb),
+            1,
+            "{args:?} must be exactly one round trip"
+        );
+    }
+}
+
+/// Filters are SQL clauses on the server, not a trim on the client.
+///
+/// Asserted against the raw response body, because a client that fetched
+/// everything and filtered afterwards would produce identical *output* — and
+/// would move the whole store per poll. `wait` and `watch` are built on exactly
+/// this: their 500 ms loop is cheap only because the answer to a narrowed read
+/// is small, and in `timeline --since`'s steady state it is empty.
+#[test]
+fn filters_are_applied_before_the_response_is_written() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = read_fixture(tmp.path());
+    let srv = Server::start(&db);
+    let port = srv.port();
+
+    let body = |path: &str, req: &str| -> serde_json::Value {
+        let (status, body) = post(port, path, req);
+        assert_eq!(status, 200, "{path} {req} -> {body}");
+        serde_json::from_str(&body).expect("a JSON body")
+    };
+
+    // `--state`: only the running slice comes back.
+    let rows = body("/v1/list", r#"{"state":"running"}"#);
+    let rows = rows.as_array().expect("an array");
+    assert_eq!(rows.len(), 1, "the state filter did not run server-side");
+    assert_eq!(rows[0]["display_id"], "QP-2");
+
+    // `--tag`, glob and all.
+    let rows = body("/v1/list", r#"{"tag":["kind:*"]}"#);
+    assert_eq!(rows.as_array().expect("an array").len(), 1);
+
+    // `--auto-only`: one of the two decisions is automatic.
+    let all = body("/v1/decisions", "{}");
+    let auto = body("/v1/decisions", r#"{"auto_only":true}"#);
+    assert_eq!(all.as_array().expect("an array").len(), 2);
+    assert_eq!(auto.as_array().expect("an array").len(), 1);
+    assert_eq!(auto[0]["payload"]["text"], "picked the shape");
+
+    // `--since` on the event tail: the bound is exclusive and it is a clause.
+    let head = body("/v1/timeline", "{}");
+    let head = head.as_array().expect("an array");
+    let last = head.last().expect("events")["id"].as_i64().unwrap();
+    let tail = body("/v1/timeline", &format!(r#"{{"since":{last}}}"#));
+    assert!(
+        tail.as_array().expect("an array").is_empty(),
+        "a poll that is caught up must transfer nothing, got {tail}"
+    );
+
+    // `report --since` is parsed on the server too: a window in the future
+    // keeps the tasks and drops every event.
+    let scoped = body("/v1/report", r#"{"since":"9999-01-01"}"#);
+    assert!(
+        scoped["events"].as_array().expect("events").is_empty(),
+        "report --since was not applied before responding"
+    );
+    assert!(!scoped["tasks"].as_array().expect("tasks").is_empty());
+}
+
+/// A read that names a task the store does not have fails identically.
+///
+/// 404 and `not_found` on the wire, exit 2 either way. That is the property the
+/// whole contract rests on, restated for the read side: a skill branching on
+/// the exit code cannot tell there is a socket in the path.
+#[test]
+fn a_missing_task_fails_the_same_way_through_the_front_door() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = read_fixture(tmp.path());
+    let srv = Server::start(&db);
+
+    for args in [
+        ["show", "QP-404"].as_slice(),
+        ["timeline", "QP-404"].as_slice(),
+        ["tree", "QP-404"].as_slice(),
+        ["relation", "list", "QP-404"].as_slice(),
+        ["report", "--ticket", "QP-404"].as_slice(),
+    ] {
+        let l = local(&db, args);
+        let r = remote(&srv, args);
+        assert_eq!(l.code, 2, "{args:?} local exit");
+        assert_eq!(r.code, l.code, "{args:?} exit differs: {}", r.stderr);
+        assert_eq!(r.kind(), l.kind(), "{args:?} kind differs");
+        assert_eq!(r.kind().as_deref(), Some("not_found"), "{args:?}");
+    }
+
+    let (status, body) = post(srv.port(), "/v1/show", r#"{"task":"QP-404"}"#);
+    assert_eq!(status, 404, "the documented status for not_found");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["error"]["kind"], "not_found");
+}
+
+/// `report --output` writes on the *caller's* disk, served or not.
+///
+/// The path names a file on this machine, so it is `#[serde(skip)]` and the
+/// write happens client-side — served, the snapshot would land on the server's
+/// filesystem and the caller would get an empty file. Same test the contract
+/// applies to `export` and `init`: ask whose disk the path is on.
+#[test]
+fn report_output_is_written_on_the_client() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = read_fixture(tmp.path());
+    let srv = Server::start(&db);
+
+    let out = tmp.path().join("snapshot.json");
+    let r = remote_prose(
+        &srv,
+        &["report", "--output", out.to_str().expect("utf-8 path")],
+    );
+    assert_eq!(r.code, 0, "{}", r.stderr);
+    assert_eq!(r.stdout, "", "--output must not also print to stdout");
+    let written = std::fs::read_to_string(&out).expect("the client wrote the file");
+    let v: serde_json::Value = serde_json::from_str(written.trim()).expect("a JSON snapshot");
+    assert_eq!(v["tasks"].as_array().expect("tasks").len(), 3);
 }

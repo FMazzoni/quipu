@@ -2,9 +2,9 @@
 //!
 #![doc = include_str!("../../docs/modules/decisions.md")]
 
+use crate::db;
 use crate::outcome::Outcome;
 use crate::store::{self, EventFilter};
-use crate::db;
 use anyhow::Result;
 use clap::Args;
 use serde::{Deserialize, Serialize};

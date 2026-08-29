@@ -81,16 +81,16 @@ mod tests {
     use crate::cmd::export::ExportOutcome;
     use crate::cmd::import::ImportOutcome;
     use crate::cmd::init::InitOutcome;
-    use crate::cmd::list::ListView;
     use crate::cmd::ledger::LedgerOutcome;
+    use crate::cmd::list::ListView;
     use crate::cmd::log::Logged;
     use crate::cmd::project::{ListOutcome, LookupOutcome, RegisterOutcome, UnregisterOutcome};
     use crate::cmd::reclaim::Reclaimed;
     use crate::cmd::relation::{RelationAdded, RelationList, RelationRemoved};
+    use crate::cmd::remote::{RemoteCleared, RemoteSet, RemoteShow};
     use crate::cmd::report::ReportView;
     use crate::cmd::show::ShowView;
     use crate::cmd::status::StatusView;
-    use crate::cmd::remote::{RemoteCleared, RemoteSet, RemoteShow};
     use crate::cmd::sync::SyncOutcome;
     use crate::cmd::tag::Tagged;
     use crate::cmd::take::Taken;

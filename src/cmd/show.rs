@@ -137,7 +137,11 @@ impl Outcome for ShowView {
         }
         out.push(String::new());
 
-        let events: Vec<&Value> = v["recent_events"].as_array().into_iter().flatten().collect();
+        let events: Vec<&Value> = v["recent_events"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .collect();
         let total = events.len();
         if total > HUMAN_EVENT_TAIL {
             out.push(format!("Recent events ({HUMAN_EVENT_TAIL} of {total}):"));
