@@ -62,10 +62,11 @@ in a year costs nothing. Everything the git ledger needed to make a shared branc
 safe — a working tree, a merge, a commit, a push, a retry when a peer got there
 first — went with it, because a PUT to a key nobody else can name is not a race.
 
-**Claims did not move.** The claim authority is still git, because the atomic ref
-compare-and-swap is what makes a claim a claim and claim refs are tiny. `qp
-remote set` takes `--authority` and `--ledger` as independent urls, which is what
-let the ledger move without touching the claim path at all.
+**Claims are not in the ledger at all.** A claim is mutual exclusion between
+writers, not content to be replicated; it is settled locally, by one writer
+holding `BEGIN IMMEDIATE`, and never leaves the machine. `qp remote set` names
+the ledger and only the ledger, which is why the ledger's transport can change
+without touching the claim path.
 
 ## Divergence is the normal case
 
@@ -127,10 +128,9 @@ writes nothing local.
 
 ## What sync must never touch
 
-`refs/quipu/claims/*`. Claims are the authority's business and move only through
-the claim path — which is now a different transport entirely, so the old hazard
-of a widened refspec carrying claim refs onto the ledger cannot arise at all.
-`sync` reads `remote.ledger` and never `remote.authority`.
+Anything but its own project's batch keys. `sync` reads `remote.ledger`, and
+`remote.ledger` is the only url a store has — a destination it was not pointed
+at is not something it can reach by widening a pattern.
 
 ## Idempotence
 

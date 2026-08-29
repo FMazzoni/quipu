@@ -18,6 +18,52 @@ pub const KEY_PROJECT: &str = "project_key";
 /// collide, and reading one tells you which era the store came from.
 const LEGACY_PREFIX: &str = "legacy-";
 
+/// The store's own uuid: the identity minted at `qp init` and never reused.
+///
+/// Lives here rather than beside the remote config because it is identity, not
+/// attachment — every store has one whether or not it is attached to anything,
+/// and it is what [`canonical_id`] and [`legacy_key`] are built out of.
+pub fn store_uuid(conn: &Connection) -> Result<String> {
+    let v: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'project_uuid'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    v.ok_or_else(|| crate::db::invalid_input("store has no project_uuid; run `qp init` first"))
+}
+
+/// The `(origin_uuid, origin_task_id)` pair naming `task_id` anywhere in the world.
+///
+/// A row in `task_origin` means the task was minted elsewhere and carries that
+/// store's name for it. No row means it was minted here, and its canonical name
+/// is this store's uuid plus its own rowid — which is why `qp add` writes
+/// nothing to that table and never has to.
+///
+/// GOTCHA — this is the only cross-store identity computation in the tree, and
+/// at the moment it has no caller: it arrived with the git claim authority,
+/// which is gone, and its next caller is whatever teaches the server to name a
+/// ticket the same way in two stores. It is kept rather than deleted because
+/// the rule it encodes — peers are not replicas, so a name derived from the
+/// *asking* store's uuid or from a display id makes two peers compute two
+/// different names for one ticket — is not recoverable from the schema, and
+/// rewriting it from scratch is how that rule gets broken.
+#[allow(dead_code)]
+pub fn canonical_id(conn: &Connection, task_id: i64) -> Result<(String, i64)> {
+    let found: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT origin_uuid, origin_task_id FROM task_origin WHERE task_id = ?1",
+            [task_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match found {
+        Some(pair) => Ok(pair),
+        None => Ok((store_uuid(conn)?, task_id)),
+    }
+}
+
 /// A fresh, independent project identity.
 ///
 /// Deliberately unrelated to the store's `project_uuid`: one names the project,

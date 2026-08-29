@@ -1,4 +1,4 @@
-//! Attach a store to a claim authority and a ledger, or detach it back to local-only.
+//! Attach a store to a ledger, or detach it back to local-only.
 //!
 #![doc = include_str!("../../docs/modules/remote.md")]
 
@@ -17,11 +17,8 @@ pub struct RemoteArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum RemoteOp {
-    /// Point this store at a claim authority and/or a ledger (config only)
+    /// Point this store at a ledger (config only)
     Set {
-        /// Where claims are refereed. Reachability matters; ticket content never crosses it.
-        #[arg(long, value_name = "URL")]
-        authority: Option<String>,
         /// Object-store url the ledger lives at: `s3://<host>/<bucket>[/<prefix>]`.
         #[arg(long, value_name = "URL")]
         ledger: Option<String>,
@@ -49,9 +46,6 @@ pub enum RemoteOp {
     },
     /// Detach — the deliberate route back to local-only operation
     Clear {
-        /// Clear only the authority.
-        #[arg(long)]
-        authority: bool,
         /// Clear only the ledger.
         #[arg(long)]
         ledger: bool,
@@ -84,11 +78,9 @@ const EXIT_FAULT: i32 = 5;
 /// Reachability as it appears in output: absent unless `--check` asked for it.
 #[derive(Serialize)]
 struct Checked {
-    /// Field names carry the `_reachable` suffix because `Checked` is
-    /// `#[serde(flatten)]`ed next to the url fields; bare `authority` would
+    /// The field name carries the `_reachable` suffix because `Checked` is
+    /// `#[serde(flatten)]`ed next to the url fields; bare `ledger` would
     /// emit the key twice.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    authority_reachable: Option<Reach>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ledger_reachable: Option<Reach>,
 }
@@ -97,27 +89,23 @@ impl Checked {
     fn line(label: &str, r: Option<&Reach>) -> Option<String> {
         match r? {
             Reach::Ok => Some(format!("{label}: reachable")),
-            Reach::Unreachable => Some(format!("{label}: UNREACHABLE")),
-            Reach::NoGit => Some(format!("{label}: could not run git")),
             Reach::Fault(why) => Some(format!("{label}: UNUSABLE — {why}")),
         }
     }
     fn lines(&self) -> Vec<String> {
-        [
-            Self::line("authority", self.authority_reachable.as_ref()),
-            Self::line("ledger", self.ledger_reachable.as_ref()),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
+        [Self::line("ledger", self.ledger_reachable.as_ref())]
+            .into_iter()
+            .flatten()
+            .collect()
     }
 }
 
 #[derive(Serialize)]
 struct RemoteSet {
-    authority: Option<String>,
     ledger: Option<String>,
-    /// Which keys this invocation wrote — `set --ledger` leaves the authority alone.
+    /// Which keys this invocation wrote. A list, not a bool: `set` has taken
+    /// more than one url before and will again, and a caller that branches on
+    /// the names keeps working when it does.
     changed: Vec<&'static str>,
     #[serde(flatten)]
     checked: Checked,
@@ -126,11 +114,10 @@ impl Outcome for RemoteSet {
     fn human(&self) -> String {
         let mut out: Vec<String> = Vec::new();
         for k in &self.changed {
-            let url = match *k {
-                "authority" => self.authority.as_deref(),
-                _ => self.ledger.as_deref(),
-            };
-            out.push(format!("{k} set to {}", url.unwrap_or("")));
+            out.push(format!(
+                "{k} set to {}",
+                self.ledger.as_deref().unwrap_or("")
+            ));
         }
         out.extend(self.checked.lines());
         out.join("\n")
@@ -144,9 +131,8 @@ struct RemoteShow {
     /// two stores of one project differ in the first and agree in the second.
     project_uuid: String,
     project_key: String,
-    authority: Option<String>,
     ledger: Option<String>,
-    /// True when neither url is set. The default state, and a supported one.
+    /// True when no url is set. The default state, and a supported one.
     local_only: bool,
     #[serde(flatten)]
     checked: Checked,
@@ -158,16 +144,13 @@ impl Outcome for RemoteShow {
             format!("store:     {}", self.project_uuid),
         ];
         if self.local_only {
-            out.push("local-only — no authority, no ledger".to_string());
+            out.push("local-only — no ledger".to_string());
             return out.join("\n");
         }
-        out.extend([
-            format!(
-                "authority: {}",
-                self.authority.as_deref().unwrap_or("(unset)")
-            ),
-            format!("ledger:    {}", self.ledger.as_deref().unwrap_or("(unset)")),
-        ]);
+        out.push(format!(
+            "ledger:    {}",
+            self.ledger.as_deref().unwrap_or("(unset)")
+        ));
         out.extend(self.checked.lines());
         out.join("\n")
     }
@@ -177,7 +160,6 @@ impl Outcome for RemoteShow {
 struct RemoteCleared {
     /// Keys that actually held a value. Clearing an unset key is a no-op, not an error.
     cleared: Vec<&'static str>,
-    authority: Option<String>,
     ledger: Option<String>,
     local_only: bool,
 }
@@ -200,33 +182,21 @@ pub fn run(db_path: &std::path::Path, a: RemoteArgs) -> Result<()> {
     let conn = db::open(db_path)?;
     match a.op {
         RemoteOp::Set {
-            authority,
             ledger,
             check,
             json,
         } => {
-            if authority.is_none() && ledger.is_none() {
-                return Err(db::invalid_input(
-                    "nothing to set: pass --authority <url>, --ledger <url>, or both",
-                ));
-            }
-            let mut changed: Vec<&'static str> = Vec::new();
-            if let Some(url) = &authority {
-                remote::validate_url(url)?;
-                remote::set(&conn, remote::KEY_AUTHORITY, url)?;
-                changed.push("authority");
-            }
-            if let Some(url) = &ledger {
-                remote::validate_ledger_url(url)?;
-                remote::set(&conn, remote::KEY_LEDGER, url)?;
-                changed.push("ledger");
-            }
+            let Some(url) = &ledger else {
+                return Err(db::invalid_input("nothing to set: pass --ledger <url>"));
+            };
+            remote::validate_ledger_url(url)?;
+            remote::set(&conn, remote::KEY_LEDGER, url)?;
+            let changed = vec!["ledger"];
             let now = remote::load(&conn)?;
-            let checked = probe_all(db_path, &now, check, &changed);
+            let checked = probe_all(&now, check, &changed);
             emit(
                 json,
                 &RemoteSet {
-                    authority: now.authority,
                     ledger: now.ledger,
                     changed,
                     checked,
@@ -235,14 +205,13 @@ pub fn run(db_path: &std::path::Path, a: RemoteArgs) -> Result<()> {
         }
         RemoteOp::Show { check, json } => {
             let now = remote::load(&conn)?;
-            let checked = probe_all(db_path, &now, check, &["authority", "ledger"]);
+            let checked = probe_all(&now, check, &["ledger"]);
             emit(
                 json,
                 &RemoteShow {
-                    project_uuid: crate::claimref::project_uuid(&conn)?,
+                    project_uuid: crate::project::store_uuid(&conn)?,
                     project_key: crate::project::require(&conn)?,
                     local_only: now.local_only(),
-                    authority: now.authority,
                     ledger: now.ledger,
                     checked,
                 },
@@ -263,25 +232,14 @@ pub fn run(db_path: &std::path::Path, a: RemoteArgs) -> Result<()> {
             }
             Ok(())
         }
-        RemoteOp::Clear {
-            authority,
-            ledger,
-            all,
-            json,
-        } => {
-            // No flag means both. `clear` is the escape hatch from an
-            // unreachable authority, so the shortest thing to type is the one
-            // that unblocks you.
-            let (do_auth, do_ledger) = if all || (!authority && !ledger) {
-                (true, true)
-            } else {
-                (authority, ledger)
-            };
+        RemoteOp::Clear { ledger, all, json } => {
+            // Every flag combination clears the same single url today. They are
+            // kept because `clear` is the escape hatch: a script that already
+            // says `--all`, or names the url it means, must not start failing
+            // just because there is currently only one thing to clear.
+            let _ = (ledger, all);
             let mut cleared: Vec<&'static str> = Vec::new();
-            if do_auth && remote::clear(&conn, remote::KEY_AUTHORITY)? {
-                cleared.push("authority");
-            }
-            if do_ledger && remote::clear(&conn, remote::KEY_LEDGER)? {
+            if remote::clear(&conn, remote::KEY_LEDGER)? {
                 cleared.push("ledger");
             }
             let now = remote::load(&conn)?;
@@ -290,7 +248,6 @@ pub fn run(db_path: &std::path::Path, a: RemoteArgs) -> Result<()> {
                 &RemoteCleared {
                     cleared,
                     local_only: now.local_only(),
-                    authority: now.authority,
                     ledger: now.ledger,
                 },
             )
@@ -302,27 +259,19 @@ pub fn run(db_path: &std::path::Path, a: RemoteArgs) -> Result<()> {
 ///
 /// Without `--check` this returns two `None`s and spawns nothing, which is what
 /// holds `qp remote` to the same no-network promise as the rest of the CLI.
-fn probe_all(
-    db_path: &std::path::Path,
-    r: &Remotes,
-    check: bool,
-    which: &[&'static str],
-) -> Checked {
+fn probe_all(r: &Remotes, check: bool, which: &[&'static str]) -> Checked {
     if !check {
         return Checked {
-            authority_reachable: None,
             ledger_reachable: None,
         };
     }
-    let lane = "remote-check";
     let one = |key: &str, url: &Option<String>| -> Option<Reach> {
         if !which.contains(&key) {
             return None;
         }
-        url.as_deref().map(|u| remote::probe(db_path, u, lane))
+        url.as_deref().map(remote::probe)
     };
     Checked {
-        authority_reachable: one("authority", &r.authority),
         ledger_reachable: one("ledger", &r.ledger),
     }
 }

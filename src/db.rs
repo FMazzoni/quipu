@@ -517,7 +517,14 @@ fn read_project_uuid(path: &Path) -> Result<Option<String>> {
 /// which is what makes the migration inert — every pre-existing open claim
 /// lands with no stated expiry, and a claim with no stated expiry never
 /// expires.
-pub const SCHEMA_VERSION: &str = "7";
+///
+/// "8" adds no DDL at all. It exists to run the one-off `DELETE` in [`migrate`]
+/// that drops the git claim authority's `meta` rows — `remote.authority` and
+/// the `remote.claimsha.*` cache — on a store that was configured before claims
+/// moved back to a single writer. Left in place they are config nothing reads,
+/// that `qp remote show` no longer prints and `qp remote clear` no longer
+/// removes, sitting on the exact key a future kind of remote would reach for.
+pub const SCHEMA_VERSION: &str = "8";
 
 /// How long a writer waits at the door of a contended store.
 ///
@@ -742,6 +749,15 @@ fn migrate(
                 ('display_prefix', ?3), \
                 ('project_key', ?4)",
             rusqlite::params![uuid::Uuid::new_v4().to_string(), SCHEMA_VERSION, p, key],
+        )?;
+        // Version-gated rather than ungated like the backfills below: this is a
+        // WRITE with nothing to heal on a healthy store, and running it on every
+        // open would take the write lock on the read path of every command.
+        // Once per store, on the upgrade that moves the stamp, is enough.
+        conn.execute(
+            "DELETE FROM meta WHERE key = 'remote.authority' \
+             OR key LIKE 'remote.claimsha.%'",
+            [],
         )?;
         // schema_version must advance even on existing stores being migrated forward.
         conn.execute(

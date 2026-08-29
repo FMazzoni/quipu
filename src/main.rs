@@ -2,7 +2,6 @@
 //!
 #![doc = include_str!("../docs/architecture.md")]
 
-mod claimref;
 mod cmd;
 mod db;
 mod doctor;
