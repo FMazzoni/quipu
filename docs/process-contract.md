@@ -260,6 +260,76 @@ supervisor that restarts it forever converts a legible error into a hot loop
 that fills a log with the same line. A burst limit turns it into a failed unit
 that an operator can see. A clean `SIGTERM` exit 0 must not restart at all.
 
+### There is no offline mode, and reads fail closed too
+
+**Decision: with a front door configured and unreachable, every served verb
+fails — reads exactly like writes — with the `unavailable` kind and exit 7.
+Nothing is served from a cache, nothing is queued for replay, and the store on
+the client's disk is not a cache and must never become one.**
+
+This is checked behaviour rather than a proposal. A client pointed at a dead
+listener answers identically for `list`, `show`, `take` and `claim`:
+
+```text
+$ QP_SERVER=http://127.0.0.1:8801 qp list --json
+{"error":{"endpoint":"http://127.0.0.1:8801/v1/list","kind":"unavailable",
+          "message":"... : io: Connection refused"}}
+$ echo $?
+7
+```
+
+The read half is the half that gets argued about, so the argument is recorded
+here rather than left to be re-had.
+
+**The trap, stated first, because it is the reason for the whole position.**
+Queuing writes for later replay rebuilds every mechanism the server design
+exists to delete: two writers, divergence, conflict detection, and an ordering
+rule for merges. `BEGIN IMMEDIATE` on one file is the arbitration, and a queue
+is a second writer that has not been told so yet. Whatever else is decided,
+it must not be that. A read cache is the same failure arriving politely: the
+moment a stale row is good enough to answer from, it is a second source of
+truth, and the next question is which one wins.
+
+**A stale board is worse than a loud failure, specifically for an
+orchestrator.** The consumer of a read here is not a human skimming; it is a
+coordinator deciding what to dispatch. A cached `ready` cohort answers the one
+question a dispatcher asks — *what is free* — with a snapshot of what was free,
+and the dispatcher acts on it by assigning work that another machine already
+holds. The refusal is recoverable in one line; the double dispatch is a wave
+whose event log is honest about what happened and useless for working out why.
+An error a caller cannot ignore beats an answer a caller cannot date.
+
+**The local store is not the cache, and this is where divergence would sneak
+back in.** It is the obvious candidate — a real SQLite file, the same schema,
+sitting right there — and it is the worst one, because reading it and writing
+it are one flag apart. There is no `--offline`, no fallback tier under the
+recorded url, and `resolve_server`'s local tier fires only when *no* front door
+was named at all. A machine with both a store and a front door is a machine
+whose commands go over the wire; the file beside it is not consulted, not
+compared, and not refreshed.
+
+**What an agent mid-wave does is already written down and does not change.**
+Exit 7 is *unknown outcome*, not *did not happen*: read before writing, and the
+timeline is exact evidence because `insert_event` runs inside the mutation's
+transaction. §4 has the sequence. A server that is down does not orphan a
+claim — the claim is a row, not a session — and the lease keeps running on
+wall-clock, so a long outage is the existing crashed-agent case and `qp reclaim`
+is the existing recovery.
+
+**The one path out is not a cache and is deliberately unserved.**
+`qp remote clear --front-door` detaches the store, after which its commands read
+the file beside them again. It works while the front door is down precisely
+because `remote` is local-only: resolution never consults a recorded url for a
+verb the front door does not answer. That is a deliberate act with an event
+behind it, which is the difference between choosing to work from a local store
+and being silently handed one.
+
+**What this rules out, so a later slice does not read the silence as room.** No
+response cache in `client.rs`. No write-ahead queue anywhere. No `--offline`,
+`--stale-ok` or `--cache-ttl` flag. No fallback from a configured front door to
+the local store on transport failure. Each of these looks like an availability
+improvement and each converts a single source of truth into two.
+
 ## 5. Logging
 
 **Decision: one JSON object per line, on stderr, for events that never reached
@@ -674,6 +744,95 @@ credential to guess, because there is no credential.
 
 So: if a client refused your url, the answer is a terminator in front of the
 process, never a wider bind. The bind stays on `127.0.0.1`.
+
+### Amendment: publishing a container port
+
+*The section above was written for a process on a host and, taken literally,
+forbids the only bind that works inside a container. It is amended here rather
+than edited, because the sentence it retracts is the one an operator will quote
+back.*
+
+**What is retracted is narrow: "the bind stays on `127.0.0.1`" is a statement
+about a *host's* loopback, and inside a container it is not the same interface.**
+`docker run -p` forwards to the container's own interface address, not to its
+loopback, so a `qp serve` bound to `127.0.0.1` inside a container is reachable
+from nothing at all — including from the published port that appears, correctly
+configured, in `docker ps`. Read as written, the section demands an arrangement
+that cannot answer a request.
+
+**What survives is the invariant, which was never about the literal
+`127.0.0.1`: plaintext must cross only a loopback interface.** In a container
+the network namespace *is* the boundary the host's loopback was standing in
+for. Nothing but the runtime can reach a container's interfaces unless a port is
+published, so `--bind 0.0.0.0:8787` inside a namespace publishes to that
+namespace and no further. The invariant is then carried entirely by the publish
+form:
+
+```text
+docker run -d --name qp -p 127.0.0.1:8787:8787 -v qp-store:/var/lib/quipu quipu
+```
+
+`-p 127.0.0.1:8787:8787` binds the *host* side to the host's loopback. A packet
+reaching the process has crossed the host's loopback and one namespace hop, and
+has never been on a network. Everything §7 and the client's `check_url` require
+is satisfied unchanged: a remote client still types `https://`, still reaches a
+TLS terminator, and that terminator still speaks plaintext to `127.0.0.1:8787`
+— which is now a published container port rather than a process, a difference
+the terminator cannot see and does not need to.
+
+**What stays forbidden, and it is the whole of what the section above was
+aimed at:**
+
+- **`-p 8787:8787`, or `-p 0.0.0.0:8787:8787`.** The short form publishes on
+  every host interface. This is the forbidden arrangement exactly, arriving
+  through a flag that looks like it is about the container. It is the default
+  a reader will copy, so it is named here.
+- **`--network host` with any bind but loopback.** With no namespace there is
+  no boundary left, and `0.0.0.0` means what it always meant.
+- **`qp serve --bind 0.0.0.0` on a host, outside a container.** Unchanged, and
+  still the first thing an operator reaches for at the wrong moment.
+
+The test to apply is one question, and it is the one the original section was
+asking: **can anything reach this port without first crossing an interface you
+control?** A namespace answers no. A wider host bind answers yes, and no
+container has changed that.
+
+**Authentication is not amended.** Publishing to host loopback keeps the
+plaintext invariant; it grants no credential and identifies no caller. Every
+sentence in "Authentication: read this before you expose the port" applies to a
+container unchanged, and the set of principals that can reach a loopback-published
+port is every local user on that host.
+
+### The deployment smoke, and the one thing it must assert
+
+`Dockerfile` at the repo root is the generic image: a builder stage, the binary,
+a store directory, and a foreground entrypoint. `docker-smoke.sh` is the
+procedure that proves it deploys, and `just docker-smoke` runs it. It names no
+host and no real volume; the port is an environment variable with a placeholder
+default.
+
+What it checks, in order: the container starts and `/healthz` answers with the
+version and the project list §7 promised; a client **outside** the container
+drives `add`, `list`, `take` and `complete` through the published port, from a
+directory with no store in it; `docker restart` preserves committed state while
+a client in the gap gets `unavailable` and exit 7, per §4; and a named project
+whose store is missing **refuses to start**, per §2, rather than coming up
+healthy and answering `no_store` forever.
+
+**The assertion that is the point of the whole exercise is the store's
+filesystem.** SQLite's locking is correct on local disk and is not correct over
+NFS or SMB, so a deployment that bind-mounts stores from a share passes every
+one of the checks above and corrupts under contention. The smoke therefore
+asserts, rather than assumes: the volume's driver is `local`, it carries no
+driver options (a `local` volume can still be an NFS mount through them), and
+the filesystem type observed at the mount point inside a container is not a
+network filesystem. A smoke without that assertion is worse than no smoke,
+because it manufactures confidence in the one arrangement that must not ship.
+
+What the smoke does **not** cover, said plainly so nobody reads a green run as
+covering it: a TLS terminator, a real network hop, and any host but the one it
+ran on. Those stay the manual residue — point a client at the running front
+door across the network once, and run `qp remote doctor`.
 
 ### The forward-compatible shape survived implementation
 
