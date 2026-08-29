@@ -736,6 +736,95 @@ credential to guess, because there is no credential.
 So: if a client refused your url, the answer is a terminator in front of the
 process, never a wider bind. The bind stays on `127.0.0.1`.
 
+### Amendment: publishing a container port
+
+*The section above was written for a process on a host and, taken literally,
+forbids the only bind that works inside a container. It is amended here rather
+than edited, because the sentence it retracts is the one an operator will quote
+back.*
+
+**What is retracted is narrow: "the bind stays on `127.0.0.1`" is a statement
+about a *host's* loopback, and inside a container it is not the same interface.**
+`docker run -p` forwards to the container's own interface address, not to its
+loopback, so a `qp serve` bound to `127.0.0.1` inside a container is reachable
+from nothing at all — including from the published port that appears, correctly
+configured, in `docker ps`. Read as written, the section demands an arrangement
+that cannot answer a request.
+
+**What survives is the invariant, which was never about the literal
+`127.0.0.1`: plaintext must cross only a loopback interface.** In a container
+the network namespace *is* the boundary the host's loopback was standing in
+for. Nothing but the runtime can reach a container's interfaces unless a port is
+published, so `--bind 0.0.0.0:8787` inside a namespace publishes to that
+namespace and no further. The invariant is then carried entirely by the publish
+form:
+
+```text
+docker run -d --name qp -p 127.0.0.1:8787:8787 -v qp-store:/var/lib/quipu quipu
+```
+
+`-p 127.0.0.1:8787:8787` binds the *host* side to the host's loopback. A packet
+reaching the process has crossed the host's loopback and one namespace hop, and
+has never been on a network. Everything §7 and the client's `check_url` require
+is satisfied unchanged: a remote client still types `https://`, still reaches a
+TLS terminator, and that terminator still speaks plaintext to `127.0.0.1:8787`
+— which is now a published container port rather than a process, a difference
+the terminator cannot see and does not need to.
+
+**What stays forbidden, and it is the whole of what the section above was
+aimed at:**
+
+- **`-p 8787:8787`, or `-p 0.0.0.0:8787:8787`.** The short form publishes on
+  every host interface. This is the forbidden arrangement exactly, arriving
+  through a flag that looks like it is about the container. It is the default
+  a reader will copy, so it is named here.
+- **`--network host` with any bind but loopback.** With no namespace there is
+  no boundary left, and `0.0.0.0` means what it always meant.
+- **`qp serve --bind 0.0.0.0` on a host, outside a container.** Unchanged, and
+  still the first thing an operator reaches for at the wrong moment.
+
+The test to apply is one question, and it is the one the original section was
+asking: **can anything reach this port without first crossing an interface you
+control?** A namespace answers no. A wider host bind answers yes, and no
+container has changed that.
+
+**Authentication is not amended.** Publishing to host loopback keeps the
+plaintext invariant; it grants no credential and identifies no caller. Every
+sentence in "Authentication: read this before you expose the port" applies to a
+container unchanged, and the set of principals that can reach a loopback-published
+port is every local user on that host.
+
+### The deployment smoke, and the one thing it must assert
+
+`Dockerfile` at the repo root is the generic image: a builder stage, the binary,
+a store directory, and a foreground entrypoint. `docker-smoke.sh` is the
+procedure that proves it deploys, and `just docker-smoke` runs it. It names no
+host and no real volume; the port is an environment variable with a placeholder
+default.
+
+What it checks, in order: the container starts and `/healthz` answers with the
+version and the project list §7 promised; a client **outside** the container
+drives `add`, `list`, `take` and `complete` through the published port, from a
+directory with no store in it; `docker restart` preserves committed state while
+a client in the gap gets `unavailable` and exit 7, per §4; and a named project
+whose store is missing **refuses to start**, per §2, rather than coming up
+healthy and answering `no_store` forever.
+
+**The assertion that is the point of the whole exercise is the store's
+filesystem.** SQLite's locking is correct on local disk and is not correct over
+NFS or SMB, so a deployment that bind-mounts stores from a share passes every
+one of the checks above and corrupts under contention. The smoke therefore
+asserts, rather than assumes: the volume's driver is `local`, it carries no
+driver options (a `local` volume can still be an NFS mount through them), and
+the filesystem type observed at the mount point inside a container is not a
+network filesystem. A smoke without that assertion is worse than no smoke,
+because it manufactures confidence in the one arrangement that must not ship.
+
+What the smoke does **not** cover, said plainly so nobody reads a green run as
+covering it: a TLS terminator, a real network hop, and any host but the one it
+ran on. Those stay the manual residue — point a client at the running front
+door across the network once, and run `qp remote doctor`.
+
 ### The forward-compatible shape survived implementation
 
 The wire contract separated *asserted* identity from an *authenticated
