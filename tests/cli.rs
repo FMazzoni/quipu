@@ -7363,3 +7363,133 @@ fn report_since_rejects_unrepresentable_offset_shifts() {
             .success();
     }
 }
+
+/// A command in a directory with no store must fail loudly and create nothing.
+///
+/// This used to be the quietest bug in the tool. `qp list --json` here printed
+/// `[]` and exited 0 — after creating `./.quipu/db.sqlite` on the way — so a
+/// misconfigured machine looked exactly like an empty project, and the next
+/// `qp add` filed a real ticket into a store nobody meant to make. The
+/// `.quipu` assertion is the load-bearing half: an exit code alone would still
+/// pass if resolution kept creating on the side.
+#[test]
+fn command_without_a_store_fails_with_no_store_and_creates_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    for args in [
+        vec!["list", "--json"],
+        vec!["add", "ghost"],
+        vec!["show", "QP-1"],
+        vec!["status"],
+    ] {
+        qp_bare()
+            .current_dir(tmp.path())
+            .args(&args)
+            .assert()
+            .failure()
+            .code(6)
+            .stderr(contains("no quipu store in"))
+            .stderr(contains("qp init"));
+    }
+
+    assert!(
+        !tmp.path().join(".quipu").exists(),
+        "a failing command must not have created a store"
+    );
+}
+
+/// The `--json` envelope for the same condition: a consumer branches on `kind`,
+/// not on the prose, and `path` names the store that was looked for.
+#[test]
+fn no_store_renders_a_json_envelope_with_kind_and_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let assert = qp_bare()
+        .current_dir(tmp.path())
+        .args(["list", "--json"])
+        .assert()
+        .failure()
+        .code(6);
+    let body = json_stderr(&assert);
+    assert_eq!(body["error"]["kind"], "no_store");
+    assert!(body["error"]["path"].is_string());
+    assert!(!tmp.path().join(".quipu").exists());
+}
+
+/// `qp init` is the one command that may create a store, and still does.
+#[test]
+fn init_is_the_only_command_that_creates_a_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    qp_bare()
+        .current_dir(tmp.path())
+        .arg("init")
+        .assert()
+        .success();
+    assert!(tmp.path().join(".quipu").join("db.sqlite").exists());
+    qp_bare()
+        .current_dir(tmp.path())
+        .args(["add", "now-there-is-somewhere-to-put-this"])
+        .assert()
+        .success();
+}
+
+/// Regression guard on the git-common-dir fallback, which the attach check must
+/// not break: a worktree is a *sibling* of the main repo, so the ancestor walk
+/// never reaches the repo's `.quipu/`. If `require_attached` ran against the
+/// cwd rather than the resolved path, every agent working in a worktree would
+/// be told there is no store while it is sitting right there.
+#[test]
+fn worktree_without_its_own_store_still_reaches_the_main_repo_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main = tmp.path().join("repo-main");
+    git_repo(&main);
+    let main_db = main.join(".quipu").join("db.sqlite");
+    qp(&main_db).arg("init").assert().success();
+
+    let wt = tmp.path().join("repo-wt");
+    git_worktree(&main, &wt, "wt-branch");
+
+    qp_bare()
+        .current_dir(&wt)
+        .args(["add", "filed-from-a-worktree-with-no-store"])
+        .assert()
+        .success();
+
+    assert_eq!(task_count(&main_db), 1);
+    assert!(
+        !wt.join(".quipu").exists(),
+        "the worktree must not have grown a store of its own"
+    );
+}
+
+/// An explicit `--db`/`QP_DB` at a path with no store fails the same way.
+///
+/// Deliberately not exempted. An explicit path is a *claim about where the
+/// store is*; honouring a wrong one by conjuring an empty store is precisely
+/// the silent cross-machine failure the error exists to prevent. `qp init`
+/// with that path is how you say "create it".
+#[test]
+fn explicit_db_at_a_missing_path_fails_rather_than_creating() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("nowhere").join("db.sqlite");
+
+    qp(&db)
+        .args(["list", "--json"])
+        .assert()
+        .failure()
+        .code(6)
+        .stderr(contains("no quipu store at"));
+    assert!(!db.exists());
+    assert!(!tmp.path().join("nowhere").exists());
+
+    qp_bare()
+        .current_dir(tmp.path())
+        .args(["--db", db.to_str().unwrap(), "add", "ghost"])
+        .assert()
+        .failure()
+        .code(6);
+    assert!(!db.exists());
+
+    // ...and `init` with the same path is how you actually mean it.
+    qp(&db).arg("init").assert().success();
+    assert!(db.exists());
+}
