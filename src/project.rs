@@ -40,6 +40,287 @@ pub fn legacy_key(project_uuid: &str) -> String {
     format!("{LEGACY_PREFIX}{project_uuid}")
 }
 
+/// `meta` key holding the human name this store answers to.
+///
+/// Distinct from [`KEY_PROJECT`] on purpose: the key is a uuid that identifies a
+/// project across machines, the name is what a person (or a `--project` flag)
+/// types. Neither can do the other's job — a uuid is not typeable, and a name is
+/// only unique within one machine's registry.
+pub const KEY_NAME: &str = "project_name";
+
+/// `meta` key recording whether the name was chosen or derived.
+///
+/// The whole reason a derived name is allowed to exist at all: a store that
+/// predates naming must not be bricked, but the placeholder it is healed with
+/// must not then be frozen as if a person had picked it. `derived` may be
+/// replaced silently; `assigned` may not be replaced at all.
+pub const KEY_NAME_ORIGIN: &str = "project_name_origin";
+
+/// A name a person typed (or that `qp init` took from the directory).
+pub const ORIGIN_ASSIGNED: &str = "assigned";
+
+/// A placeholder minted for a store that existed before names did.
+pub const ORIGIN_DERIVED: &str = "derived";
+
+/// Longest name accepted.
+///
+/// Long enough for a readable slug, short enough to stay typeable as a
+/// `--project` argument and to fit a listing column.
+pub const NAME_MAX: usize = 64;
+
+/// Rejects a name that cannot be typed unambiguously.
+///
+/// Lowercase ASCII letters, digits and hyphens, starting and ending
+/// alphanumeric. The character set is not aesthetic: a name is a shell argument
+/// and a lookup key, so anything that shells quote, that normalises two ways
+/// (case, Unicode) or that reads as a flag would make two spellings of one
+/// project — and a `--project` that silently matches nothing is the exact
+/// failure the name exists to prevent. Uppercase is rejected rather than folded
+/// so the stored name and the typed name are the same string.
+pub fn validate_name(name: &str) -> Result<()> {
+    let bad = |why: &str| crate::db::invalid_input(format!("project name `{name}` {why}"));
+    if name.is_empty() {
+        return Err(bad("is empty; names are 1-64 characters of [a-z0-9-]"));
+    }
+    if name.len() > NAME_MAX {
+        return Err(bad(&format!("is longer than {NAME_MAX} characters")));
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err(bad(
+            "may contain only lowercase letters, digits and hyphens",
+        ));
+    }
+    let ends_alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    if !ends_alnum(name.as_bytes()[0]) || !ends_alnum(name.as_bytes()[name.len() - 1]) {
+        return Err(bad("must start and end with a letter or digit"));
+    }
+    Ok(())
+}
+
+/// Turns arbitrary text into a name [`validate_name`] accepts, or `None`.
+///
+/// Every run of characters outside the set collapses to one hyphen, which is
+/// what makes the mapping stable: two directory names differing only in
+/// punctuation must not become two spellings that look the same in a listing.
+pub fn slug(raw: &str) -> Option<String> {
+    let mut out = String::new();
+    for c in raw.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let s = out.trim_matches('-');
+    let s: String = s.chars().take(NAME_MAX).collect();
+    let s = s.trim_end_matches('-').to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+/// The placeholder name a store with none is healed with.
+///
+/// Derived from the store's own durable identity rather than from where the
+/// file happens to sit: a name taken from a directory would change the moment
+/// the store moved, and a name that drifts is worse than an ugly one. The uuid
+/// tail is what keeps two healed stores on one machine from claiming one name.
+pub fn derived_name(display_prefix: &str, project_uuid: &str) -> String {
+    let head = slug(display_prefix).unwrap_or_else(|| "qp".to_string());
+    let tail: String = project_uuid
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(8)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    if tail.is_empty() {
+        head
+    } else {
+        format!("{head}-{tail}")
+    }
+}
+
+/// The name this store answers to, if it has one.
+pub fn read_name(conn: &Connection) -> Result<Option<String>> {
+    let v: Option<String> = conn
+        .query_row("SELECT value FROM meta WHERE key = ?1", [KEY_NAME], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    Ok(v.filter(|s| !s.is_empty()))
+}
+
+/// Whether the current name was chosen or merely derived.
+pub fn name_origin(conn: &Connection) -> Result<Option<String>> {
+    let v: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            [KEY_NAME_ORIGIN],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(v.filter(|s| !s.is_empty()))
+}
+
+/// Reads the name, or fails loudly rather than letting a caller guess one.
+pub fn require_name(conn: &Connection) -> Result<String> {
+    read_name(conn)?.ok_or_else(|| {
+        crate::db::invalid_input("store has no project_name; run `qp init --name <NAME>`")
+    })
+}
+
+/// Gives a store with no name the derived one it is understood to have.
+///
+/// Ungated by `schema_version`, exactly like [`backfill`] and
+/// `db::add_missing_columns`, and for the same reason: a store stamped at a
+/// version that already existed before names did would otherwise never be
+/// looked at again.
+///
+/// GOTCHA — do NOT fold these two rows into `migrate`'s
+/// `INSERT OR IGNORE INTO meta(...) VALUES (...)` batch. That statement ignores
+/// per ROW, not per statement, so a store missing only this key would be handed
+/// a freshly minted value there and this function would never see it: the same
+/// bug that made [`backfill`]'s derived key unreachable for stores that already
+/// existed.
+pub fn backfill_name(conn: &Connection) -> Result<()> {
+    if read_name(conn)?.is_some() {
+        return Ok(());
+    }
+    let uuid: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'project_uuid'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    // No uuid means no store yet — there is nothing to name.
+    let Some(uuid) = uuid else { return Ok(()) };
+    let prefix: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'display_prefix'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| "qp".to_string());
+    write_name(conn, &derived_name(&prefix, &uuid), ORIGIN_DERIVED)
+}
+
+/// Records a name and how it was arrived at, replacing whatever is there.
+fn write_name(conn: &Connection, name: &str, origin: &str) -> Result<()> {
+    validate_name(name)?;
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![KEY_NAME, name],
+    )?;
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![KEY_NAME_ORIGIN, origin],
+    )?;
+    Ok(())
+}
+
+/// Settles what this store is called, at `qp init` and only there.
+///
+/// INVARIANT: an assigned name is stable for the life of the store. Registry
+/// entries, and one day a `--project` flag in a running server, are keyed by it;
+/// letting `qp init` quietly rename a store would re-point every one of them at
+/// once and the tickets would still be there, under a name nothing refers to.
+/// So a second `--name` that disagrees is refused, not applied — the same call
+/// `db::init` already makes for `project_key`.
+///
+/// A DERIVED name is the one exception, and the reason the origin is recorded:
+/// it is a placeholder this binary invented for a store that predates naming,
+/// so replacing it is the migration finishing rather than a rename.
+pub fn assign_name(
+    conn: &Connection,
+    db_path: &Path,
+    requested: Option<&str>,
+    fresh: bool,
+) -> Result<String> {
+    if let Some(want) = requested {
+        validate_name(want)?;
+    }
+    let have = read_name(conn)?;
+    let origin = name_origin(conn)?;
+    match (have, requested) {
+        (Some(have), Some(want)) if have == want => Ok(have),
+        (Some(have), Some(want)) if origin.as_deref() == Some(ORIGIN_ASSIGNED) => {
+            Err(crate::db::conflict(
+                "project_name_mismatch",
+                format!(
+                    "this store is named `{have}` and cannot be renamed to `{want}`. A name is \
+                     fixed once assigned: registry entries point at it, so a rename here would \
+                     leave every one of them naming a project that no longer answers."
+                ),
+                None,
+            ))
+        }
+        // Either no name at all, or a derived placeholder being settled.
+        (_, Some(want)) => {
+            write_name(conn, want, ORIGIN_ASSIGNED)?;
+            Ok(want.to_string())
+        }
+        // An existing store keeps what it has. That includes a derived
+        // placeholder: `qp init` in a store that already exists is routine, and
+        // an unasked-for rename on a routine command is exactly what the
+        // invariant above forbids. `qp init --name` is how that one is settled.
+        (Some(have), None) if !fresh => Ok(have),
+        // A store created by THIS invocation. `backfill_name` has already given
+        // it the derived placeholder by now — `db::migrate` runs before anything
+        // here — so "no name yet" is not a state this can observe, and freshness
+        // has to be established by the caller rather than inferred from the row.
+        (_, None) => {
+            let default = default_name(db_path, conn)?;
+            write_name(conn, &default, ORIGIN_ASSIGNED)?;
+            Ok(default)
+        }
+    }
+}
+
+/// The name `qp init` picks when nobody says one.
+///
+/// The directory holding `.quipu/`, slugged — that is what a person calls the
+/// project when asked. Falls back to the derived form when the path yields
+/// nothing usable (a store at the filesystem root, a directory named `...`).
+fn default_name(db_path: &Path, conn: &Connection) -> Result<String> {
+    // A store lives at `<project>/.quipu/db.sqlite` by convention, so the
+    // directory worth naming is one above the file — except when `--db` points
+    // somewhere flat, where the holding directory is the best guess there is.
+    let dir = db_path.parent();
+    let dir = match dir {
+        Some(d) if d.file_name() == Some(std::ffi::OsStr::new(".quipu")) => d.parent(),
+        other => other,
+    };
+    let from_path = dir
+        .and_then(Path::file_name)
+        .and_then(|n| n.to_str())
+        .and_then(slug);
+    if let Some(n) = from_path {
+        return Ok(n);
+    }
+    let uuid: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'project_uuid'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or_default();
+    let prefix: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'display_prefix'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| "qp".to_string());
+    Ok(derived_name(&prefix, &uuid))
+}
+
 /// Rejects a key that could not survive a round trip through a batch header.
 pub fn validate(key: &str) -> Result<()> {
     if key.is_empty() {

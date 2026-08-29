@@ -10,6 +10,7 @@ mod id;
 mod merge;
 mod outcome;
 mod project;
+mod registry;
 mod remote;
 mod s3;
 mod store;
@@ -74,6 +75,8 @@ enum Cmd {
     Relation(cmd::relation::RelationArgs),
     /// Attach this store to a claim authority / ledger, or detach to local-only
     Remote(cmd::remote::RemoteArgs),
+    /// Name this store and manage the machine-local name → store registry
+    Project(cmd::project::ProjectArgs),
     /// Render the task DAG
     Tree(cmd::tree::TreeArgs),
     /// Show the event timeline (per-task or global)
@@ -157,6 +160,7 @@ fn wants_json(cmd: &Cmd) -> bool {
         Cmd::Ledger(a) => a.json,
         Cmd::Relation(a) => a.json(),
         Cmd::Remote(a) => a.json(),
+        Cmd::Project(a) => a.json(),
         Cmd::Tree(a) => a.json,
         Cmd::Timeline(a) => a.json,
         Cmd::Wave(a) => a.json,
@@ -311,6 +315,7 @@ fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
         Cmd::Tag(a) => cmd::tag::run(&db_path, a),
         Cmd::Relation(a) => cmd::relation::run(&db_path, a),
         Cmd::Remote(a) => cmd::remote::run(&db_path, a),
+        Cmd::Project(a) => cmd::project::run(&db_path, a),
         Cmd::Timeline(a) => cmd::timeline::run(&db_path, a),
         Cmd::Decisions(a) => cmd::decisions::run(&db_path, a),
         Cmd::Tree(a) => cmd::tree::run(&db_path, a),

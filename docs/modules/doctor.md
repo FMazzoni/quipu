@@ -151,3 +151,32 @@ command did what it was asked — and the exit code is the signal: `0` when noth
 failed, `5` when something did. A code of its own rather than the retryable
 conflict code, so a skill that retries on that one does not loop forever against
 a remote that will never come good.
+
+## Naming and registry checks
+
+Two sequences run unconditionally, before anything that needs a remote: naming
+and the registry are how a caller reaches this store *by name*, and they are
+wrong in the same way whether or not a remote is attached.
+
+`registry` covers the file — readable, versioned, no name claimed twice, no entry
+pointing at a store that is gone. `project` covers this store — it has a name,
+the name is well-formed, it is registered, and the entry points back here.
+
+They are two sequences rather than one because the faults are independent, and
+each sequence stops at its first failure. A duplicate somewhere else in the file
+says nothing about whether this store is named correctly; folding them together
+would hide one fault behind the other.
+
+Not being registered is a NOTE that carries a remedy, not a failure. Every store
+starts unregistered and most stay that way — every command today finds its store
+by walking up from the cwd — so failing the run there would fire on the normal
+case, and a check that fires on the normal case is one people learn to ignore.
+`Seq::advice` exists for exactly this: something to do about a state that is not
+a fault. The genuine faults keep their exit code: a malformed name, a duplicate,
+a dangling entry, and an entry that resolves to a different store.
+
+The `project` sequence's `name` failure is a guard, not a routine diagnosis: any
+open of a store heals a missing name, so a store reached through the CLI always
+has one. It fires for a reader that does not heal — a store on a read-only
+filesystem, or a process holding a connection it did not open — and its branch is
+pinned by a unit test rather than an end-to-end one for exactly that reason.

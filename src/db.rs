@@ -573,6 +573,11 @@ fn migrate(
     // is already stamped at a version this binary knows, so a gated backfill
     // would never reach one.
     crate::project::backfill(conn)?;
+    // Ungated for the same reason, and NOT folded into the INSERT OR IGNORE
+    // batch above: that statement ignores per row, so a store missing only the
+    // name would be handed a value there and never reach the derivation that
+    // knows what the name should be. See `project::backfill_name`.
+    crate::project::backfill_name(conn)?;
     Ok(current)
 }
 

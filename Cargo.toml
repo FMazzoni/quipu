@@ -64,6 +64,16 @@ uuid = { version = "1", features = ["v4"] }
 # UTC instant and nothing else.
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 url = "2"
+# The XDG base-directory lookup for the project registry (`src/registry.rs`).
+# quipu had NO config channel before this — it read environment variables only —
+# so a location had to be chosen, and choosing it by hand means reimplementing
+# `$XDG_CONFIG_HOME`-then-`~/.config` plus the macOS and Windows answers, which
+# is exactly the "hand-rolled path logic" CLAUDE.md rules out. `dirs` is the
+# smallest crate that does that properly: no async runtime, no I/O, and on Linux
+# it resolves to a `getenv` plus a string join. Measured against the hard budget
+# rather than the aspirational one — it is not on the cold-start path at all,
+# since only `qp project` and `qp remote doctor` ask where the registry is.
+dirs = "6"
 
 [dev-dependencies]
 assert_cmd = "2"
