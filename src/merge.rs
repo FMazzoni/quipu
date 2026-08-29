@@ -105,6 +105,19 @@ pub fn is_legal_transition(from: &str, to: &str) -> bool {
     TRANSITIONS.contains(&(from, to))
 }
 
+/// Whether a task in this state holds an open assignment.
+///
+/// The states, not the exits: `assigned` and `running` are the two a claim
+/// spans, and everything else is outside it. Consumers that ask "does this move
+/// release the claim?" should ask it of the ORIGIN — leaving a held state
+/// releases it, whatever the destination, with `assigned` -> `running` the one
+/// edge that stays inside. Enumerating the destinations instead is what left
+/// replay with no arm for a historic `running` -> `ready` hop and an assignment
+/// row open forever behind it.
+pub fn holds_assignment(state: &str) -> bool {
+    matches!(state, "assigned" | "running")
+}
+
 /// Whether a task may come into existence already in this state.
 pub fn is_birth_state(state: &str) -> bool {
     matches!(state, "pending" | "ready")
@@ -134,6 +147,21 @@ mod tests {
     /// `assigned` — written in the same millisecond by the same store, which is
     /// ordinary — tie completely, and the sequence they replay in becomes a
     /// property of whatever fed the sort rather than of the log.
+    /// `assigned` -> `running` is the only edge that stays inside a claim.
+    ///
+    /// `import`'s release arm is keyed on the origin state and excepts exactly
+    /// that one destination. If the machine ever grows a second edge between
+    /// two held states, that arm silently starts closing a live claim — so the
+    /// assumption is asserted here, next to the table it is an assumption about.
+    #[test]
+    fn the_only_move_between_two_held_states_is_the_claim() {
+        let inner: Vec<&(&str, &str)> = TRANSITIONS
+            .iter()
+            .filter(|(f, t)| holds_assignment(f) && holds_assignment(t))
+            .collect();
+        assert_eq!(inner, vec![&("assigned", "running")]);
+    }
+
     #[test]
     fn same_millisecond_events_from_one_store_keep_their_original_order() {
         let ts = "2026-01-01T00:00:00.001Z";
