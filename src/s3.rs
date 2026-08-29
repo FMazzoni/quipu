@@ -660,13 +660,16 @@ pub fn place(dir: &Path, key: &str, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Every project key the ledger holds, from one delimited LIST.
+/// Every first-level key segment the ledger holds, from one delimited LIST.
 ///
 /// One request, no downloads: the project key is the first key segment, so the
-/// server's `CommonPrefixes` answer IS the project list. That is what makes the
-/// `qp init` guard — "does this ledger already hold projects?" — affordable on a
-/// bucket holding hundreds of them, where reading a header out of each project
-/// would not be.
+/// server's `CommonPrefixes` answer is the candidate list, and enumerating stays
+/// affordable on a bucket holding hundreds of projects.
+///
+/// Candidates, not projects. A segment is a LOCATION — a url naming the bucket
+/// root cannot tell a project apart from a key prefix another store publishes
+/// under. `project::scan_object` is what turns this into an answer, by confirming
+/// each candidate against a batch header; callers wanting projects want that.
 impl Client {
     pub fn list_project_keys(&self) -> Result<Vec<String>, Fault> {
         let mut action = ListObjectsV2::new(&self.bucket, Some(&self.creds));
