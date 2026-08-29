@@ -3,13 +3,14 @@
 #![doc = include_str!("../../docs/modules/contains.md")]
 
 use crate::effects::{self, Effect};
-use crate::outcome::{emit, Outcome};
+use crate::outcome::Outcome;
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContainsArgs {
     /// The container — the task the children are part of.
     pub parent: String,
@@ -18,12 +19,26 @@ pub struct ContainsArgs {
     pub children: Vec<String>,
     /// Remove the containment edges instead of adding them.
     #[arg(long)]
+    #[serde(default)]
     pub rm: bool,
     /// Required when the container is assigned/running. Must match its assignee.
     #[arg(long = "as")]
+    #[serde(default)]
     pub agent: Option<String>,
     #[arg(long)]
+    #[serde(skip)]
     pub json: bool,
+}
+
+impl crate::route::Served for ContainsArgs {
+    const VERB: &'static str = "contains";
+    type Out = ContainsOutcome;
+    fn wants_json(&self) -> bool {
+        self.json
+    }
+    fn exec(db_path: &std::path::Path, a: Self) -> Result<Self::Out> {
+        exec(db_path, a)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -102,7 +117,7 @@ impl Outcome for ContainsOutcome {
 /// child rejects the whole call rather than leaving four edges applied and no
 /// indication which. Ownership of the container is checked once, up front,
 /// for the same reason.
-pub fn run(db_path: &std::path::Path, a: ContainsArgs) -> Result<()> {
+pub fn exec(db_path: &std::path::Path, a: ContainsArgs) -> Result<ContainsOutcome> {
     let mut conn = db::open(db_path)?;
     let parent = id::resolve_full(&conn, &a.parent)?;
     // Resolve every child before opening the transaction: an unknown id should
@@ -179,15 +194,12 @@ pub fn run(db_path: &std::path::Path, a: ContainsArgs) -> Result<()> {
         },
     )?;
 
-    emit(
-        a.json,
-        &ContainsOutcome {
-            display_id: parent.display_id,
-            children: children.into_iter().map(|c| c.display_id).collect(),
-            op: if a.rm { "rm" } else { "add" }.to_string(),
-            changed,
-            unchanged,
-            effects,
-        },
-    )
+    Ok(ContainsOutcome {
+        display_id: parent.display_id,
+        children: children.into_iter().map(|c| c.display_id).collect(),
+        op: if a.rm { "rm" } else { "add" }.to_string(),
+        changed,
+        unchanged,
+        effects,
+    })
 }

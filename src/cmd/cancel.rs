@@ -3,19 +3,33 @@
 #![doc = include_str!("../../docs/modules/cancel.md")]
 
 use crate::effects::{self, Effect};
-use crate::outcome::{emit, Outcome};
+use crate::outcome::Outcome;
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CancelArgs {
     pub task: String,
     #[arg(long)]
+    #[serde(default)]
     pub reason: Option<String>,
     #[arg(long)]
+    #[serde(skip)]
     pub json: bool,
+}
+
+impl crate::route::Served for CancelArgs {
+    const VERB: &'static str = "cancel";
+    type Out = Cancelled;
+    fn wants_json(&self) -> bool {
+        self.json
+    }
+    fn exec(db_path: &std::path::Path, a: Self) -> Result<Self::Out> {
+        exec(db_path, a)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -34,7 +48,7 @@ impl Outcome for Cancelled {
     }
 }
 
-pub fn run(db_path: &std::path::Path, a: CancelArgs) -> Result<()> {
+pub fn exec(db_path: &std::path::Path, a: CancelArgs) -> Result<Cancelled> {
     let mut conn = db::open(db_path)?;
     let resolved = id::resolve_full(&conn, &a.task)?;
     let task_id = resolved.id;
@@ -86,13 +100,10 @@ pub fn run(db_path: &std::path::Path, a: CancelArgs) -> Result<()> {
         let promoted = db::refresh_ready_logged(tx, None, "cancel")?;
         effects::collateral(tx, &[task_id], "cancel", &db::Movements::promoted(promoted))
     })?;
-    emit(
-        a.json,
-        &Cancelled {
-            display_id: resolved.display_id,
-            state: "cancelled".to_string(),
-            reason: a.reason,
-            effects,
-        },
-    )
+    Ok(Cancelled {
+        display_id: resolved.display_id,
+        state: "cancelled".to_string(),
+        reason: a.reason,
+        effects,
+    })
 }

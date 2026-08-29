@@ -134,20 +134,35 @@ The rule they share: **the response body must not depend on how the caller was
 going to render it.** A server that echoed `with_description` would make two
 invocations differing only in a terminal flag produce different bytes.
 
-### `relation list` and the `if` guard
+### `relation list` is not a read-side endpoint
 
-`qp relation list` is served and `relation add`/`rm` are not yet, and one `Cmd`
-variant carries all three. `served!` therefore takes an optional `if <path>`
-guard used only for `is_served`. Without it the gate would claim
-`--server qp relation add` goes over the wire, `real_main` would skip the attach
-check, and the command would then write the *local* store — reading and writing
-the wrong file silently, which is the exact failure the attach check exists to
-prevent. Any later subcommand group the front door answers only part of needs
-the same guard.
+It is served, but by the row above rather than by this slice's shape, and the
+next section says why. The read side briefly split the group — `relation list`
+as its own args struct, plus an optional `if <path>` guard on `served!` so
+`is_served` would not claim the unserved ops — because from where it sat only
+`list` was servable. The write fan-out then served the whole group, which
+removes the hazard the guard existed for, so both the split and the guard are
+gone. An unused mechanism with a subtle purpose is worse than no mechanism.
 
-This does not reopen the wire contract's "splitting a subcommand group across
-the boundary is worse than keeping it whole". That rule was written about
-`remote`, where the split would be permanent because `doctor` can never be
-served. Here the split is a merge artefact: the group is whole again once the
-write fan-out lands, and the guard is what keeps the intermediate state honest
-rather than silently wrong.
+The count in this file's read-side section is eight views, not nine, for the
+same reason: `relation` is one route for three ops.
+
+## A subcommand group is one route, never several
+
+`Served` is implemented for an args *struct*, and `is_served` matches on a `Cmd`
+*variant*. Both are the group, not the op: there is no `Cmd::RelationAdd`, so
+`relation` and `tag` are served whole or not at all.
+
+That is not a limitation to work around — it is the same rule the wire contract
+applies to `remote`, arrived at from the other side. Serving `relation add` and
+leaving `relation list` local would send the write to the front door and run the
+read against whatever store is on the *client's* disk, which for a caller
+pointed at a server is usually no store at all. The op therefore travels inside
+the request body (`{"op":{"add":{…}}}`, lower-cased to match what the caller
+types), and the response is one `untagged` enum over the payloads the ops
+already had — untagged so each variant stays the bare object it has always been
+on the wire, rather than every existing `--json` consumer gaining a wrapper.
+
+The cost is that a group is served only when *every* one of its ops can be. That
+is a real constraint on which slice may serve a group, and it is why `relation`'s
+read op landed with its writes rather than with the other reads.

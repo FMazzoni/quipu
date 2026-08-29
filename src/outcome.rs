@@ -14,10 +14,17 @@ pub trait Outcome: serde::Serialize {
 /// Print `o` as JSON (if `json`) or its human summary, to stdout.
 ///
 /// Empty prose prints *nothing*, not a blank line. Every mutating payload
-/// renders one line unconditionally, so this arm only fires on the read views,
-/// where it is what those commands always did: `qp timeline` on a store with no
-/// events wrote no bytes at all, and a blank line would be a new one for every
-/// consumer that counts them.
+/// renders one line unconditionally, so this arm fires only on views that can
+/// legitimately be empty, where it is what those commands always did:
+/// `qp timeline` on a store with no events wrote no bytes at all, and a blank
+/// line would be a new one for every consumer that counts them.
+///
+/// It is not only the read *endpoints*. `qp relation list` reaches this through
+/// the write group's route, and it regressed for exactly one merge: routing it
+/// through the shared output path made an empty listing print a blank line
+/// where the hand-written `for` loop it replaced printed nothing. The guard is
+/// here rather than in any one view because the next payload to render `""`
+/// will not think to ask.
 pub fn emit(json: bool, o: &impl Outcome) -> anyhow::Result<()> {
     if json {
         println!("{}", serde_json::to_string(o)?);
@@ -86,7 +93,7 @@ mod tests {
     use crate::cmd::log::Logged;
     use crate::cmd::project::{ListOutcome, LookupOutcome, RegisterOutcome, UnregisterOutcome};
     use crate::cmd::reclaim::Reclaimed;
-    use crate::cmd::relation::{RelationAdded, RelationList, RelationRemoved};
+    use crate::cmd::relation::{RelationAdded, RelationOutcome, RelationRemoved};
     use crate::cmd::remote::{RemoteCleared, RemoteSet, RemoteShow};
     use crate::cmd::report::ReportView;
     use crate::cmd::show::ShowView;
@@ -137,7 +144,7 @@ mod tests {
         Reclaimed,
         RegisterOutcome,
         RelationAdded,
-        RelationList,
+        RelationOutcome,
         RelationRemoved,
         RemoteCleared,
         RemoteSet,

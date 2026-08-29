@@ -149,19 +149,29 @@ macro_rules! served {
 }
 
 served! {
+    Abandon => crate::cmd::abandon::AbandonArgs,
     Add => crate::cmd::add::AddArgs,
     Assign => crate::cmd::assign::AssignArgs,
+    Block => crate::cmd::block::BlockArgs,
+    Cancel => crate::cmd::cancel::CancelArgs,
     Claim => crate::cmd::claim::ClaimArgs,
     Complete => crate::cmd::complete::CompleteArgs,
-    List => crate::cmd::list::ListArgs,
-    Show => crate::cmd::show::ShowArgs,
-    Tree => crate::cmd::tree::TreeArgs,
-    Timeline => crate::cmd::timeline::TimelineArgs,
-    Wave => crate::cmd::wave::WaveArgs,
-    Status => crate::cmd::status::StatusArgs,
-    Report => crate::cmd::report::ReportArgs,
+    Contains => crate::cmd::contains::ContainsArgs,
     Decisions => crate::cmd::decisions::DecisionsArgs,
-    Relation if crate::cmd::relation::is_list => crate::cmd::relation::RelationListArgs,
+    Depends => crate::cmd::depends::DependsArgs,
+    Edit => crate::cmd::edit::EditArgs,
+    List => crate::cmd::list::ListArgs,
+    Log => crate::cmd::log::LogArgs,
+    Reclaim => crate::cmd::reclaim::ReclaimArgs,
+    Relation => crate::cmd::relation::RelationArgs,
+    Report => crate::cmd::report::ReportArgs,
+    Show => crate::cmd::show::ShowArgs,
+    Status => crate::cmd::status::StatusArgs,
+    Tag => crate::cmd::tag::TagArgs,
+    Take => crate::cmd::take::TakeArgs,
+    Timeline => crate::cmd::timeline::TimelineArgs,
+    Tree => crate::cmd::tree::TreeArgs,
+    Wave => crate::cmd::wave::WaveArgs,
 }
 
 /// The handler for a verb, or `None` if the front door does not answer it.
@@ -184,20 +194,34 @@ mod tests {
         assert_eq!(
             verbs,
             [
+                "abandon",
                 "add",
                 "assign",
+                "block",
+                "cancel",
                 "claim",
                 "complete",
+                "contains",
                 "decisions",
+                "depends",
+                "edit",
                 "list",
-                "relation/list",
+                "log",
+                "reclaim",
+                "relation",
                 "report",
                 "show",
                 "status",
+                "tag",
+                "take",
                 "timeline",
                 "tree",
                 "wave",
-            ]
+            ],
+            "every verb the wire contract's triage lists as served — fifteen \
+             writes and eight reads — and nothing else. `relation` is one row \
+             for the whole subcommand group, which is why there is no \
+             `relation/list`: the group is served whole or not at all."
         );
         for v in &verbs {
             assert!(lookup(v).is_some(), "{v} is in ROUTES but not resolvable");

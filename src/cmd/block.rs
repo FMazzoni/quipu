@@ -3,13 +3,14 @@
 #![doc = include_str!("../../docs/modules/block.md")]
 
 use crate::effects::{self, Effect};
-use crate::outcome::{emit, Outcome};
+use crate::outcome::Outcome;
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BlockArgs {
     pub task: String,
     #[arg(long = "as")]
@@ -18,9 +19,22 @@ pub struct BlockArgs {
     pub new: String,
     /// Tag(s) for the new blocker task. Repeatable; replaces the default when given.
     #[arg(long, value_name = "NAME")]
+    #[serde(default)]
     pub tag: Vec<String>,
     #[arg(long)]
+    #[serde(skip)]
     pub json: bool,
+}
+
+impl crate::route::Served for BlockArgs {
+    const VERB: &'static str = "block";
+    type Out = Blocked;
+    fn wants_json(&self) -> bool {
+        self.json
+    }
+    fn exec(db_path: &std::path::Path, a: Self) -> Result<Self::Out> {
+        exec(db_path, a)
+    }
 }
 
 /// The skill-layer convention `qp block` defaults to. See the module header.
@@ -47,7 +61,7 @@ impl Outcome for Blocked {
     }
 }
 
-pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
+pub fn exec(db_path: &std::path::Path, a: BlockArgs) -> Result<Blocked> {
     let mut conn = db::open(db_path)?;
     let resolved = id::resolve_full(&conn, &a.task)?;
     let task_id = resolved.id;
@@ -235,15 +249,12 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
         )?;
         Ok((blocker_display, effects))
     })?;
-    emit(
-        a.json,
-        &Blocked {
-            display_id: resolved.display_id,
-            blocker_id: blocker_display,
-            blocker_title: a.new,
-            blocker_tags: tags,
-            state: "pending".to_string(),
-            effects,
-        },
-    )
+    Ok(Blocked {
+        display_id: resolved.display_id,
+        blocker_id: blocker_display,
+        blocker_title: a.new,
+        blocker_tags: tags,
+        state: "pending".to_string(),
+        effects,
+    })
 }
