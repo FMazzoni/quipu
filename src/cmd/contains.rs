@@ -6,7 +6,7 @@ use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Args, Debug)]
 pub struct ContainsArgs {
@@ -25,12 +25,13 @@ pub struct ContainsArgs {
     pub json: bool,
 }
 
-#[derive(Serialize)]
-struct ContainsOutcome {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct ContainsOutcome {
     display_id: String,
     /// Every child named on the command line, in the order given.
     children: Vec<String>,
-    op: &'static str,
+    op: String,
     /// The children this call actually linked or released.
     changed: Vec<String>,
     /// Children this call did nothing to, because the edge was already in the
@@ -163,7 +164,7 @@ pub fn run(db_path: &std::path::Path, a: ContainsArgs) -> Result<()> {
         &ContainsOutcome {
             display_id: parent.display_id,
             children: children.into_iter().map(|c| c.display_id).collect(),
-            op: if a.rm { "rm" } else { "add" },
+            op: if a.rm { "rm" } else { "add" }.to_string(),
             changed,
             unchanged,
         },

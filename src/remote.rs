@@ -214,7 +214,7 @@ pub fn git(db_path: &Path, url: &str, lane: &str) -> std::process::Command {
 /// missing credentials, rejected credentials, a missing bucket, a prefix outside
 /// your policy, a TLS trust failure and a skewed clock all want different fixes,
 /// and they are indistinguishable once flattened into "could not reach it".
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reach {
     Ok,

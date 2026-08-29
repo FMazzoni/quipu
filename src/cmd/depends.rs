@@ -7,7 +7,7 @@ use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
 use rusqlite::OptionalExtension;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Args, Debug)]
 pub struct DependsArgs {
@@ -26,11 +26,12 @@ pub struct DependsArgs {
     pub json: bool,
 }
 
-#[derive(Serialize)]
-struct DependsOutcome {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct DependsOutcome {
     display_id: String,
     on_id: String,
-    op: &'static str,
+    op: String,
     /// For `rm`: did removing this edge promote `display_id` itself to `ready`?
     /// Always `false` for `add` (adding an edge can only demote, never promote).
     promoted: bool,
@@ -122,7 +123,7 @@ pub fn run(db_path: &std::path::Path, a: DependsArgs) -> Result<()> {
         &DependsOutcome {
             display_id: task_resolved.display_id,
             on_id: on_resolved.display_id,
-            op,
+            op: op.to_string(),
             promoted,
         },
     )

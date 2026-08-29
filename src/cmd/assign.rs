@@ -6,7 +6,7 @@ use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Args, Debug)]
 pub struct AssignArgs {
@@ -17,8 +17,9 @@ pub struct AssignArgs {
     pub json: bool,
 }
 
-#[derive(Serialize)]
-struct Assigned {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct Assigned {
     display_id: String,
     agent_id: String,
     state: String,

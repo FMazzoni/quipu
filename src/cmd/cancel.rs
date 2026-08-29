@@ -6,7 +6,7 @@ use crate::outcome::{emit, Outcome};
 use crate::{claimref, db, id};
 use anyhow::Result;
 use clap::Args;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Args, Debug)]
 pub struct CancelArgs {
@@ -17,8 +17,9 @@ pub struct CancelArgs {
     pub json: bool,
 }
 
-#[derive(Serialize)]
-struct Cancelled {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct Cancelled {
     display_id: String,
     state: String,
     reason: Option<String>,

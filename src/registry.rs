@@ -55,10 +55,12 @@ pub struct Registry {
 }
 
 /// What a registration turned out to be, so the caller can say so.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
 #[serde(rename_all = "snake_case")]
 pub enum Registered {
     /// The name was not in the registry.
+    #[cfg_attr(test, default)]
     Added,
     /// This exact store was already registered under this name.
     Unchanged,

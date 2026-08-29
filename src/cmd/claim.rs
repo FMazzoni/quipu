@@ -6,7 +6,7 @@ use crate::outcome::{emit, Outcome};
 use crate::{claimref, db, id, lease};
 use anyhow::Result;
 use clap::Args;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Args, Debug)]
 pub struct ClaimArgs {
@@ -21,8 +21,9 @@ pub struct ClaimArgs {
     pub json: bool,
 }
 
-#[derive(Serialize)]
-struct Claimed {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct Claimed {
     display_id: String,
     agent_id: String,
     state: String,

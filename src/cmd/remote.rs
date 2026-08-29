@@ -7,7 +7,7 @@ use crate::outcome::{emit, Outcome};
 use crate::remote::{self, Reach, Remotes};
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Args, Debug)]
 pub struct RemoteArgs {
@@ -82,14 +82,15 @@ impl RemoteArgs {
 const EXIT_FAULT: i32 = 5;
 
 /// Reachability as it appears in output: absent unless `--check` asked for it.
-#[derive(Serialize)]
-struct Checked {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct Checked {
     /// Field names carry the `_reachable` suffix because `Checked` is
     /// `#[serde(flatten)]`ed next to the url fields; bare `authority` would
     /// emit the key twice.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     authority_reachable: Option<Reach>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     ledger_reachable: Option<Reach>,
 }
 
@@ -113,12 +114,13 @@ impl Checked {
     }
 }
 
-#[derive(Serialize)]
-struct RemoteSet {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct RemoteSet {
     authority: Option<String>,
     ledger: Option<String>,
     /// Which keys this invocation wrote — `set --ledger` leaves the authority alone.
-    changed: Vec<&'static str>,
+    changed: Vec<String>,
     #[serde(flatten)]
     checked: Checked,
 }
@@ -126,7 +128,7 @@ impl Outcome for RemoteSet {
     fn human(&self) -> String {
         let mut out: Vec<String> = Vec::new();
         for k in &self.changed {
-            let url = match *k {
+            let url = match k.as_str() {
                 "authority" => self.authority.as_deref(),
                 _ => self.ledger.as_deref(),
             };
@@ -137,8 +139,9 @@ impl Outcome for RemoteSet {
     }
 }
 
-#[derive(Serialize)]
-struct RemoteShow {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct RemoteShow {
     /// This store's own id, and the project it belongs to. Shown here because
     /// this is the command that answers "who am I to the other machines" — and
     /// two stores of one project differ in the first and agree in the second.
@@ -173,10 +176,11 @@ impl Outcome for RemoteShow {
     }
 }
 
-#[derive(Serialize)]
-struct RemoteCleared {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct RemoteCleared {
     /// Keys that actually held a value. Clearing an unset key is a no-op, not an error.
-    cleared: Vec<&'static str>,
+    cleared: Vec<String>,
     authority: Option<String>,
     ledger: Option<String>,
     local_only: bool,
@@ -228,7 +232,7 @@ pub fn run(db_path: &std::path::Path, a: RemoteArgs) -> Result<()> {
                 &RemoteSet {
                     authority: now.authority,
                     ledger: now.ledger,
-                    changed,
+                    changed: changed.into_iter().map(str::to_string).collect(),
                     checked,
                 },
             )
@@ -288,7 +292,7 @@ pub fn run(db_path: &std::path::Path, a: RemoteArgs) -> Result<()> {
             emit(
                 json,
                 &RemoteCleared {
-                    cleared,
+                    cleared: cleared.into_iter().map(str::to_string).collect(),
                     local_only: now.local_only(),
                     authority: now.authority,
                     ledger: now.ledger,
@@ -324,5 +328,36 @@ fn probe_all(
     Checked {
         authority_reachable: one("authority", &r.authority),
         ledger_reachable: one("ledger", &r.ledger),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The flattened `Checked` with its keys present.
+    ///
+    /// A `#[serde(flatten)]`ed field with every key absent — the registry's
+    /// `Default` sample — is a different deserialisation path from this one.
+    #[test]
+    fn a_probed_remote_round_trips() {
+        let checked = || Checked {
+            authority_reachable: Some(Reach::Ok),
+            ledger_reachable: Some(Reach::Fault("bucket not found".to_string())),
+        };
+        crate::outcome::round_trip::assert_round_trips(&RemoteSet {
+            authority: Some("https://git.example.com/q.git".to_string()),
+            ledger: Some("s3://example/ledger".to_string()),
+            changed: vec!["authority".to_string(), "ledger".to_string()],
+            checked: checked(),
+        });
+        crate::outcome::round_trip::assert_round_trips(&RemoteShow {
+            project_uuid: "00000000-0000-4000-8000-000000000000".to_string(),
+            project_key: "example".to_string(),
+            authority: None,
+            ledger: Some("s3://example/ledger".to_string()),
+            local_only: false,
+            checked: checked(),
+        });
     }
 }

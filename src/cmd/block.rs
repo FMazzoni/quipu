@@ -6,7 +6,7 @@ use crate::outcome::{emit, Outcome};
 use crate::{claimref, db, id};
 use anyhow::Result;
 use clap::Args;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Args, Debug)]
 pub struct BlockArgs {
@@ -25,8 +25,9 @@ pub struct BlockArgs {
 /// The skill-layer convention `qp block` defaults to. See the module header.
 const DEFAULT_BLOCKER_TAG: &str = "kind:blocker";
 
-#[derive(Serialize)]
-struct Blocked {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct Blocked {
     display_id: String,
     blocker_id: String,
     blocker_title: String,

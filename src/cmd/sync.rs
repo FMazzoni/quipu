@@ -8,7 +8,7 @@ use crate::{db, project, remote, s3};
 use anyhow::{Context, Result};
 use clap::Args;
 use rusqlite::{Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -20,7 +20,8 @@ pub struct SyncArgs {
 }
 
 /// One exchange: what went out, what came back, and what the merge did with it.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
 pub struct SyncOutcome {
     ledger: String,
     /// The key prefix this store read and wrote. Every object it touched is under it.
@@ -287,5 +288,34 @@ mod tests {
         let own: Vec<&String> = keys.iter().collect();
         assert_eq!(published_watermark(&own, uuid), 42);
         assert_eq!(published_watermark(&[], uuid), 0);
+    }
+
+    /// The `Some(import)` arm plus both embedded outcomes.
+    ///
+    /// The registry's `Default` sample leaves all three empty.
+    #[test]
+    fn a_two_way_sync_round_trips() {
+        let import = import::ImportOutcome {
+            mode: "merge".to_string(),
+            stores: vec!["peer".to_string()],
+            events_new: 3,
+            ..Default::default()
+        };
+        let export = export::ExportOutcome {
+            event_count: 3,
+            file: Some("batch-1.jsonl".to_string()),
+            first_event_id: Some(1),
+            last_event_id: Some(3),
+            ..Default::default()
+        };
+        crate::outcome::round_trip::assert_round_trips(&SyncOutcome {
+            ledger: "s3://example/ledger".to_string(),
+            prefix: "example/".to_string(),
+            pushed: true,
+            put: Some("example/batch-1.jsonl".to_string()),
+            export,
+            fetched: vec!["example/peer-1.jsonl".to_string()],
+            import: Some(import),
+        });
     }
 }

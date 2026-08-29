@@ -6,7 +6,7 @@ use crate::outcome::{emit, Outcome};
 use crate::{cmd::import, cmd::sync, db, project, remote, s3};
 use anyhow::Result;
 use clap::Args;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Environment pointer at the ledger, for the guard to look at.
@@ -52,7 +52,8 @@ pub struct InitArgs {
 /// ignores the flag — echoing the argument would report a rename that did not
 /// happen. `project_key` and `identity` are the pair that makes the difference
 /// between starting and joining observable at the moment it is decided.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
 pub struct InitOutcome {
     db_path: String,
     prefix: String,
@@ -64,12 +65,12 @@ pub struct InitOutcome {
     project_key: String,
     /// `minted` (new project), `inherited` (joined one), `restored`, or
     /// `existing` (this store already had one).
-    identity: &'static str,
+    identity: String,
 }
 
 impl Outcome for InitOutcome {
     fn human(&self) -> String {
-        let what = match self.identity {
+        let what = match self.identity.as_str() {
             "inherited" => format!("joined project {}", self.project_key),
             "restored" => format!("restored into project {}", self.project_key),
             "minted" => format!("started project {}", self.project_key),
@@ -264,7 +265,7 @@ pub fn run(db_path: &Path, a: InitArgs) -> Result<()> {
         schema_version: db::SCHEMA_VERSION.to_string(),
         project_uuid: crate::claimref::project_uuid(&conn)?,
         project_key: project::require(&conn)?,
-        identity,
+        identity: identity.to_string(),
     };
     emit(a.json, &outcome)
 }

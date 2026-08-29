@@ -5,7 +5,7 @@
 use crate::claimref::{Arbiter, WriteProbe};
 use crate::remote::Remotes;
 use crate::s3::{self, Fault, Scope};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// The key a write probe puts and gets back. Fixed, flat, and outside the ledger's shape.
@@ -33,9 +33,11 @@ const SKEW_WARN: time::Duration = time::Duration::minutes(5);
 /// `Note` exists so that a fact worth reporting is not forced to masquerade as
 /// a pass or a failure: multiplexing being off is neither broken nor fine, and
 /// a check that could not be run must not be counted as one that succeeded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
+    #[cfg_attr(test, default)]
     Pass,
     Fail,
     Note,
@@ -57,21 +59,22 @@ impl Status {
 ///
 /// `remedy` is the reason this command exists. A diagnosis nobody can act on is
 /// a slower error message, so every `Fail` carries one.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Check {
     /// Which remote this belongs to: `config`, `ledger` or `authority`.
-    pub target: &'static str,
+    pub target: String,
     /// Stable machine name for the check, for a script that branches on one.
-    pub name: &'static str,
+    pub name: String,
     pub status: Status,
     /// What was checked and what came back.
     pub detail: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remedy: Option<String>,
 }
 
 /// The whole diagnosis.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
 pub struct Report {
     pub authority: Option<String>,
     pub ledger: Option<String>,
@@ -93,8 +96,8 @@ impl crate::outcome::Outcome for Report {
         let mut current = "";
         for c in &self.checks {
             if c.target != current {
-                current = c.target;
-                let url = match c.target {
+                current = c.target.as_str();
+                let url = match c.target.as_str() {
                     "ledger" => self.ledger.as_deref(),
                     "authority" => self.authority.as_deref(),
                     _ => None,
@@ -144,8 +147,8 @@ impl<'a> Seq<'a> {
 
     fn push(&mut self, name: &'static str, status: Status, detail: String, remedy: Option<String>) {
         self.checks.push(Check {
-            target: self.target,
-            name,
+            target: self.target.to_string(),
+            name: name.to_string(),
             status,
             detail,
             remedy,
@@ -1744,5 +1747,35 @@ mod tests {
             Clock::Fine { .. }
         ));
         assert!(matches!(clock_verdict(None, &Ok(())), Clock::Unknown));
+    }
+
+    /// A report with checks in it, which the empty `Default` sample cannot reach.
+    ///
+    /// `remedy` carries `skip_serializing_if` and `Status` is an enum whose wire
+    /// form is its own `rename_all` spelling.
+    #[test]
+    fn a_populated_report_round_trips() {
+        crate::outcome::round_trip::assert_round_trips(&Report {
+            authority: Some("https://git.example.com/q.git".to_string()),
+            ledger: None,
+            local_only: false,
+            ok: false,
+            checks: vec![
+                Check {
+                    target: "config".to_string(),
+                    name: "prefix".to_string(),
+                    status: Status::Pass,
+                    detail: "prefix is set".to_string(),
+                    remedy: None,
+                },
+                Check {
+                    target: "authority".to_string(),
+                    name: "reachable".to_string(),
+                    status: Status::Fail,
+                    detail: "could not connect".to_string(),
+                    remedy: Some("check the url".to_string()),
+                },
+            ],
+        });
     }
 }

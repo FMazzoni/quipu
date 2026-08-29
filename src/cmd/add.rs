@@ -6,7 +6,7 @@ use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 #[derive(Args, Debug)]
@@ -32,17 +32,18 @@ pub struct AddArgs {
     pub json: bool,
 }
 
-#[derive(Serialize)]
-struct Created {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct Created {
     display_id: String,
     title: String,
     state: String,
     tier: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     tags: Vec<String>,
     /// Containers this task was attached to, empty unless `--part-of` was given.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     part_of: Vec<String>,
 }
 impl Outcome for Created {
@@ -209,4 +210,26 @@ pub fn run(db_path: &std::path::Path, a: AddArgs) -> Result<()> {
     })?;
 
     emit(a.json, &created)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both `skip_serializing_if` fields populated.
+    ///
+    /// The registry's `Default` sample omits them; the two shapes fail in
+    /// opposite directions.
+    #[test]
+    fn a_fully_populated_create_round_trips() {
+        crate::outcome::round_trip::assert_round_trips(&Created {
+            display_id: "QP-7".to_string(),
+            title: "wire the payloads".to_string(),
+            state: "pending".to_string(),
+            tier: Some("slice".to_string()),
+            description: Some("two tickets, one sweep".to_string()),
+            tags: vec!["kind:chore".to_string()],
+            part_of: vec!["QP-1".to_string()],
+        });
+    }
 }

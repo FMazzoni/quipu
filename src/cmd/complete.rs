@@ -6,7 +6,7 @@ use crate::outcome::{emit, Outcome};
 use crate::{claimref, db, id};
 use anyhow::Result;
 use clap::Args;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Args, Debug)]
 pub struct CompleteArgs {
@@ -21,8 +21,9 @@ pub struct CompleteArgs {
     pub json: bool,
 }
 
-#[derive(Serialize)]
-struct Completed {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct Completed {
     display_id: String,
     state: String,
     decisions: Vec<String>,

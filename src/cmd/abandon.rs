@@ -6,7 +6,7 @@ use crate::outcome::{emit, Outcome};
 use crate::{claimref, db, id};
 use anyhow::Result;
 use clap::Args;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Args, Debug)]
 pub struct AbandonArgs {
@@ -19,8 +19,9 @@ pub struct AbandonArgs {
     pub json: bool,
 }
 
-#[derive(Serialize)]
-struct Abandoned {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct Abandoned {
     display_id: String,
     state: String,
     reason: Option<String>,

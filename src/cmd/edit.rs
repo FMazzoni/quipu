@@ -6,7 +6,7 @@ use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Args, Debug)]
 pub struct EditArgs {
@@ -23,8 +23,9 @@ pub struct EditArgs {
     pub json: bool,
 }
 
-#[derive(Serialize)]
-struct Edited {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct Edited {
     display_id: String,
     changed: bool,
     changes: serde_json::Value,
