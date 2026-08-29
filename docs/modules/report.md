@@ -43,3 +43,17 @@ Markdown and HTML rendering used to live in this binary. It now lives in the
 `skills/report-render/` skill — see that skill for the section structure (state
 snapshot, in-flight, timeline, friction log, open bugs, shipped) that an agent
 reconstructs from this JSON.
+
+## `--output` never crosses the socket
+
+The path names a file on the *caller's* disk, so it is `#[serde(skip)]` and the
+write happens client-side: `report` calls `route::fetch` for the payload and
+does its own output, rather than going through `route::dispatch`. Served, the
+snapshot would land on the server's filesystem and the caller would get nothing
+— the same test the wire contract applies to `export` and `init`, which is to
+ask whose disk the path is on.
+
+`--since` is the other half of the same question and answers differently: it is
+a *value*, not a location, so it crosses the wire and is parsed on the server.
+`24h` therefore resolves against the server's clock, which is correct because it
+is bounding that store's own `event.ts` values.

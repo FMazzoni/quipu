@@ -46,6 +46,107 @@ Every served args struct sets it. A typo'd field in a hand-written request is
 then `invalid_input` (400) with the field named, rather than a silently ignored
 argument and a request that did something other than what was asked.
 
+## The read side: one endpoint per command
+
+The read verbs do not use `Outcome`. They build their own projections at the
+call site and print them, which is why fronting them is a design job and the
+write fan-out is not.
+
+**The problem is round-trip amplification.** Building `report`'s board is seven
+reads of the store; `report --all-tickets` is six *per ticket* and unbounded;
+`show` is ten; `tree` is four to six. A protocol that exposed the read layer
+query-by-query — `/v1/store/tasks`, `/v1/store/events`, `/v1/store/deps` — would
+compose beautifully and turn every one of those numbers into that many round
+trips. Over a link whose latency dwarfs a SQLite read, that is the whole cost of
+the view.
+
+So: **one endpoint per command, and the same `Served` machinery the writes
+use.** The wire shape mirrors the CLI, the round trip count is one, and it is
+one *structurally* rather than by discipline — `handle::<S>` is a single `exec`
+against a single per-request connection, and there is no seam through which a
+second call could appear. `each_read_is_exactly_one_round_trip` in
+`tests/serve.rs` fails if a later change opens one.
+
+What that costs, stated plainly so the trade is visible: **the server grows an
+endpoint per view, and a new view is a protocol change.** That is the right side
+of the trade here because the views are few, slow-moving, and each is a
+*question an operator asks* rather than a composable primitive. It would be the
+wrong side for a general query API, and if quipu ever wants one it should be a
+second grammar under a second prefix, not these endpoints decomposed.
+
+A third answer was considered and rejected: one batch endpoint taking a list of
+read requests. It keeps the round trip at one and needs no endpoint per view —
+but it puts the composition in the *client*, so every caller re-derives what a
+view is, two callers drift on it, and the server can no longer answer "what does
+`report` mean" at all. It is the query-by-query design with the latency hidden.
+
+### The payloads are the projections
+
+Each read gets a view type: a `#[serde(transparent)]` newtype over the
+`serde_json::Value` the command already built. Two consequences worth being
+explicit about, because a reader will reach for typed structs instead:
+
+- **The response body is byte-for-byte what `--json` already printed.** A
+  consumer that piped `qp list --json` into `jq` reads the same bytes off the
+  socket. Typed structs would have re-derived those bytes and a `json!` map
+  orders its keys alphabetically where a derive emits them in declaration order
+  — so the switch would silently rewrite every existing consumer's input.
+- **`human()` renders from the payload, as `list` and `wave` already did.** Both
+  read their own `Value` to print prose today; the read side did not acquire
+  that shape, it always had it.
+
+This is why the read-layer row types needed no derives. `store::TaskRow` and
+`store::EventRow` are still bare structs: they are the *input* to a projection,
+never the payload. The one derive this slice did add is `Serialize` +
+`Deserialize` on `db::State`, because `list --state` is a served filter and the
+same word has to name the same state in argv, in the column, and in a body.
+
+### Filters cross the wire; results do not get trimmed
+
+Every filter is a field on the args struct, so it is in the request body, so it
+is a SQL clause on the server. `--state`, `--tag`, `--assigned-to`, `--kind`,
+`--since`, `--auto-only`, `--wave`, `--ticket` and the positional task all
+narrow the answer before a byte is written.
+
+That is not tidiness, it is what makes `wait` and `watch` affordable. Both are
+500 ms polls of these endpoints, and both poll a *narrowed* one: `wait` watches
+a cohort that is by definition small and shrinking, and `timeline --since <id>`
+answers a caught-up poller with an empty array. Neither needs an endpoint of its
+own, and neither should get a streaming one — that wants an async runtime.
+`filters_are_applied_before_the_response_is_written` asserts this against raw
+response bodies, because a client that fetched everything and trimmed would
+produce identical *output* while moving the whole store per poll.
+
+`report --since` is the one filter whose argument is interpreted rather than
+matched: `24h` resolves against the **server's** clock, in `exec`. That is
+right — it is bounding the server's own `event.ts` values, which are UTC — but
+it is worth knowing before debugging a window that looks off by a clock skew.
+
+### What stays on the client
+
+`--json` (a property of the terminal), `--with-description` and `--show-tags`
+(how many lines `human` prints), and `report --output` (a path on the caller's
+disk). The first three are `#[serde(skip)]` and the last two rendering flags
+come back through `Served::restore_view`; `--output` is why `report` calls
+`route::fetch` and writes the file itself instead of going through `dispatch`.
+
+The rule they share: **the response body must not depend on how the caller was
+going to render it.** A server that echoed `with_description` would make two
+invocations differing only in a terminal flag produce different bytes.
+
+### `relation list` is not a read-side endpoint
+
+It is served, but by the row above rather than by this slice's shape, and the
+next section says why. The read side briefly split the group — `relation list`
+as its own args struct, plus an optional `if <path>` guard on `served!` so
+`is_served` would not claim the unserved ops — because from where it sat only
+`list` was servable. The write fan-out then served the whole group, which
+removes the hazard the guard existed for, so both the split and the guard are
+gone. An unused mechanism with a subtle purpose is worse than no mechanism.
+
+The count in this file's read-side section is eight views, not nine, for the
+same reason: `relation` is one route for three ops.
+
 ## A subcommand group is one route, never several
 
 `Served` is implemented for an args *struct*, and `is_served` matches on a `Cmd`

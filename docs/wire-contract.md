@@ -15,10 +15,12 @@ When this document was written no server, client or HTTP code existed; the only
 code it shipped was the `unavailable` error kind, reserved so a later slice
 could not renumber it. The vertical slice has since built the first four verbs —
 `add`, `assign`, `claim`, `complete` — against it, in `src/cmd/serve.rs`,
-`src/route.rs`, `src/wire.rs` and `src/client.rs`, and the fan-out slice has
-since added the other eleven write verbs. Notes from those builds are marked
-**implemented as** below, where the shipped answer is narrower or different from
-what this document assumed.
+`src/route.rs`, `src/wire.rs` and `src/client.rs`. The fan-out slice has since
+added the other eleven write verbs, and the read side has followed with a view
+payload per command. Notes from those builds are marked **implemented as**
+below, wherever the shipped answer is narrower or different from what this
+document assumed — three at the time of writing, and the count is deliberately
+not stated as a number again, because it was wrong twice.
 
 ## The server is not the writer
 
@@ -266,6 +268,27 @@ and `relation list`.
 These do not use `Outcome` — they serialise their own projections — so they
 need their own response shapes, but the same envelope rule: bare object (or
 array) on 200, `{"error": ...}` otherwise.
+
+**Implemented as: one endpoint per command, and each projection became an
+`Outcome` after all.** This paragraph was right about the shapes and understated
+what it took to get them. Each read gained a view payload — a transparent
+newtype over the `Value` it already built — so the read side joined the *same*
+`served!` table and the same `Served` trait as the writes, rather than growing
+the second dispatch this section implies. The reason to say so here: the
+alternative a reader will reach for is exposing the read layer query-by-query,
+and it costs `report` seven round trips and `show` ten, because those views are
+that many reads of the store. `docs/modules/route.md` has the full argument,
+what was rejected, and the three things that deliberately stay client-side
+(`--json`, the two rendering flags, and `report --output`).
+
+One correction to the heading while it is in view: the "plus one nested" is
+`relation list`, and it is **not** one of these endpoints. It went over with its
+own group's writes, for the reason the write bucket above records, so the served
+read endpoints number eight and there is no `relation/list` verb. The read side
+did briefly implement one, together with a guard that let `is_served` name a
+partly-served group; both were removed when the two slices met, because the
+group is whole again and an unused mechanism with a subtle purpose is worse than
+no mechanism.
 
 ### Local-only — never served (8)
 
