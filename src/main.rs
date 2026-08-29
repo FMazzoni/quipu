@@ -56,6 +56,8 @@ enum Cmd {
     Assign(cmd::assign::AssignArgs),
     /// Claim an assigned task as the running agent
     Claim(cmd::claim::ClaimArgs),
+    /// Atomically take the next ready task (select + assign in one statement)
+    Take(cmd::take::TakeArgs),
     /// Complete a running task (records decisions/artifacts)
     Complete(cmd::complete::CompleteArgs),
     /// Mark an assigned/running task blocked with a reason (→ pending)
@@ -139,6 +141,7 @@ fn wants_json(cmd: &Cmd) -> bool {
         Cmd::Add(a) => a.json,
         Cmd::Assign(a) => a.json,
         Cmd::Claim(a) => a.json,
+        Cmd::Take(a) => a.json,
         Cmd::Complete(a) => a.json,
         Cmd::Block(a) => a.json,
         Cmd::Cancel(a) => a.json,
@@ -302,6 +305,7 @@ fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
         Cmd::Add(a) => cmd::add::run(&db_path, a),
         Cmd::Assign(a) => cmd::assign::run(&db_path, a),
         Cmd::Claim(a) => cmd::claim::run(&db_path, a),
+        Cmd::Take(a) => cmd::take::run(&db_path, a),
         Cmd::Complete(a) => cmd::complete::run(&db_path, a),
         Cmd::Block(a) => cmd::block::run(&db_path, a),
         Cmd::Cancel(a) => cmd::cancel::run(&db_path, a),

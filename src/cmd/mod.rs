@@ -29,6 +29,7 @@ pub mod show;
 pub mod status;
 pub mod sync;
 pub mod tag;
+pub mod take;
 pub mod timeline;
 pub mod tree;
 pub mod wait;
