@@ -120,17 +120,19 @@ reading any other field:
 | `invariant` | `code` | structural violation, e.g. a dependency cycle — replan |
 | `invalid_input` | — | bad CLI input |
 | `no_store` | `path` | no store here — not attached to a project; don't retry |
+| `unavailable` | `endpoint` | the front door did not answer — no store saw the request; retry the transport |
 | `internal` | — | uncategorized failure; treat as a bug |
 
-The first six are the `QuipuError` variants in `src/db.rs`; `internal` is not a
-variant but the fallback `main.rs` emits for any error that does not downcast to
-one, so a consumer matching on `kind` must handle all seven.
+The first seven are the `QuipuError` variants in `src/db.rs`; `internal` is not
+a variant but the fallback `main.rs` emits for any error that does not downcast
+to one, so a consumer matching on `kind` must handle all eight.
 
 Exit codes: `0` success, `1` `invalid_input`/`internal`, `2` the store refused
 (`conflict`, `not_owner`, `not_found`, `invariant` — retrying may succeed), `3`
 `wait` timed out, `4` `wait --cohort-done` matched an empty cohort, `5`
-`remote doctor` found a fault, `6` `no_store`. Only `2` is worth retrying;
-`6` never is. Every command but `qp init` refuses to create a store, so a
+`remote doctor` found a fault, `6` `no_store`, `7` `unavailable`. `2` and `7`
+are worth retrying — `2` once the state settles, `7` once the transport comes
+back; `6` never is. Every command but `qp init` refuses to create a store, so a
 machine pointed at nothing fails loudly instead of quietly acquiring an empty
 private project.
 
@@ -501,7 +503,8 @@ attribute a ticket without guessing.
   are held apart from the local log so they are never re-exported under this
   store's name, and the read commands do not union the two yet.
 - Display ID prefix is fixed at `qp init` and cannot be changed afterwards (`qp init --prefix ACME`; default `QP`). Re-running `init` with a different prefix warns and keeps the original.
-- Exit codes: `0` success, `1` invalid input, including argument-parse failures (and uncategorized internal failures), `2` conflict/not-owner/not-found/invariant, `3` wait timeout, `4` `wait --cohort-done` matched an empty cohort.
+- Exit codes are tabulated once, under "Machine-readable output" above. This
+  line used to carry a second copy and had drifted three codes behind it.
 
 ## License
 
