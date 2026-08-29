@@ -406,7 +406,7 @@ explicit, never a side effect of a read. See
 
 Agents branch on these, so they are a contract. They come from two places:
 `QuipuError::exit_code` in [`db.rs`](https://github.com/FMazzoni/quipu/blob/main/src/db.rs) maps the error taxonomy to
-0/1/2/6, and [`main.rs`](https://github.com/FMazzoni/quipu/blob/main/src/main.rs) applies it; `wait` exits 3 and 4
+0/1/2/6/7, and [`main.rs`](https://github.com/FMazzoni/quipu/blob/main/src/main.rs) applies it; `wait` exits 3 and 4
 directly, and `remote doctor` exits 5.
 
 | code | meaning |
@@ -418,6 +418,17 @@ directly, and `remote doctor` exits 5.
 | 4 | `wait --cohort-done` matched an empty cohort |
 | 5 | `remote doctor` found a fault — in a configured remote, or in this store's name or its registry entry |
 | 6 | `no_store` — there is no store here; this process is not attached to a project |
+| 7 | `unavailable` — the front door could not be reached; no store saw the request |
+
+Code 7 is the transport half of the same distinction. It is not code 1, which
+the table above calls unretryable and a bug; it is not code 2, which asserts
+that a store looked at the request and refused it. When the front door does not
+answer, no store formed an opinion — the write neither landed nor lost a race,
+and a caller that reads it as a conflict will re-derive state that never
+changed. Nothing in the CLI constructs it yet: it is reserved here so the
+client half of the wire contract has somewhere to land, and pinned by
+`kind_and_exit_code_are_a_contract` so it cannot be renumbered by a later slice
+reaching for "the next free code".
 
 Code 6 is the counterpart to code 2, and the reason it is not code 2. Every
 command but `qp init` requires a store that already exists; when there is none,
