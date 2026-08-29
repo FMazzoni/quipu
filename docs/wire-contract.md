@@ -244,8 +244,7 @@ is not by itself an argument (so does every served write; the question is
   server's network position is the wrong answer to that question; it also exits
   5 directly. `set` and `show` are defensible later additions, but splitting a
   subcommand group across the boundary is worse than keeping it whole, so the
-  whole subtree stays local. **If `remote set` is ever promoted, its `checked`
-  field has to be structured first** — see the finding below.
+  whole subtree stays local.
 - **`export`** — takes `--out <DIR>` and writes JSONL batches there. Served,
   the batches land on the server's disk and the caller gets an empty directory.
 - **`import`** — takes `--from <DIR>` and reads the files there. The mirror
@@ -452,13 +451,19 @@ Budget for it in the vertical slice rather than discovering it in the fan-out.
 fields or it fails on a payload the server considers perfectly valid. The same
 applies to every optional field added later.
 
-**One existing anti-pattern to not copy:** `remote`'s `RemoteSet` and
-`RemoteShow` carry a `checked: String` field holding *pre-rendered prose*, which
-`human()` splits with `.lines()` and splices into its output. That is
-server-rendered text smuggled inside a structured payload. It breaks nothing
-today — `remote` is local-only, so it never crosses the wire — but it is the
-shape this decision exists to forbid, and it is why promoting `remote set` to
-served would require restructuring that field first.
+**A retracted finding, left here because the retraction is the useful part.**
+This section originally reported that `remote`'s payloads smuggled pre-rendered
+prose through a `checked: String` that `human()` split with `.lines()`, and
+called it the anti-pattern this decision exists to forbid. That was read from an
+older shape. The field is a struct of typed reachability results, and `human()`
+*renders* prose from those variants rather than replaying a stored blob — which
+is exactly the arrangement this decision prescribes.
+
+The distinction is worth keeping, because it is the one a reader has to make on
+every payload: a formatting function over structured data is correct no matter
+which side runs it, and a `String` that already contains the answer is not. Only
+the second forces the server to render, and only the second cannot be re-rendered
+differently by a client that wants to.
 
 ## 7. TLS and loopback
 

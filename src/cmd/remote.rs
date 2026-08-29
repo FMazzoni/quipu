@@ -291,19 +291,16 @@ mod tests {
     #[test]
     fn a_probed_remote_round_trips() {
         let checked = || Checked {
-            authority_reachable: Some(Reach::Ok),
             ledger_reachable: Some(Reach::Fault("bucket not found".to_string())),
         };
         crate::outcome::round_trip::assert_round_trips(&RemoteSet {
-            authority: Some("https://git.example.com/q.git".to_string()),
             ledger: Some("s3://example/ledger".to_string()),
-            changed: vec!["authority".to_string(), "ledger".to_string()],
+            changed: vec!["ledger".to_string()],
             checked: checked(),
         });
         crate::outcome::round_trip::assert_round_trips(&RemoteShow {
             project_uuid: "00000000-0000-4000-8000-000000000000".to_string(),
             project_key: "example".to_string(),
-            authority: None,
             ledger: Some("s3://example/ledger".to_string()),
             local_only: false,
             checked: checked(),

@@ -953,8 +953,7 @@ mod tests {
     #[test]
     fn a_populated_report_round_trips() {
         crate::outcome::round_trip::assert_round_trips(&Report {
-            authority: Some("https://git.example.com/q.git".to_string()),
-            ledger: None,
+            ledger: Some("s3://example/ledger".to_string()),
             local_only: false,
             ok: false,
             checks: vec![
