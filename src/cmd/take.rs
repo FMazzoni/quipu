@@ -3,21 +3,35 @@
 #![doc = include_str!("../../docs/modules/take.md")]
 
 use crate::db;
-use crate::outcome::{emit, Outcome};
+use crate::outcome::Outcome;
 use anyhow::Result;
 use clap::Args;
 use rusqlite::{OptionalExtension, ToSql};
 use serde::{Deserialize, Serialize};
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TakeArgs {
     #[arg(long = "as")]
     pub agent: String,
     /// Glob pattern (e.g. kind:slice); repeatable, all must match
     #[arg(long)]
+    #[serde(default)]
     pub tag: Vec<String>,
     #[arg(long)]
+    #[serde(skip)]
     pub json: bool,
+}
+
+impl crate::route::Served for TakeArgs {
+    const VERB: &'static str = "take";
+    type Out = Taken;
+    fn wants_json(&self) -> bool {
+        self.json
+    }
+    fn exec(db_path: &std::path::Path, a: Self) -> Result<Self::Out> {
+        exec(db_path, a)
+    }
 }
 
 /// The task a `take` won, absent when the queue had nothing for this caller.
@@ -66,7 +80,7 @@ const TAKE_SQL: &str = "{FROZEN} UPDATE task
         AND state = 'ready'
   RETURNING id, display_id, title";
 
-pub fn run(db_path: &std::path::Path, a: TakeArgs) -> Result<()> {
+pub fn exec(db_path: &std::path::Path, a: TakeArgs) -> Result<Taken> {
     let mut conn = db::open(db_path)?;
     let tags = a
         .tag
@@ -129,13 +143,10 @@ pub fn run(db_path: &std::path::Path, a: TakeArgs) -> Result<()> {
         }))
     })?;
 
-    emit(
-        a.json,
-        &Taken {
-            taken,
-            agent_id: a.agent,
-        },
-    )
+    Ok(Taken {
+        taken,
+        agent_id: a.agent,
+    })
 }
 
 #[cfg(test)]

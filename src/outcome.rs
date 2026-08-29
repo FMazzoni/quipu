@@ -12,11 +12,27 @@ pub trait Outcome: serde::Serialize {
 }
 
 /// Print `o` as JSON (if `json`) or its human summary, to stdout.
+///
+/// Empty prose prints *nothing*, not a blank line. Every mutating payload
+/// renders one line unconditionally, so this arm fires only on views that can
+/// legitimately be empty, where it is what those commands always did:
+/// `qp timeline` on a store with no events wrote no bytes at all, and a blank
+/// line would be a new one for every consumer that counts them.
+///
+/// It is not only the read *endpoints*. `qp relation list` reaches this through
+/// the write group's route, and it regressed for exactly one merge: routing it
+/// through the shared output path made an empty listing print a blank line
+/// where the hand-written `for` loop it replaced printed nothing. The guard is
+/// here rather than in any one view because the next payload to render `""`
+/// will not think to ask.
 pub fn emit(json: bool, o: &impl Outcome) -> anyhow::Result<()> {
     if json {
         println!("{}", serde_json::to_string(o)?);
     } else {
-        println!("{}", o.human());
+        let text = o.human();
+        if !text.is_empty() {
+            println!("{text}");
+        }
     }
     Ok(())
 }
@@ -66,20 +82,28 @@ mod tests {
     use crate::cmd::claim::Claimed;
     use crate::cmd::complete::Completed;
     use crate::cmd::contains::ContainsOutcome;
+    use crate::cmd::decisions::DecisionsView;
     use crate::cmd::depends::DependsOutcome;
     use crate::cmd::edit::Edited;
     use crate::cmd::export::ExportOutcome;
     use crate::cmd::import::ImportOutcome;
     use crate::cmd::init::InitOutcome;
     use crate::cmd::ledger::LedgerOutcome;
+    use crate::cmd::list::ListView;
     use crate::cmd::log::Logged;
     use crate::cmd::project::{ListOutcome, LookupOutcome, RegisterOutcome, UnregisterOutcome};
     use crate::cmd::reclaim::Reclaimed;
-    use crate::cmd::relation::{RelationAdded, RelationRemoved};
+    use crate::cmd::relation::{RelationAdded, RelationOutcome, RelationRemoved};
     use crate::cmd::remote::{RemoteCleared, RemoteSet, RemoteShow};
+    use crate::cmd::report::ReportView;
+    use crate::cmd::show::ShowView;
+    use crate::cmd::status::StatusView;
     use crate::cmd::sync::SyncOutcome;
     use crate::cmd::tag::Tagged;
     use crate::cmd::take::Taken;
+    use crate::cmd::timeline::TimelineView;
+    use crate::cmd::tree::TreeView;
+    use crate::cmd::wave::WaveView;
     use crate::doctor::Report;
 
     /// Names every payload once, for both halves of the property.
@@ -106,6 +130,7 @@ mod tests {
         Completed,
         ContainsOutcome,
         Created,
+        DecisionsView,
         DependsOutcome,
         Edited,
         ExportOutcome,
@@ -113,20 +138,28 @@ mod tests {
         InitOutcome,
         LedgerOutcome,
         ListOutcome,
+        ListView,
         Logged,
         LookupOutcome,
         Reclaimed,
         RegisterOutcome,
         RelationAdded,
+        RelationOutcome,
         RelationRemoved,
         RemoteCleared,
         RemoteSet,
         RemoteShow,
         Report,
+        ReportView,
+        ShowView,
+        StatusView,
         SyncOutcome,
         Tagged,
         Taken,
+        TimelineView,
+        TreeView,
         UnregisterOutcome,
+        WaveView,
     );
 
     /// Every `impl Outcome` in the tree is in `REGISTERED`, and nothing else is.
@@ -166,7 +199,7 @@ mod tests {
              `Deserialize`, `pub(crate)`, and an entry in the registry"
         );
         assert!(
-            found.len() >= 29,
+            found.len() >= 38,
             "scan found only {} impls — did the scan break?",
             found.len()
         );

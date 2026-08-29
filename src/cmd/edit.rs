@@ -2,25 +2,42 @@
 //!
 #![doc = include_str!("../../docs/modules/edit.md")]
 
-use crate::outcome::{emit, Outcome};
+use crate::outcome::Outcome;
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
 use serde::{Deserialize, Serialize};
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EditArgs {
     pub task: String,
     #[arg(long)]
+    #[serde(default)]
     pub title: Option<String>,
     #[arg(long)]
+    #[serde(default)]
     pub tier: Option<String>,
     #[arg(long)]
+    #[serde(default)]
     pub description: Option<String>,
     #[arg(long = "as")]
+    #[serde(default)]
     pub agent: Option<String>,
     #[arg(long)]
+    #[serde(skip)]
     pub json: bool,
+}
+
+impl crate::route::Served for EditArgs {
+    const VERB: &'static str = "edit";
+    type Out = Edited;
+    fn wants_json(&self) -> bool {
+        self.json
+    }
+    fn exec(db_path: &std::path::Path, a: Self) -> Result<Self::Out> {
+        exec(db_path, a)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -40,7 +57,7 @@ impl Outcome for Edited {
     }
 }
 
-pub fn run(db_path: &std::path::Path, a: EditArgs) -> Result<()> {
+pub fn exec(db_path: &std::path::Path, a: EditArgs) -> Result<Edited> {
     if a.title.is_none() && a.tier.is_none() && a.description.is_none() {
         return Err(db::invalid_input(
             "qp edit requires at least one of --title, --tier, --description",
@@ -139,12 +156,9 @@ pub fn run(db_path: &std::path::Path, a: EditArgs) -> Result<()> {
             )?;
             Ok((true, serde_json::Value::Object(changes)))
         })?;
-    emit(
-        a.json,
-        &Edited {
-            display_id: resolved.display_id,
-            changed: any_changed,
-            changes,
-        },
-    )
+    Ok(Edited {
+        display_id: resolved.display_id,
+        changed: any_changed,
+        changes,
+    })
 }
