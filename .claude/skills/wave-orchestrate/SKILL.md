@@ -214,6 +214,12 @@ cd there first. All commands and paths are relative to it.
 
 - Bare `./target/release/qp` works from this worktree (git-common-dir
   fallback finds the main repo's .quipu/). Do NOT set QP_DB.
+  If this wave's board is behind a front door, the two lines above are
+  replaced by `QP_SERVER=<url>` (plus `QP_PROJECT=<name>` when the front
+  door serves more than one) — stated here, in the prompt, because a
+  storeless machine has nowhere to record it. `QP_DB` is wrong either way.
+  `qp wait` and `qp watch` are not served and always read a local store;
+  poll `qp list --tag wave:<id> --state ...` for a barrier instead.
 - Narrow tests only: `cargo test --test cli -- <filter>` or a specific
   test file. NEVER `cargo test` (no filter) while other agents are running.
   Report which filters you ran and that they passed — not a suite total.
