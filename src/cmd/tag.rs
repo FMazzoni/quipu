@@ -6,7 +6,7 @@ use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Args, Debug)]
 pub struct TagArgs {
@@ -26,15 +26,16 @@ pub enum TagOp {
     Rm { name: String },
 }
 
-#[derive(Serialize)]
-struct Tagged {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct Tagged {
     display_id: String,
-    op: &'static str,
+    op: String,
     name: String,
 }
 impl Outcome for Tagged {
     fn human(&self) -> String {
-        match self.op {
+        match self.op.as_str() {
             "added" => format!("{} tagged {}", self.display_id, self.name),
             "removed" => format!("{} untagged {}", self.display_id, self.name),
             _ => format!("{} already {}", self.display_id, self.name),
@@ -102,7 +103,7 @@ pub fn run(db_path: &std::path::Path, a: TagArgs) -> Result<()> {
         a.json,
         &Tagged {
             display_id: resolved.display_id,
-            op,
+            op: op.to_string(),
             name,
         },
     )

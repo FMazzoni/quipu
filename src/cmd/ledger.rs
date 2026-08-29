@@ -7,7 +7,7 @@ use crate::{db, project, remote, s3, store};
 use anyhow::{Context, Result};
 use clap::Args;
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -28,8 +28,8 @@ pub struct LedgerArgs {
 }
 
 /// One task as the ledger describes it, named by the store that minted it.
-#[derive(Serialize)]
-struct TaskView {
+#[derive(Serialize, Deserialize)]
+pub(crate) struct TaskView {
     /// `<prefix>-<origin id>`, disambiguated when one project holds two stores
     /// that independently minted the same number.
     display_id: String,
@@ -44,8 +44,8 @@ struct TaskView {
 }
 
 /// One project's slice of the ledger.
-#[derive(Serialize)]
-struct ProjectView {
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ProjectView {
     project_key: String,
     display_prefix: String,
     /// Whether this is the project the store the command ran against belongs to.
@@ -54,11 +54,12 @@ struct ProjectView {
 }
 
 /// The whole answer, with its provenance attached to it rather than implied.
-#[derive(Serialize)]
-struct LedgerOutcome {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct LedgerOutcome {
     /// Always `"ledger"`. A consumer that flattens the projects still carries
     /// the one fact that must not be lost: these rows are not local state.
-    source: &'static str,
+    source: String,
     ledger: String,
     local_project_key: Option<String>,
     projects: Vec<ProjectView>,
@@ -155,7 +156,7 @@ pub fn run(db_path: &Path, a: LedgerArgs) -> Result<()> {
     emit(
         a.json,
         &LedgerOutcome {
-            source: "ledger",
+            source: "ledger".to_string(),
             ledger: url,
             local_project_key: local_key,
             projects,

@@ -6,7 +6,7 @@ use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Args, Debug)]
 pub struct LogArgs {
@@ -21,8 +21,9 @@ pub struct LogArgs {
     pub json: bool,
 }
 
-#[derive(Serialize)]
-struct Logged {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct Logged {
     display_id: String,
     kind: String,
     agent: Option<String>,

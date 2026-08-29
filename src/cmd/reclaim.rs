@@ -2,11 +2,12 @@
 //!
 #![doc = include_str!("../../docs/modules/reclaim.md")]
 
+use crate::effects::{self, Effect};
 use crate::outcome::{emit, Outcome};
 use crate::{db, id, lease};
 use anyhow::Result;
 use clap::Args;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Args, Debug)]
 pub struct ReclaimArgs {
@@ -21,12 +22,16 @@ pub struct ReclaimArgs {
     pub json: bool,
 }
 
-#[derive(Serialize)]
-struct Reclaimed {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct Reclaimed {
     display_id: String,
     state: String,
     reason: Option<String>,
     forced: bool,
+    /// Tasks this transaction moved that the caller did not name.
+    #[serde(rename = "_effects", default, skip_serializing_if = "Vec::is_empty")]
+    effects: Vec<Effect>,
 }
 impl Outcome for Reclaimed {
     fn human(&self) -> String {
@@ -38,7 +43,7 @@ pub fn run(db_path: &std::path::Path, a: ReclaimArgs) -> Result<()> {
     let mut conn = db::open(db_path)?;
     let resolved = id::resolve_full(&conn, &a.task)?;
     let task_id = resolved.id;
-    let resulting = db::with_tx(&mut conn, |tx| {
+    let (resulting, effects) = db::with_tx(&mut conn, |tx| {
         // Origin read first, for the event payload only — the guard names a set,
         // so the log cannot tell `assigned` from `running` otherwise. The
         // `UPDATE` stays conditional and `changes() == 1` still decides.
@@ -108,7 +113,14 @@ pub fn run(db_path: &std::path::Path, a: ReclaimArgs) -> Result<()> {
             ],
         )?;
         let promoted = db::refresh_ready_logged(tx, None, "reclaim")?;
-        let resulting = if promoted.contains(&task_id) {
+        let named_returned = promoted.contains(&task_id);
+        let effects = effects::collateral(
+            tx,
+            &[task_id],
+            "reclaim",
+            &db::Movements::promoted(promoted),
+        )?;
+        let resulting = if named_returned {
             db::State::Ready.to_string()
         } else {
             db::State::Pending.to_string()
@@ -126,7 +138,7 @@ pub fn run(db_path: &std::path::Path, a: ReclaimArgs) -> Result<()> {
                 Some(resolved.display_id.clone()),
             ));
         }
-        Ok(resulting)
+        Ok((resulting, effects))
     })?;
     emit(
         a.json,
@@ -135,6 +147,7 @@ pub fn run(db_path: &std::path::Path, a: ReclaimArgs) -> Result<()> {
             state: resulting,
             reason: a.reason,
             forced: a.force,
+            effects,
         },
     )
 }

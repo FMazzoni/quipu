@@ -6,7 +6,7 @@ use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Args, Debug)]
 pub struct RelationArgs {
@@ -48,8 +48,9 @@ impl RelationArgs {
     }
 }
 
-#[derive(Serialize)]
-struct RelationAdded {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct RelationAdded {
     from_display_id: String,
     to_display_id: String,
     kind: String,
@@ -71,8 +72,9 @@ impl Outcome for RelationAdded {
     }
 }
 
-#[derive(Serialize)]
-struct RelationRemoved {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct RelationRemoved {
     from_display_id: String,
     to_display_id: String,
     kind: String,

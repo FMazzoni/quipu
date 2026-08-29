@@ -7,7 +7,7 @@ use crate::outcome::{emit, Outcome};
 use anyhow::Result;
 use clap::Args;
 use rusqlite::{OptionalExtension, ToSql};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Args, Debug)]
 pub struct TakeArgs {
@@ -21,14 +21,15 @@ pub struct TakeArgs {
 }
 
 /// The task a `take` won, absent when the queue had nothing for this caller.
-#[derive(Serialize)]
-struct Taken {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct Taken {
     taken: Option<TakenTask>,
     agent_id: String,
 }
 
-#[derive(Serialize)]
-struct TakenTask {
+#[derive(Serialize, Deserialize)]
+pub(crate) struct TakenTask {
     display_id: String,
     title: String,
     state: String,
@@ -135,4 +136,22 @@ pub fn run(db_path: &std::path::Path, a: TakeArgs) -> Result<()> {
             agent_id: a.agent,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `Some` arm, which the registry's `Default` sample cannot reach.
+    #[test]
+    fn a_won_task_round_trips() {
+        crate::outcome::round_trip::assert_round_trips(&Taken {
+            taken: Some(TakenTask {
+                display_id: "QP-7".to_string(),
+                title: "wire the payloads".to_string(),
+                state: "assigned".to_string(),
+            }),
+            agent_id: "w-alpha".to_string(),
+        });
+    }
 }

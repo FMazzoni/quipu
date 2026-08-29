@@ -7,7 +7,7 @@ use crate::outcome::{emit, Outcome};
 use crate::registry::{self, Entry, Registered};
 use anyhow::Result;
 use clap::{Args, Subcommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Args, Debug)]
@@ -60,8 +60,9 @@ impl ProjectArgs {
     }
 }
 
-#[derive(Serialize)]
-struct RegisterOutcome {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct RegisterOutcome {
     name: String,
     path: String,
     project_key: String,
@@ -80,8 +81,8 @@ impl Outcome for RegisterOutcome {
     }
 }
 
-#[derive(Serialize)]
-struct ListedEntry {
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ListedEntry {
     name: String,
     path: String,
     project_key: String,
@@ -89,8 +90,9 @@ struct ListedEntry {
     dangling: bool,
 }
 
-#[derive(Serialize)]
-struct ListOutcome {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct ListOutcome {
     registry: String,
     projects: Vec<ListedEntry>,
 }
@@ -123,8 +125,9 @@ impl Outcome for ListOutcome {
     }
 }
 
-#[derive(Serialize)]
-struct LookupOutcome {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct LookupOutcome {
     name: String,
     path: String,
     project_key: String,
@@ -137,8 +140,9 @@ impl Outcome for LookupOutcome {
     }
 }
 
-#[derive(Serialize)]
-struct UnregisterOutcome {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct UnregisterOutcome {
     name: String,
     path: String,
     registry: String,

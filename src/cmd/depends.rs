@@ -2,12 +2,13 @@
 //!
 #![doc = include_str!("../../docs/modules/depends.md")]
 
+use crate::effects::{self, Effect};
 use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
 use rusqlite::OptionalExtension;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Args, Debug)]
 pub struct DependsArgs {
@@ -26,14 +27,22 @@ pub struct DependsArgs {
     pub json: bool,
 }
 
-#[derive(Serialize)]
-struct DependsOutcome {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct DependsOutcome {
     display_id: String,
     on_id: String,
-    op: &'static str,
+    op: String,
     /// For `rm`: did removing this edge promote `display_id` itself to `ready`?
     /// Always `false` for `add` (adding an edge can only demote, never promote).
+    ///
+    /// Kept alongside `_effects` rather than folded into it: this reports on the
+    /// *named* task, and `_effects` reports only on tasks the caller did not
+    /// name, so neither can be derived from the other.
     promoted: bool,
+    /// Tasks this transaction moved that the caller did not name.
+    #[serde(rename = "_effects", default, skip_serializing_if = "Vec::is_empty")]
+    effects: Vec<Effect>,
 }
 impl Outcome for DependsOutcome {
     fn human(&self) -> String {
@@ -61,7 +70,7 @@ pub fn run(db_path: &std::path::Path, a: DependsArgs) -> Result<()> {
     let on_resolved = id::resolve_full(&conn, &a.on)?;
     let task_id = task_resolved.id;
     let on_id = on_resolved.id;
-    let promoted = db::with_tx(&mut conn, |tx| -> Result<bool> {
+    let (promoted, effects) = db::with_tx(&mut conn, |tx| -> Result<(bool, Vec<Effect>)> {
         db::require_edge_owner(tx, task_id, &task_resolved.display_id, a.agent.as_deref())?;
 
         if a.rm {
@@ -97,9 +106,16 @@ pub fn run(db_path: &std::path::Path, a: DependsArgs) -> Result<()> {
                 })),
             )?;
             let promoted = db::refresh_ready_logged(tx, a.agent.as_deref(), "depends_rm")?;
-            Ok(promoted.contains(&task_id))
+            let named_returned = promoted.contains(&task_id);
+            let effects = effects::collateral(
+                tx,
+                &[task_id, on_id],
+                "depends_rm",
+                &db::Movements::promoted(promoted),
+            )?;
+            Ok((named_returned, effects))
         } else {
-            db::link_dep(
+            let (_, moved) = db::link_dep(
                 tx,
                 task_id,
                 &task_resolved.display_id,
@@ -108,12 +124,13 @@ pub fn run(db_path: &std::path::Path, a: DependsArgs) -> Result<()> {
                 db::MODE_BLOCKS,
                 a.agent.as_deref(),
             )?;
+            let effects = effects::collateral(tx, &[task_id, on_id], db::MODE_BLOCKS, &moved)?;
             // Not "adding can only demote" any more. Reclassifying an edge
             // from `contains` to `blocks` takes everything under it out of the
             // frozen set, so an add can free work. `link_dep` runs both
             // reconciliation sweeps; `promoted` stays a `--rm`-only signal
             // because it reports on *this* task, which an add never promotes.
-            Ok(false)
+            Ok((false, effects))
         }
     })?;
     let op = if a.rm { "rm" } else { "add" };
@@ -122,8 +139,9 @@ pub fn run(db_path: &std::path::Path, a: DependsArgs) -> Result<()> {
         &DependsOutcome {
             display_id: task_resolved.display_id,
             on_id: on_resolved.display_id,
-            op,
+            op: op.to_string(),
             promoted,
+            effects,
         },
     )
 }

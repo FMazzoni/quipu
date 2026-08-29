@@ -6,7 +6,7 @@ use crate::{db, outcome::Outcome, time};
 use anyhow::{Context, Result};
 use clap::Args;
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -105,7 +105,8 @@ struct OriginRecord {
 ///
 /// Public because `qp sync` composes export rather than reimplementing it, and
 /// reports the same numbers rather than counting its own.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
 pub struct ExportOutcome {
     pub project_uuid: String,
     pub project_key: String,

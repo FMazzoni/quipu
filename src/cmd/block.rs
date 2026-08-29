@@ -2,11 +2,12 @@
 //!
 #![doc = include_str!("../../docs/modules/block.md")]
 
+use crate::effects::{self, Effect};
 use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Args, Debug)]
 pub struct BlockArgs {
@@ -25,13 +26,20 @@ pub struct BlockArgs {
 /// The skill-layer convention `qp block` defaults to. See the module header.
 const DEFAULT_BLOCKER_TAG: &str = "kind:blocker";
 
-#[derive(Serialize)]
-struct Blocked {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct Blocked {
     display_id: String,
     blocker_id: String,
     blocker_title: String,
     blocker_tags: Vec<String>,
     state: String,
+    /// Tasks this transaction moved that the caller did not name.
+    ///
+    /// The one verb whose collateral is demotions: a blocker on a container
+    /// freezes everything under it, at any depth.
+    #[serde(rename = "_effects", default, skip_serializing_if = "Vec::is_empty")]
+    effects: Vec<Effect>,
 }
 impl Outcome for Blocked {
     fn human(&self) -> String {
@@ -59,7 +67,7 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
         }
     }
 
-    let blocker_display = db::with_tx(&mut conn, |tx| {
+    let (blocker_display, effects) = db::with_tx(&mut conn, |tx| {
         // (1) Create the blocker task. State = ready (no deps of its own).
         let prefix = db::display_prefix(tx)?;
         tx.execute(
@@ -128,7 +136,13 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
             Some(&a.agent),
             Some(&serde_json::json!({"on": blocker_display, "mode": db::MODE_BLOCKS})),
         )?;
-        db::demote_frozen(tx, Some(&a.agent), "block")?;
+        let demoted = db::demote_frozen(tx, Some(&a.agent), "block")?;
+        let effects = effects::collateral(
+            tx,
+            &[task_id, blocker_id],
+            "block",
+            &db::Movements::demoted(demoted),
+        )?;
 
         // (3) Guarded UPDATE: demote orig to pending. The origin is read first,
         // for the event payload only — the guard admits both `assigned` and
@@ -219,7 +233,7 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
             Some(&a.agent),
             &[("via", serde_json::json!("block"))],
         )?;
-        Ok(blocker_display)
+        Ok((blocker_display, effects))
     })?;
     emit(
         a.json,
@@ -229,6 +243,7 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
             blocker_title: a.new,
             blocker_tags: tags,
             state: "pending".to_string(),
+            effects,
         },
     )
 }

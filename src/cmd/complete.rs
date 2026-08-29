@@ -2,11 +2,12 @@
 //!
 #![doc = include_str!("../../docs/modules/complete.md")]
 
+use crate::effects::{self, Effect};
 use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;
 use clap::Args;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Args, Debug)]
 pub struct CompleteArgs {
@@ -21,12 +22,16 @@ pub struct CompleteArgs {
     pub json: bool,
 }
 
-#[derive(Serialize)]
-struct Completed {
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub(crate) struct Completed {
     display_id: String,
     state: String,
     decisions: Vec<String>,
     artifacts: Vec<String>,
+    /// Tasks this transaction moved that the caller did not name.
+    #[serde(rename = "_effects", default, skip_serializing_if = "Vec::is_empty")]
+    effects: Vec<Effect>,
 }
 impl Outcome for Completed {
     fn human(&self) -> String {
@@ -38,7 +43,7 @@ pub fn run(db_path: &std::path::Path, a: CompleteArgs) -> Result<()> {
     let mut conn = db::open(db_path)?;
     let resolved = id::resolve_full(&conn, &a.task)?;
     let task_id = resolved.id;
-    db::with_tx(&mut conn, |tx| {
+    let effects = db::with_tx(&mut conn, |tx| {
         let Some(open) = db::current_assignment(tx, task_id)? else {
             return Err(db::no_open_assignment(
                 tx,
@@ -116,8 +121,13 @@ pub fn run(db_path: &std::path::Path, a: CompleteArgs) -> Result<()> {
         // Logged: finishing a blocker is the single most common way work gets
         // unblocked in this system, and the bare sweep left that promotion —
         // the entire point of the dependency graph — with no event at all.
-        db::refresh_ready_logged(tx, Some(&a.agent), "complete")?;
-        Ok(())
+        let promoted = db::refresh_ready_logged(tx, Some(&a.agent), "complete")?;
+        effects::collateral(
+            tx,
+            &[task_id],
+            "complete",
+            &db::Movements::promoted(promoted),
+        )
     })?;
     emit(
         a.json,
@@ -126,6 +136,7 @@ pub fn run(db_path: &std::path::Path, a: CompleteArgs) -> Result<()> {
             state: "done".to_string(),
             decisions: a.decision,
             artifacts: a.artifact,
+            effects,
         },
     )
 }

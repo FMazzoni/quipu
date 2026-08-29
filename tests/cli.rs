@@ -8165,3 +8165,454 @@ fn existing_store_gains_the_liveness_columns_on_migration() {
         .failure()
         .code(2);
 }
+
+// ---------------------------------------------------------------------------
+// `_effects` — collateral state changes
+// ---------------------------------------------------------------------------
+
+/// The `_effects` list on a payload, flattened to `(task, from, to, via)`.
+///
+/// Absent and empty are different answers and the helper keeps them so: a
+/// missing key returns `None`, never an empty vector.
+fn effects_of(v: &serde_json::Value) -> Option<Vec<(String, String, String, String)>> {
+    let list = v.get("_effects")?.as_array().unwrap().clone();
+    Some(
+        list.iter()
+            .map(|e| {
+                assert_eq!(e["kind"], "state_change", "unexpected effect kind in {e}");
+                (
+                    e["task"].as_str().unwrap().to_string(),
+                    e["from"].as_str().unwrap().to_string(),
+                    e["to"].as_str().unwrap().to_string(),
+                    e["via"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// Forces a task back to `pending` behind the CLI's back.
+///
+/// This is drift: a `pending` row with nothing left to wait for. It is the
+/// state the store-wide sweeps exist to repair, and for `add`, `abandon` and
+/// `reclaim` it is the *only* way to reach a collateral promotion — none of the
+/// three resolves a dependency, so nothing in the dependency graph can promote
+/// a task they did not name. Writing it directly is deliberate: the repair
+/// those sweeps perform is a real state change on a task the caller never
+/// mentioned, and `_effects` has to report it like any other.
+fn strand(db: &std::path::Path, rowid: i64) {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let n = conn
+        .execute("UPDATE task SET state = 'pending' WHERE id = ?", [rowid])
+        .unwrap();
+    assert_eq!(n, 1);
+}
+
+#[test]
+fn complete_reports_the_dependents_it_promoted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "blocker"]).assert().success();
+    qp(&db)
+        .args(["add", "waiter", "--depends-on", "QP-1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    let a = qp(&db)
+        .args(["complete", "QP-1", "--as", "x", "--json"])
+        .assert()
+        .success();
+    assert_eq!(
+        effects_of(&json_stdout(&a)),
+        Some(vec![(
+            "QP-2".to_string(),
+            "pending".to_string(),
+            "ready".to_string(),
+            "complete".to_string()
+        )])
+    );
+}
+
+#[test]
+fn complete_omits_effects_when_nothing_else_moved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "lonely"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    let a = qp(&db)
+        .args(["complete", "QP-1", "--as", "x", "--json"])
+        .assert()
+        .success();
+    let v = json_stdout(&a);
+    assert!(
+        v.get("_effects").is_none(),
+        "the key must be absent, not an empty list: {v}"
+    );
+}
+
+#[test]
+fn cancel_reports_the_dependents_it_promoted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "blocker"]).assert().success();
+    qp(&db)
+        .args(["add", "waiter", "--depends-on", "QP-1"])
+        .assert()
+        .success();
+    let a = qp(&db)
+        .args(["cancel", "QP-1", "--json"])
+        .assert()
+        .success();
+    assert_eq!(
+        effects_of(&json_stdout(&a)),
+        Some(vec![(
+            "QP-2".to_string(),
+            "pending".to_string(),
+            "ready".to_string(),
+            "cancel".to_string()
+        )])
+    );
+}
+
+#[test]
+fn cancel_omits_effects_when_nothing_else_moved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "lonely"]).assert().success();
+    let a = qp(&db)
+        .args(["cancel", "QP-1", "--json"])
+        .assert()
+        .success();
+    assert!(json_stdout(&a).get("_effects").is_none());
+}
+
+/// The demotion direction, which is the one most easily got backwards.
+///
+/// `qp block` is the only verb whose collateral is `demote_frozen` rather than
+/// a promotion sweep: the blocker freezes the blocked task, and the freeze
+/// propagates down every `contains` edge under it.
+#[test]
+fn block_reports_the_children_it_froze() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "slice"]).assert().success();
+    qp(&db).args(["add", "child"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    // Attached while QP-1 is running, so the child is still `ready` when the
+    // blocker lands — a child attached to an already-frozen parent would be
+    // demoted by that call instead, and this test would prove nothing.
+    let a = qp(&db)
+        .args(["contains", "QP-1", "QP-2", "--as", "x", "--json"])
+        .assert()
+        .success();
+    assert!(json_stdout(&a).get("_effects").is_none());
+    let a = qp(&db)
+        .args(["block", "QP-1", "--as", "x", "--new", "blocker", "--json"])
+        .assert()
+        .success();
+    assert_eq!(
+        effects_of(&json_stdout(&a)),
+        Some(vec![(
+            "QP-2".to_string(),
+            "ready".to_string(),
+            "pending".to_string(),
+            "block".to_string()
+        )])
+    );
+}
+
+#[test]
+fn block_omits_effects_when_nothing_else_moved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "slice"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    let a = qp(&db)
+        .args(["block", "QP-1", "--as", "x", "--new", "blocker", "--json"])
+        .assert()
+        .success();
+    assert!(json_stdout(&a).get("_effects").is_none());
+}
+
+#[test]
+fn contains_reports_the_grandchildren_it_froze() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "wave"]).assert().success();
+    qp(&db).args(["add", "blocker"]).assert().success();
+    qp(&db).args(["add", "mid"]).assert().success();
+    qp(&db).args(["add", "leaf"]).assert().success();
+    qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-2"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["contains", "QP-3", "QP-4"])
+        .assert()
+        .success();
+    // QP-1 is frozen, so attaching QP-3 to it freezes QP-3 *and* QP-4. Only
+    // QP-4 is collateral: the other two are named on the command line.
+    let a = qp(&db)
+        .args(["contains", "QP-1", "QP-3", "--json"])
+        .assert()
+        .success();
+    assert_eq!(
+        effects_of(&json_stdout(&a)),
+        Some(vec![(
+            "QP-4".to_string(),
+            "ready".to_string(),
+            "pending".to_string(),
+            "contains".to_string()
+        )])
+    );
+}
+
+#[test]
+fn contains_omits_effects_when_nothing_else_moved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "wave"]).assert().success();
+    qp(&db).args(["add", "slice"]).assert().success();
+    let a = qp(&db)
+        .args(["contains", "QP-1", "QP-2", "--json"])
+        .assert()
+        .success();
+    assert!(json_stdout(&a).get("_effects").is_none());
+}
+
+/// Both `depends` directions, in one graph, because they are inverses.
+///
+/// The add freezes a task neither endpoint names; the `--rm` thaws it again.
+/// `promoted` stays a statement about the named task throughout, which is why
+/// it is kept rather than folded into `_effects`.
+#[test]
+fn depends_reports_the_subtree_it_froze_and_thawed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "wave"]).assert().success();
+    qp(&db).args(["add", "blocker"]).assert().success();
+    qp(&db).args(["add", "leaf"]).assert().success();
+    qp(&db)
+        .args(["contains", "QP-1", "QP-3"])
+        .assert()
+        .success();
+    let a = qp(&db)
+        .args(["depends", "QP-1", "--on", "QP-2", "--json"])
+        .assert()
+        .success();
+    let v = json_stdout(&a);
+    assert_eq!(v["promoted"], false);
+    assert_eq!(
+        effects_of(&v),
+        Some(vec![(
+            "QP-3".to_string(),
+            "ready".to_string(),
+            "pending".to_string(),
+            "blocks".to_string()
+        )])
+    );
+    let a = qp(&db)
+        .args(["depends", "QP-1", "--rm", "--on", "QP-2", "--json"])
+        .assert()
+        .success();
+    let v = json_stdout(&a);
+    assert_eq!(
+        effects_of(&v),
+        Some(vec![(
+            "QP-3".to_string(),
+            "pending".to_string(),
+            "ready".to_string(),
+            "depends_rm".to_string()
+        )])
+    );
+}
+
+#[test]
+fn depends_omits_effects_when_only_the_named_task_moved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "blocker"]).assert().success();
+    qp(&db).args(["add", "waiter"]).assert().success();
+    // QP-2 is demoted by this edge, and QP-2 is named — so the payload reports
+    // it through `state`, not through `_effects`.
+    let a = qp(&db)
+        .args(["depends", "QP-2", "--on", "QP-1", "--json"])
+        .assert()
+        .success();
+    assert!(json_stdout(&a).get("_effects").is_none());
+}
+
+#[test]
+fn add_reports_the_drift_its_sweep_repaired() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "first"]).assert().success();
+    qp(&db).args(["add", "stranded"]).assert().success();
+    strand(&db, 2);
+    let a = qp(&db).args(["add", "third", "--json"]).assert().success();
+    assert_eq!(
+        effects_of(&json_stdout(&a)),
+        Some(vec![(
+            "QP-2".to_string(),
+            "pending".to_string(),
+            "ready".to_string(),
+            "add".to_string()
+        )])
+    );
+}
+
+#[test]
+fn add_omits_effects_when_nothing_else_moved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    let a = qp(&db).args(["add", "first", "--json"]).assert().success();
+    assert!(json_stdout(&a).get("_effects").is_none());
+}
+
+#[test]
+fn abandon_reports_the_drift_its_sweep_repaired() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "held"]).assert().success();
+    qp(&db).args(["add", "stranded"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    strand(&db, 2);
+    let a = qp(&db)
+        .args(["abandon", "QP-1", "--as", "x", "--json"])
+        .assert()
+        .success();
+    assert_eq!(
+        effects_of(&json_stdout(&a)),
+        Some(vec![(
+            "QP-2".to_string(),
+            "pending".to_string(),
+            "ready".to_string(),
+            "abandon".to_string()
+        )])
+    );
+}
+
+#[test]
+fn abandon_omits_effects_when_only_the_named_task_returned() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "held"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    let a = qp(&db)
+        .args(["abandon", "QP-1", "--as", "x", "--json"])
+        .assert()
+        .success();
+    let v = json_stdout(&a);
+    assert_eq!(v["state"], "ready");
+    assert!(v.get("_effects").is_none());
+}
+
+#[test]
+fn reclaim_reports_the_drift_its_sweep_repaired() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "held"]).assert().success();
+    qp(&db).args(["add", "stranded"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    strand(&db, 2);
+    let a = qp(&db)
+        .args(["reclaim", "QP-1", "--force", "--json"])
+        .assert()
+        .success();
+    assert_eq!(
+        effects_of(&json_stdout(&a)),
+        Some(vec![(
+            "QP-2".to_string(),
+            "pending".to_string(),
+            "ready".to_string(),
+            "reclaim".to_string()
+        )])
+    );
+}
+
+#[test]
+fn reclaim_omits_effects_when_only_the_named_task_returned() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "held"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    let a = qp(&db)
+        .args(["reclaim", "QP-1", "--force", "--json"])
+        .assert()
+        .success();
+    let v = json_stdout(&a);
+    assert_eq!(v["state"], "ready");
+    assert!(v.get("_effects").is_none());
+}

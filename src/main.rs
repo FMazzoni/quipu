@@ -9,6 +9,7 @@
 mod cmd;
 mod db;
 mod doctor;
+mod effects;
 mod id;
 mod lease;
 mod merge;

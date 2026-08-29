@@ -7,7 +7,7 @@ use crate::{db, id, merge as order, outcome::Outcome};
 use anyhow::{Context, Result};
 use clap::Args;
 use rusqlite::Transaction;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -379,9 +379,10 @@ fn parse_event(v: &Value, origin_uuid: &str, path: &Path) -> Result<LedgerEvent>
 ///
 /// Public because `qp sync` composes import rather than reimplementing it, and
 /// reports the merge's own numbers rather than counting its own.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(Default))]
 pub struct ImportOutcome {
-    pub mode: &'static str,
+    pub mode: String,
     pub from: String,
     pub batches: usize,
     /// Batches on this ledger that belong to another project and were left
@@ -429,7 +430,7 @@ pub struct ImportOutcome {
 
 impl Outcome for ImportOutcome {
     fn human(&self) -> String {
-        let mut s = match self.mode {
+        let mut s = match self.mode.as_str() {
             "restore" => format!(
                 "restored {} events into {} tasks from {}",
                 self.events_new, self.tasks, self.from
@@ -558,7 +559,7 @@ pub fn import(db_path: &Path, a: &ImportArgs) -> Result<ImportOutcome> {
     let stores = ledger.uuids();
     if ledger.events.is_empty() {
         return Ok(ImportOutcome {
-            mode: mode.as_str(),
+            mode: mode.as_str().to_string(),
             from: a.from.display().to_string(),
             batches: ledger.batches,
             foreign_batches: ledger.foreign,
@@ -829,7 +830,7 @@ fn restore(
     }
 
     Ok(ImportOutcome {
-        mode: "restore",
+        mode: "restore".to_string(),
         from: String::new(),
         batches: 0,
         foreign_batches: 0,
@@ -983,7 +984,7 @@ fn merge(
     let tasks: i64 = tx.query_row("SELECT COUNT(*) FROM task", [], |r| r.get(0))?;
 
     Ok(ImportOutcome {
-        mode: "merge",
+        mode: "merge".to_string(),
         from: String::new(),
         batches: 0,
         foreign_batches: 0,
