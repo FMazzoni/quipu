@@ -45,6 +45,10 @@ struct Cli {
     db: Option<std::path::PathBuf>,
     /// Front door to send served verbs through, instead of opening the store
     /// on this disk. `http://` is accepted for loopback literals only.
+    ///
+    /// The top two tiers of `resolve_server`: clap reads the flag first and
+    /// `QP_SERVER` second, and the store's own recorded url is consulted only
+    /// when this is `None`.
     #[arg(long, global = true, env = "QP_SERVER", value_name = "URL")]
     server: Option<String>,
     /// Project name. Repeatable, because `qp serve` opens a set of them and a
@@ -371,6 +375,86 @@ fn warn_unserved(json: bool) {
     }
 }
 
+/// The front door this invocation talks to, in four tiers.
+///
+/// ```text
+/// --server <url>            explicit, this invocation
+/// QP_SERVER=<url>           explicit, this environment
+/// meta['remote.server']     recorded in THIS store
+/// (none)                    open the store on this disk, as always
+/// ```
+///
+/// **Why this order, and not any other.** The two explicit tiers come first
+/// because they are the escape hatch: an operator diagnosing a store must be
+/// able to override what that store says about itself, and a recorded setting
+/// that outranked a typed flag would leave no way to reach a second front door
+/// from a configured machine. Clap already implements the first over the second
+/// — the flag beats its own `env` — so nothing here re-implements it, and the
+/// two are one `Option` by the time this function sees them. The recorded url
+/// comes third rather than not at all because a setting nothing reads on the
+/// path that matters is decorative: a machine looked configured to
+/// `qp remote doctor` while every command quietly answered from the local
+/// store, which is the silent-wrong-store failure the attach check exists to
+/// prevent, arriving from the opposite direction. Local last, unchanged, is
+/// what every existing store does.
+///
+/// **An explicit `--server` that disagrees with the recorded url wins in
+/// silence, and that is a decision rather than an omission.** The precedent for
+/// the other choice is [`crate::db::warn_on_project_mismatch`], and reading it
+/// is what settles this: that warning fires only when the path came from
+/// `--db`/`QP_DB`, only on a genuine `project_uuid` difference, and only
+/// between two paths it had *already* resolved. Here the second value is not
+/// already in hand — computing it means opening the local store, which is
+/// exactly what an explicit `--server` exists to avoid, and the dominant
+/// deployment for one is a machine with no local store at all. So the warning
+/// could only fire on the machines that least need it and would be silent on
+/// the ones that do. What that precedent guards against is a store the operator
+/// did not name being read silently; here the operator named the front door on
+/// the command line and the answer comes from it.
+///
+/// **Tier 3 cannot configure the machine the front door exists for, and this
+/// slice did not change that.** The recorded url is a row in `meta`, so reading
+/// it needs a store on this disk. A second machine — one that has no store,
+/// which is the whole reason to front one over HTTP — has no `meta` to read, so
+/// tier 3 can never fire there and its channel is still `QP_SERVER` in the
+/// environment, plus `--project` when the front door holds more than one store.
+/// What tier 3 buys is the machine that *does* hold the store: a coordinator
+/// that wants its own commands to go through the front door its agents use, so
+/// that one board is one board. That is worth having and it is not the same
+/// thing, and the difference must not be read off a green `qp remote doctor`.
+///
+/// The storeless machine has an obvious home for a url and it is deliberately
+/// not used here: `registry.rs` is a real per-machine file with an `Entry` per
+/// project, and its own rules say a purely additive field needs no version
+/// bump. Putting the url there would make a storeless machine configurable by
+/// name, and it is a fourth tier with its own precedence question (a registry
+/// entry and a store that disagree), its own `qp project register` surface, and
+/// its own doctor sequence. It is a slice, not a line, and it is the one to cut
+/// next.
+///
+/// **The recorded url is read only for a verb the front door actually
+/// answers.** Two things follow, both load-bearing. An unserved verb — `wait`,
+/// `watch`, `export`, and every op of `remote` and `project` — never pays the
+/// read and never changes behaviour, which is what keeps `qp remote doctor`,
+/// `qp remote show` and `qp remote clear --front-door` working as the escape
+/// hatches from a front door that is down: they are structurally incapable of
+/// going over the wire. And `warn_unserved` below still keys on the *explicit*
+/// flag, so it cannot start firing on every local command in a configured
+/// store.
+fn resolve_server(
+    explicit: Option<String>,
+    cmd: &Cmd,
+    db_path: &std::path::Path,
+) -> anyhow::Result<Option<String>> {
+    if explicit.is_some() {
+        return Ok(explicit);
+    }
+    if !route::is_served(cmd) {
+        return Ok(None);
+    }
+    remote::recorded_server(db_path)
+}
+
 /// Dispatch, split out from `main` so every arm can use `?`.
 ///
 /// Errors are returned rather than printed: `main` is the single place that
@@ -387,10 +471,11 @@ fn warn_unserved(json: bool) {
 /// `qp show` complained, as a not-found that read like a bad ticket id.
 fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
     let db_path = db::resolve_path(cli.db.clone())?;
+    let server = resolve_server(cli.server.clone(), &cli.cmd, &db_path)?;
     // A client pointed at a front door has no store on this disk and must not
     // be refused for lacking one. `route::is_served` is generated from the same
     // list the dispatch arms below use, so the two cannot drift apart.
-    let remote = cli.server.is_some() && route::is_served(&cli.cmd);
+    let remote = server.is_some() && route::is_served(&cli.cmd);
     if needs_store(&cli.cmd) && !remote {
         db::require_attached(&db_path, cli.db.is_some())?;
     }
@@ -405,6 +490,17 @@ fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
     // named. Silently reading the wrong file is the exact failure the attach
     // check exists to prevent, so it is said out loud. The line disappears verb
     // by verb as the fan-out slices land.
+    //
+    // `cli.server`, deliberately, and NOT the resolved `server`. The two agree
+    // for an unserved verb today — `resolve_server` never consults the recorded
+    // url for one — so this reads as a distinction without a difference, and it
+    // is the difference that matters: a store with a front door recorded would
+    // otherwise print "this ran against the local store" on every `qp wait`,
+    // `watch`, `export`, `sync`, `ledger` and `import`, forever, on the one
+    // machine that holds the file. A warning that fires on every command in a
+    // correct configuration is one people learn to filter out, and then it is
+    // not there on the day it is true. The condition to keep is: the operator
+    // named a front door for THIS invocation and it was not used.
     if cli.server.is_some() && !remote && needs_store(&cli.cmd) {
         warn_unserved(json);
     }
@@ -415,7 +511,7 @@ fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
     }
     let ctx = route::Ctx {
         db_path: db_path.clone(),
-        server: cli.server.clone(),
+        server,
         project: cli.project.first().cloned(),
     };
     match cli.cmd {
@@ -460,5 +556,26 @@ fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
             eprintln!("not implemented yet");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// clap's own assertions over the whole command tree, run as a test.
+    ///
+    /// The class this catches at its cause: a `global = true` flag whose long
+    /// name a subcommand also declares. Clap refuses that with a
+    /// `debug_assert`, so a *release* build does not error — it silently
+    /// mis-resolves, and the first read of the field panics with a downcast
+    /// mismatch nowhere near the flag. That has already happened here, which is
+    /// why `qp remote set` spells its url `--front-door` and not `--server`.
+    /// `debug_assert()` runs those same assertions on demand, in a debug test
+    /// binary, over every subcommand at once.
+    #[test]
+    fn the_command_tree_has_no_internal_contradiction() {
+        Cli::command().debug_assert();
     }
 }
