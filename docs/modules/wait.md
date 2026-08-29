@@ -47,12 +47,19 @@ catch it either.
 
 ## Polling, not locking
 
-The loop opens one connection, prepares one statement, and re-runs it every
-`--interval-ms` (default 500). It takes no write lock and holds no transaction,
-so any number of waiters cost nothing but reads and never block the agents they
-are waiting on. The trade is latency: release is detected within one interval,
-not at the instant of the transition. Nothing here is notification-driven — see
-`cmd/watch.rs` for the event-stream side.
+The loop issues one `list` every `--interval-ms` (default 500) — one SQL query
+against a fresh connection locally, one round trip through a front door — and
+reduces its rows to two numbers. It takes no write lock and holds no
+transaction, so any number of waiters cost nothing but reads and never block the
+agents they are waiting on. The trade is latency: release is detected within one
+interval, not at the instant of the transition. Nothing here is
+notification-driven — see `cmd/watch.rs` for the event-stream side.
+
+*This paragraph used to say "opens one connection, prepares one statement", and
+it was true of the `COUNT` this loop was before it went through `route::fetch`.
+It is corrected rather than deleted because the property it was protecting is
+unchanged and is the one that matters: a waiter is reads only, and it never
+blocks the agent it is waiting on.*
 
 ## A front door is polled, not answered around
 
