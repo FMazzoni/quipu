@@ -5,6 +5,11 @@
 //! a credential that belongs to anybody. Every host is RFC 2606 or
 //! `127.0.0.1`.
 //!
+//! The front-door tests hold the same line: a real `qp serve` on an ephemeral
+//! loopback port for the cases that need a real one, and an in-process stub
+//! `TcpListener` for the health bodies a real server cannot be made to send.
+//! A "server that is not listening" is a port nothing is bound to, never a host.
+//!
 //! The tests are organised by CAUSE rather than by code path, because the whole
 //! claim of this command is that two failures which look identical are reported
 //! differently. So the load-bearing assertions are the negative ones: a missing
@@ -324,6 +329,234 @@ fn a_healthy_ledger_passes_list_put_and_get_and_leaves_one_flat_probe_key() {
 }
 
 // ---------------------------------------------------------------------------
+// the front door: the three faults that used to be one
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_reachable_server_that_serves_this_project_is_clean() {
+    let s = Store::named("alpha");
+    let srv = Serve::start(&s.db);
+    s.set_server(&srv.url);
+    let r = s.doctor();
+    assert_eq!(r.code, 0, "a healthy front door is not a fault: {}", r.text);
+    assert_eq!(r.status("server", "url"), "pass");
+    assert_eq!(r.status("server", "reachable"), "pass");
+    assert_eq!(r.status("server", "serves"), "pass");
+    assert!(r.detail("server", "serves").contains("alpha"));
+    // Same binary both ends, so the versions agree.
+    assert_eq!(r.status("server", "version"), "pass");
+    assert!(r.detail("config", "configured").contains("server set"));
+}
+
+#[test]
+fn a_server_that_is_not_listening_is_the_unreachable_fault() {
+    let s = Store::named("alpha");
+    s.set_server(&format!("http://127.0.0.1:{}", free_port()));
+    let r = s.doctor();
+    assert_eq!(r.code, 5, "{}", r.text);
+    assert_eq!(r.status("server", "reachable"), "fail");
+    let fix = r.remedy("server", "reachable");
+    assert!(
+        fix.contains("qp serve"),
+        "the remedy must say what to start: {fix}"
+    );
+    assert!(
+        fix.contains("qp remote clear --front-door"),
+        "and how to get back to the local store: {fix}"
+    );
+    // Nothing after it may claim to know anything.
+    for later in ["version", "serves"] {
+        assert_eq!(r.status("server", later), "skipped");
+    }
+}
+
+/// The failure this slice exists to end: alive is not the same as serving you.
+///
+/// The two want opposite fixes — start a process, versus restart one with a
+/// different `--project` set — so the load-bearing assertions are the negative
+/// ones. `reachable` must PASS, and the remedy must not send anyone to start a
+/// server that is already running.
+#[test]
+fn a_live_server_that_does_not_serve_this_project_is_a_different_fault() {
+    let other = Store::named("beta");
+    let srv = Serve::start(&other.db);
+    let s = Store::named("alpha");
+    s.set_server(&srv.url);
+    let r = s.doctor();
+    assert_eq!(r.code, 5, "{}", r.text);
+    assert_eq!(
+        r.status("server", "reachable"),
+        "pass",
+        "a server that answered is reachable; saying otherwise is the confident wrong answer"
+    );
+    assert_eq!(r.status("server", "serves"), "fail");
+    let d = r.detail("server", "serves");
+    assert!(d.contains("alpha") && d.contains("beta"), "{d}");
+    let fix = r.remedy("server", "serves");
+    assert!(fix.contains("--project"), "{fix}");
+    assert!(
+        !fix.contains("cannot reach") && !fix.contains("network"),
+        "an answering server must not be diagnosed as an absent one: {fix}"
+    );
+}
+
+/// Something else on the port is not a quipu front door, and is not silence either.
+#[test]
+fn a_port_held_by_something_else_is_not_reported_as_unreachable() {
+    let stub = HealthStub::start("200 OK", "hello from some other service");
+    let s = Store::named("alpha");
+    s.set_server(&stub.url);
+    let r = s.doctor();
+    assert_eq!(r.code, 5, "{}", r.text);
+    assert_eq!(r.status("server", "reachable"), "fail");
+    let d = r.detail("server", "reachable");
+    assert!(
+        d.contains("not a quipu front door"),
+        "something answered, and the report must say so: {d}"
+    );
+    assert!(
+        !r.remedy("server", "reachable").contains("qp serve --bind"),
+        "starting a second server on a taken port is the wrong remedy"
+    );
+}
+
+/// A version difference is reported and is NOT a fault.
+///
+/// Built with a stub because the only way a real `qp serve` reports a different
+/// version is by being a different build, which a test cannot arrange.
+#[test]
+fn a_version_difference_is_reported_without_failing_the_run() {
+    let stub = HealthStub::start(
+        "200 OK",
+        r#"{"version":"0.0.1-elsewhere","bind":"127.0.0.1:0","uptime_s":1,"projects":["alpha"]}"#,
+    );
+    let s = Store::named("alpha");
+    s.set_server(&stub.url);
+    let r = s.doctor();
+    assert_eq!(
+        r.code, 0,
+        "refusing to work over a version difference is worse than the problem: {}",
+        r.text
+    );
+    assert_eq!(r.status("server", "version"), "note");
+    assert!(r.detail("server", "version").contains("0.0.1-elsewhere"));
+    assert!(r.remedy("server", "version").contains("not a fault"));
+    assert_eq!(r.status("server", "serves"), "pass");
+}
+
+/// A url of the ledger's kind in the server slot, and vice versa.
+#[test]
+fn each_url_kind_is_refused_in_the_other_slot() {
+    let s = Store::named("alpha");
+    s.qp()
+        .args(["remote", "set", "--front-door", "s3://host.invalid/bucket"])
+        .assert()
+        .failure();
+    s.qp()
+        .args(["remote", "set", "--ledger", "https://qp.example.com"])
+        .assert()
+        .failure();
+    // And the shallow check still runs first. Written with `=` so clap hands
+    // the flag-shaped text through as a VALUE — the point is that quipu refuses
+    // it, not that clap does.
+    s.qp()
+        .args(["remote", "set", "--front-door=--upload-pack=evil"])
+        .assert()
+        .failure();
+}
+
+// ---------------------------------------------------------------------------
+// the four combinations of what is attached
+// ---------------------------------------------------------------------------
+
+/// Both configured: both sequences run, and neither hides the other.
+#[test]
+fn a_ledger_and_a_server_are_both_checked_and_neither_hides_the_other() {
+    let store = ObjectStore::start();
+    let s = Store::named("alpha");
+    s.set_ledger(&store.url());
+    // A front door that is not there, so the SERVER sequence fails while the
+    // ledger sequence passes. The failure must be attributed to the server.
+    s.set_server(&format!("http://127.0.0.1:{}", free_port()));
+    let r = s.doctor_with(&store);
+    assert_eq!(r.code, 5, "{}", r.text);
+    assert_eq!(r.status("ledger", "get"), "pass", "{}", r.text);
+    assert_eq!(r.status("server", "reachable"), "fail");
+    assert!(r
+        .detail("config", "configured")
+        .contains("ledger and server"));
+
+    // Now the other way round: a broken ledger must not suppress a healthy
+    // front door's checks.
+    let srv = Serve::start(&s.db);
+    s.set_server(&srv.url);
+    let broken = Store::named("alpha2");
+    broken.set_ledger(&format!("s3://127.0.0.1:{}/quipu-ledger", free_port()));
+    broken.set_server(&srv.url);
+    let r = broken.doctor_with_env(&[
+        ("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE"),
+        (
+            "AWS_SECRET_ACCESS_KEY",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        ),
+        ("QUIPU_S3_PLAINTEXT", "1"),
+    ]);
+    assert_eq!(r.code, 5);
+    assert_eq!(r.status("ledger", "endpoint"), "fail");
+    assert_eq!(
+        r.status("server", "reachable"),
+        "pass",
+        "a dead ledger must not make the front door look dead: {}",
+        r.text
+    );
+}
+
+/// Local-only stays a first-class healthy answer now that there are two urls.
+#[test]
+fn a_store_with_neither_url_is_still_healthy_and_probes_nothing() {
+    let s = Store::named("alpha");
+    let r = s.doctor();
+    assert_eq!(r.code, 0, "{}", r.text);
+    assert_eq!(r.status("config", "configured"), "note");
+    assert!(r.detail("config", "configured").contains("local-only"));
+    assert!(!r.has_target("ledger"));
+    assert!(!r.has_target("server"), "{}", r.text);
+    assert_eq!(r.json["local_only"], Value::from(true));
+}
+
+/// A server-only store is attached, so it is not local-only.
+#[test]
+fn a_server_only_store_checks_the_server_and_nothing_else() {
+    let s = Store::named("alpha");
+    let srv = Serve::start(&s.db);
+    s.set_server(&srv.url);
+    let r = s.doctor();
+    assert_eq!(r.code, 0, "{}", r.text);
+    assert_eq!(r.json["local_only"], Value::from(false));
+    assert!(!r.has_target("ledger"), "{}", r.text);
+    assert!(r.has_target("server"));
+}
+
+/// Clearing takes the store back to local-only, one url at a time.
+#[test]
+fn clearing_one_url_leaves_the_other_attached() {
+    let store = ObjectStore::start();
+    let s = Store::named("alpha");
+    s.set_ledger(&store.url());
+    s.set_server("https://qp.example.com");
+    s.qp()
+        .args(["remote", "clear", "--front-door"])
+        .assert()
+        .success();
+    let r = s.doctor_with(&store);
+    assert!(!r.has_target("server"), "{}", r.text);
+    assert!(r.has_target("ledger"));
+    s.qp().args(["remote", "clear"]).assert().success();
+    let r = s.doctor();
+    assert_eq!(r.json["local_only"], Value::from(true), "{}", r.text);
+}
+
+// ---------------------------------------------------------------------------
 // output contract
 // ---------------------------------------------------------------------------
 
@@ -381,10 +614,22 @@ struct Store {
 
 impl Store {
     fn new() -> Self {
+        Self::init(&[])
+    }
+
+    /// A store whose project name is chosen rather than derived from a temp dir.
+    ///
+    /// The front-door tests compare the store's name against the list a server
+    /// reports, so the name has to be one the test can write down.
+    fn named(name: &str) -> Self {
+        Self::init(&["--name", name])
+    }
+
+    fn init(extra: &[&str]) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("db.sqlite");
         let s = Self { _tmp: tmp, db };
-        s.qp().arg("init").assert().success();
+        s.qp().arg("init").args(extra).assert().success();
         s
     }
 
@@ -420,6 +665,13 @@ impl Store {
     fn set_ledger(&self, url: &str) {
         self.qp()
             .args(["remote", "set", "--ledger", url])
+            .assert()
+            .success();
+    }
+
+    fn set_server(&self, url: &str) {
+        self.qp()
+            .args(["remote", "set", "--front-door", url])
             .assert()
             .success();
     }
@@ -496,6 +748,103 @@ impl Run {
             .unwrap()
             .iter()
             .any(|c| c["target"] == target)
+    }
+}
+
+/// A real `qp serve` on an ephemeral loopback port, killed when the test ends.
+///
+/// A real process rather than a stub for the healthy cases, because the claim
+/// under test is about what `/healthz` actually answers — a stub of it would
+/// only test the test.
+struct Serve {
+    child: std::process::Child,
+    url: String,
+}
+
+impl Serve {
+    fn start(db: &std::path::Path) -> Self {
+        let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("qp"))
+            .env("QP_DB", db)
+            .env("QUIPU_REGISTRY", db.parent().unwrap().join("registry.json"))
+            .args(["serve", "--bind", "127.0.0.1:0"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn qp serve");
+        let mut reader = std::io::BufReader::new(child.stderr.take().expect("piped stderr"));
+        let bind = loop {
+            let mut line = String::new();
+            let n = std::io::BufRead::read_line(&mut reader, &mut line).expect("read stderr");
+            assert!(n > 0, "qp serve exited before logging startup");
+            if let Ok(v) = serde_json::from_str::<Value>(line.trim_end()) {
+                if v["event"] == "startup" {
+                    break v["bind"].as_str().expect("bind address").to_string();
+                }
+            }
+        };
+        // Drained on a thread: a full stderr pipe blocks the process under test.
+        std::thread::spawn(
+            move || {
+                for _ in std::io::BufRead::lines(reader).map_while(Result::ok) {}
+            },
+        );
+        Serve {
+            child,
+            url: format!("http://{bind}"),
+        }
+    }
+}
+
+impl Drop for Serve {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A loopback listener that answers every request with one fixed response.
+///
+/// For the health bodies a real `qp serve` cannot be made to send: a different
+/// version string, and a 200 that is not a health payload at all.
+struct HealthStub {
+    url: String,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl HealthStub {
+    fn start(status: &str, body: &str) -> Self {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        let resp = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&stop);
+        std::thread::spawn(move || {
+            use std::io::Write;
+            while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                match l.accept() {
+                    Ok((mut sock, _)) => {
+                        // The request is read only far enough to unblock the
+                        // client; the answer does not depend on it.
+                        let mut buf = [0u8; 1024];
+                        let _ = std::io::Read::read(&mut sock, &mut buf);
+                        let _ = sock.write_all(resp.as_bytes());
+                    }
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                }
+            }
+        });
+        HealthStub { url, stop }
+    }
+}
+
+impl Drop for HealthStub {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

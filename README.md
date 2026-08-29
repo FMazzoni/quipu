@@ -236,16 +236,25 @@ Optional, and off by default. A store with no remote configured behaves exactly
 as it always has: no network, no daemon, no external service.
 
     qp remote set --ledger s3://minio.host.example/quipu-ledger
+    qp remote set --front-door https://qp.host.example
     qp remote show
     qp remote doctor
     qp remote clear
 
-One url:
+Two urls, unrelated to each other:
 
 - **ledger** — where the exported event log syncs, as objects in a bucket:
   `s3://<host>/<bucket>[/<prefix>]`, https implied. Content crosses it, so only
   machines you own need to reach it. It referees nothing: claims are settled
   locally, by one writer at a time, and never leave the machine.
+- **front door** — the `qp serve` process this store is reached through:
+  `https://<host>[:<port>]`, or `http://` to a loopback literal only. Recorded
+  here so `qp remote doctor` can diagnose it. It is spelled `--front-door`
+  because the global `--server` flag, which routes a single invocation through a
+  front door without remembering it, already owns that name.
+
+A store may have both, either, or neither. Neither is local-only, which is the
+default and a fully supported state.
 
 Credentials come from the standard `AWS_ACCESS_KEY_ID` and
 `AWS_SECRET_ACCESS_KEY` environment variables, plus `AWS_SESSION_TOKEN` when
@@ -265,9 +274,9 @@ unless you pass `--check`.
 
 `--check` answers "is it there". **`qp remote doctor` answers "why is it not"**,
 which is the question that actually costs time. It runs a sequence of checks
-against whatever is configured — the ledger, plus this store's name and the
-project registry, which are checked whether or not a remote is attached —
-stopping at the first failure, and it NAMES the cause instead of leaving you to
+against whatever is configured — the ledger, the front door, plus this store's
+name and the project registry, which are checked whether or not a remote is
+attached — stopping at the first failure within each sequence, and it NAMES the cause instead of leaving you to
 reverse-engineer an error that points somewhere else.
 
 That is the whole point. A clock a quarter of an hour out makes an object store
@@ -275,7 +284,10 @@ refuse a key that was never wrong, and the error says nothing about time. A host
 that moved onto a private network stops answering on its old address with a
 refusal identical to the service being down. A key scoped to a prefix that
 cannot list looks exactly like a bucket that does not exist, and the two fixes
-are opposite.
+are opposite. A front door that is running and does not hold your project
+refuses every request in a way that reads like the front door being down, and
+one of those wants a process started while the other wants a running process
+restarted with a different project list.
 
 So each result says what was checked, what happened, and — on failure — what to
 actually do. Where a check genuinely cannot separate two causes it names both
@@ -287,7 +299,7 @@ can gate a setup script.
 
 **`qp remote clear` is the escape hatch, not a convenience.** It is the
 deliberate, recorded way back to a local-only store. Bare `qp remote clear`
-clears everything; `--ledger` names the url it means.
+clears everything; `--ledger` and `--front-door` name the url they mean.
 
 ## Exporting the ledger
 

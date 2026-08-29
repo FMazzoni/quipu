@@ -20,6 +20,25 @@ exit 7 as *unknown outcome*: in the window where the request was sent and the
 response was lost, the transaction may have committed. The recovery is the
 process contract's — read before writing.
 
+## `health` is the one request that is not a verb
+
+`GET /healthz`, with no body and no project parameter — the process contract
+fixes both. It exists so a diagnostic can ask a front door what it is and what
+it serves without opening a store, and it returns the parsed body rather than a
+verdict: judging that body is the doctor's job, and a client that collapsed
+"nothing answered" into "answered something unexpected" would erase the one
+distinction the diagnosis is for.
+
+So the two failure shapes are kept apart deliberately. A transport failure and
+a truncated read are `unavailable`, like every verb's. A 200 whose body is not
+JSON is NOT: something answered, the front door was reached, and a caller that
+read that as "nothing is listening" would send an operator to start a process
+that is already running — on a port already held by something else.
+
+Its body ceiling is much smaller than a verb's, because the probe is aimed at a
+url that may not be a quipu front door at all and the first thing it can meet is
+some other service's home page.
+
 ## Plaintext
 
 `check_url` reuses `s3::is_loopback_literal` rather than growing a second

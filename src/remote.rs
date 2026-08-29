@@ -1,4 +1,4 @@
-//! Remote attachment: the ledger url in `meta`, and the shape a url must have to be one.
+//! Remote attachment: the ledger and front-door urls in `meta`, and the shape each must have.
 //!
 #![doc = include_str!("../docs/modules/remote_config.md")]
 
@@ -7,6 +7,9 @@ use rusqlite::{Connection, OptionalExtension};
 
 /// `meta` key holding the ledger sync url.
 pub const KEY_LEDGER: &str = "remote.ledger";
+
+/// `meta` key holding the front-door url this store is reached through.
+pub const KEY_SERVER: &str = "remote.server";
 
 /// What a store may be attached to. `None` is the local-only state.
 ///
@@ -18,12 +21,13 @@ pub const KEY_LEDGER: &str = "remote.ledger";
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Remotes {
     pub ledger: Option<String>,
+    pub server: Option<String>,
 }
 
 impl Remotes {
     /// True when nothing is configured — the default, and a first-class state.
     pub fn local_only(&self) -> bool {
-        self.ledger.is_none()
+        self.ledger.is_none() && self.server.is_none()
     }
 }
 
@@ -34,6 +38,7 @@ impl Remotes {
 pub fn load(conn: &Connection) -> Result<Remotes> {
     Ok(Remotes {
         ledger: read_key(conn, KEY_LEDGER)?,
+        server: read_key(conn, KEY_SERVER)?,
     })
 }
 
@@ -136,6 +141,93 @@ pub fn validate_ledger_url(url: &str) -> Result<()> {
     Ok(())
 }
 
+/// Rejects a front-door url that is not an http(s) url this client would call.
+///
+/// The second layer for the server, sitting BESIDE `validate_ledger_url`'s
+/// rather than loosening the shallow check both share. It delegates the shape
+/// half to `client::check_url` so there is exactly one opinion in the tree
+/// about when plaintext is acceptable — a url that stores clean here and is
+/// then refused at call time would be a diagnostic that lies.
+pub fn validate_server_url(url: &str) -> Result<()> {
+    validate_url(url)?;
+    crate::client::check_url(url)?;
+    Ok(())
+}
+
+/// What a front door's health probe said about the process behind it.
+///
+/// Three variants because three different things go wrong and they want three
+/// different fixes: nothing is running, something else is running, or quipu is
+/// running and does not hold the store you asked about. Collapsing the first
+/// two into "could not reach it" is the confidently-wrong answer a diagnostic
+/// exists to end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerReach {
+    /// A quipu front door answered, and said what it is and what it serves.
+    Alive {
+        version: Option<String>,
+        projects: Vec<String>,
+    },
+    /// Something answered on that url and it is not a quipu front door.
+    NotQuipu(String),
+    /// Nothing answered.
+    Unreachable(String),
+}
+
+impl ServerReach {
+    /// The coarse form `qp remote show --check` prints, for symmetry with the ledger.
+    pub fn reach(&self) -> Reach {
+        match self {
+            ServerReach::Alive { .. } => Reach::Ok,
+            ServerReach::NotQuipu(d) | ServerReach::Unreachable(d) => Reach::Fault(d.clone()),
+        }
+    }
+}
+
+/// Asks a front door whether it is alive and which projects it serves.
+///
+/// `GET /healthz`, and nothing else. The health endpoint answers from
+/// process-local state and deliberately refuses a project parameter, so the
+/// probe cannot ask "do you serve X" — it asks what the process opened at
+/// startup and compares locally. Asking the server instead would be asking it
+/// to run a liveness check whose answer depends on user input, which is the
+/// thing the process contract rules out.
+pub fn probe_server(url: &str) -> ServerReach {
+    let body = match crate::client::health(url) {
+        Ok(v) => v,
+        Err(e) => {
+            let transport = e
+                .downcast_ref::<crate::db::QuipuError>()
+                .is_some_and(|q| q.kind() == "unavailable");
+            let detail = format!("{e:#}");
+            return match transport {
+                true => ServerReach::Unreachable(detail),
+                false => ServerReach::NotQuipu(detail),
+            };
+        }
+    };
+    // A quipu front door always reports the set it opened at startup, and that
+    // set is never empty. Anything else answering 200 on this path is some
+    // other service, and saying so is more useful than reporting no projects.
+    let Some(projects) = body.get("projects").and_then(serde_json::Value::as_array) else {
+        return ServerReach::NotQuipu(format!(
+            "answered {} with a body that is not a quipu health payload: it has no `projects` list",
+            crate::wire::HEALTH_PATH
+        ));
+    };
+    ServerReach::Alive {
+        version: body
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        projects: projects
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +258,33 @@ mod tests {
         assert!(validate_ledger_url("--upload-pack=evil").is_err());
         assert!(validate_ledger_url("ssh://host.invalid/srv/x.git").is_err());
         assert!(validate_ledger_url("s3://host.invalid/bucket/prefix").is_ok());
+    }
+
+    /// The server's shape check sits BESIDE the ledger's, over the same shallow one.
+    ///
+    /// Both halves matter. A url that would be read as a flag is refused
+    /// before anything parses a host out of it, and each kind of url still
+    /// refuses the other kind — a diagnostic that accepted an `s3://` url as a
+    /// front door would then report the front door as unreachable, which is
+    /// the confident wrong answer in a new costume.
+    #[test]
+    fn a_server_url_must_pass_the_shallow_check_and_then_be_an_http_url() {
+        assert!(validate_server_url("--upload-pack=evil").is_err());
+        assert!(validate_server_url(" https://qp.example.com").is_err());
+        assert!(validate_server_url("s3://host.invalid/bucket").is_err());
+        assert!(validate_server_url("https://qp.example.com").is_ok());
+        assert!(validate_server_url("http://127.0.0.1:8787").is_ok());
+        // The plaintext rule is `client::check_url`'s and is not re-litigated here.
+        assert!(validate_server_url("http://qp.example.com").is_err());
+        // And the ledger still refuses a front door.
+        assert!(validate_ledger_url("https://qp.example.com").is_err());
+    }
+
+    #[test]
+    fn local_only_needs_both_urls_absent() {
+        let mut r = Remotes::default();
+        assert!(r.local_only());
+        r.server = Some("https://qp.example.com".to_string());
+        assert!(!r.local_only(), "a server-only store is not local-only");
     }
 }

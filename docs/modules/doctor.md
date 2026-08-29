@@ -24,10 +24,15 @@ fails; the rest are recorded as skipped. This is the rule that makes the output
 worth reading. A missing credential makes every later check answer a question
 nobody asked, and a screen of red herrings is the experience this command exists
 to replace. The sequences are independent of each other: a broken ledger never
-suppresses the naming checks.
+suppresses the naming checks, and never suppresses the front door's.
 
-No ledger configured is not a fault — local-only is the default and a supported
-state.
+Nothing configured is not a fault — local-only is the default and a supported
+state, and so is a store with only one of the two urls set.
+
+A skipped check says an earlier one in ITS OWN sequence did not pass. "Did not
+pass" rather than "failed", because a note stops a sequence too: `registered` is
+advice on the ordinary unregistered store, and the `entry_path` skip that
+follows it used to claim a failure that had not happened — on almost every run.
 
 The ORDER inside the ledger sequence is itself a diagnosis. The clock is checked
 before the credential verdict, because a clock a quarter of an hour out makes the
@@ -48,7 +53,15 @@ silently is how an afternoon gets spent on the wrong fix:
   there — the report says so and names both.
 - **Nothing listening.** The service being down, an address left behind when a
   host moved onto a private mesh network, and this machine being locked out of
-  that network produce byte-identical refusals. All three are named.
+  that network produce byte-identical refusals. All three are named. The front
+  door's version of the same list is its own three causes: no `qp serve` is
+  running, one is running elsewhere, or this machine cannot reach that host.
+
+- **A front door that is absent versus one that is alive and serving other
+  projects.** These want opposite fixes — start a process, versus restart a
+  running one with a different `--project` set — and one is not even a fault of
+  the server's. They are separate checks, `reachable` and `serves`, and the
+  second only runs when the first passed.
 
 ## The object-store probe writes, and does not delete
 
@@ -72,11 +85,88 @@ failed, `5` when something did. A code of its own rather than the retryable
 conflict code, so a skill that retries on that one does not loop forever against
 a remote that will never come good.
 
+## The front-door sequence
+
+`qp remote doctor` could not diagnose a front door at all, and the way it failed
+is the reason this sequence exists. Before the change, `qp remote set --ledger
+http://...` was refused outright — correctly, and with an accurate message
+naming the `s3://` form — so a server url could not be stored; forced into
+`meta` by hand, it was reported as a malformed LEDGER and the remedy told you to
+re-set it as object storage. Accurate about the ledger, useless about the thing
+you actually configured.
+
+The checks, in order, and the order is the diagnosis:
+
+1. **`url`** — it is an http(s) url a client would call, and plaintext only to a
+   loopback literal. An `s3://` url here is a url fault and stops the sequence:
+   probing it would report a front door as unreachable, which is a confident
+   wrong answer wearing a new costume.
+2. **`reachable`** — one `GET /healthz`. Two distinct failures share this check
+   and carry different remedies. Nothing answered: the three causes above, plus
+   the standing fact that `qp serve` is never started implicitly, so a url that
+   was set is not a process that exists. Something answered and it is not a
+   quipu front door: another service holds the port, or a proxy is not routed —
+   and the remedy must NOT be "start a server", which would mean starting one on
+   a port already taken.
+3. **`version`** — see below. Never a failure, and placed before `serves` for
+   the reason the ledger checks the clock before the credential verdict: it is a
+   property of the process rather than of the request, so knowing it colours
+   everything reported after it.
+4. **`serves`** — is this store's project name in the list the process opened at
+   startup? A failure here is NOT unreachable and never transient: the store set
+   is fixed before the listener binds and no request can add to it, so the
+   remedy is a restart naming the project, or a different front door.
+
+The probe asks nothing the health endpoint refuses to answer. `/healthz` takes
+no project parameter by contract — a liveness check whose answer depends on user
+input makes "unknown project" look like "process unhealthy" — so the list comes
+back whole and the comparison happens on this side.
+
+When the store has no readable project name, `serves` is a NOTE naming what the
+front door does serve, not a failure. The `project` sequence has already failed
+on the name, and reporting it a second time as a server fault would name the
+wrong thing to fix.
+
+## Version mismatch: the check that would have been worse than the problem
+
+`/healthz` already reports `CARGO_PKG_VERSION`, so the comparison is buildable
+and is built. What it is NOT is a gate: a difference is a NOTE with advice, and
+it never fails the run.
+
+The reasoning is that the crate version is neither necessary nor sufficient for
+the thing that actually has to match. What a request depends on is the served
+verb table, the error taxonomy and the payload shapes — and two builds of one
+version from different commits can differ in all three, while two adjacent
+versions normally differ in none. A `Fail` here would fire on the ordinary case
+of an operator upgrading their client before restarting the front door, and a
+check that fires on the ordinary case is one people learn to ignore. That is the
+same rule that keeps "not registered" a note.
+
+So the `Pass` is deliberately hedged in its own text — equal versions are not
+proof of an equal verb table — and the `Note` says what to watch for instead: a
+verb the front door should serve coming back `not_found`, or a payload field
+this client expects being absent. Those are observations about the contract
+rather than about a version string, and they are what a real compatibility check
+would test.
+
+**What a useful hard check would need, and why it is not here.** It would need
+`/healthz` to report the verb table it serves, so a client could compare the
+verb it is about to send against the set the server answers. That is a widening
+of a published endpoint, fixed by the process contract, and it belongs to
+whoever changes that contract — not to a slice adding a diagnostic. Until then,
+`not_found` on a verb the client believes is served is the honest signal, and it
+arrives at the moment it matters rather than on a doctor run.
+
 ## Naming and registry checks
 
 Two sequences run unconditionally, before anything that needs a remote: naming
 and the registry are how a caller reaches this store *by name*, and they are
 wrong in the same way whether or not a remote is attached.
+
+The front-door sequence is independent of both, and of the ledger's. A store may
+have a ledger, a front door, both or neither; each sequence runs iff its url is
+configured, and none of them suppresses another. Local-only means neither url is
+set, and it stays a note rather than a fault.
 
 `registry` covers the file — readable, versioned, no name claimed twice, no entry
 pointing at a store that is gone. `project` covers this store — it has a name,

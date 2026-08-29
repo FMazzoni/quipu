@@ -9,6 +9,13 @@ use serde_json::Value;
 /// Ceiling on a response body, so a wrong endpoint cannot exhaust memory.
 const MAX_BODY: u64 = 8 * 1024 * 1024;
 
+/// Ceiling on a health body, which is four short fields and a list of names.
+///
+/// Much smaller than [`MAX_BODY`] on purpose: the probe is aimed at a url that
+/// may not be a quipu front door at all, so the first thing it can meet is a
+/// large page from some other service.
+const MAX_HEALTH_BODY: u64 = 64 * 1024;
+
 /// Issues one served verb against `base` and returns the success payload.
 ///
 /// Every non-2xx answer and every transport failure comes back as the typed
@@ -49,6 +56,41 @@ pub fn call(base: &str, verb: &str, project: Option<&str>, body: Value) -> Resul
     Err(wire::error_from(status, &text, &url))
 }
 
+/// Asks the front door what it is and what it serves. `GET /healthz`, no body.
+///
+/// The one request in this module that is not a verb. It is a GET because the
+/// endpoint is a liveness probe rather than a mutation, and it takes no project
+/// parameter because the process contract forbids one — the caller compares the
+/// returned list locally instead. A non-2xx or an unreadable body comes back as
+/// the same typed error a verb would produce, so the caller can tell a
+/// transport failure from an answer it did not understand.
+pub fn health(base: &str) -> Result<Value> {
+    let base = check_url(base)?;
+    let url = format!("{base}{}", wire::HEALTH_PATH);
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut resp = agent
+        .get(&url)
+        .call()
+        .map_err(|e| wire::unavailable(format!("{url}: {e}"), &url))?;
+    let status = resp.status().as_u16();
+    let text = resp
+        .body_mut()
+        .with_config()
+        .limit(MAX_HEALTH_BODY)
+        .read_to_string()
+        .map_err(|e| wire::unavailable(format!("{url}: truncated response: {e}"), &url))?;
+    if !(200..300).contains(&status) {
+        return Err(wire::error_from(status, &text, &url));
+    }
+    // Deliberately NOT `unavailable`: something answered, so the front door was
+    // reached and the caller must not read this as "nothing is listening".
+    serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("{url} answered {status} with a body that is not JSON: {e}"))
+}
+
 /// Validates the endpoint and strips its trailing slash.
 ///
 /// The plaintext rule is the wire contract's, and it reuses
@@ -57,7 +99,7 @@ pub fn call(base: &str, verb: &str, project: Option<&str>, body: Value) -> Resul
 /// request for plaintext; what it cannot do is make a non-loopback host
 /// acceptable, and a name that merely resolves to loopback does not count —
 /// a DNS answer is attacker-influenceable and is not a security property.
-fn check_url(base: &str) -> Result<String> {
+pub fn check_url(base: &str) -> Result<String> {
     let rest = match base.strip_prefix("https://") {
         Some(r) => r,
         None => {
