@@ -20,6 +20,7 @@ pub mod install_skills;
 pub mod ledger;
 pub mod list;
 pub mod log;
+pub mod project;
 pub mod reclaim;
 pub mod relation;
 pub mod remote;

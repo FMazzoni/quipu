@@ -68,3 +68,56 @@ exactly like `db::add_missing_columns`. Every store that predates the key is
 already stamped at a version this binary knows, so a gated backfill would never
 reach a single one of them — the store would look keyless forever and every
 project-scoped read would have to invent an answer for it.
+
+## The name, and why it lives here
+
+`project_key` identifies a project across machines and is a uuid; `display_prefix`
+is not unique across stores. Neither can be typed at a `--project` flag and mean
+one thing, so a store also carries `project_name` — lowercase letters, digits and
+hyphens, 1–64 characters, starting and ending alphanumeric.
+
+The character set is not aesthetic. A name is a shell argument and a lookup key,
+so anything that shells quote, that normalises two ways (case, Unicode) or that
+reads as a flag would produce two spellings of one project — and a `--project`
+that silently matches nothing, or matches the wrong store, is the exact failure
+the name exists to prevent. Uppercase is rejected rather than folded, so the
+stored name and the typed name are the same string.
+
+It lives in the store, next to the data it names, for two reasons: it survives a
+move, and it cannot drift from the tickets it labels. The machine-local index
+that maps a name back to a file is only an index — see `docs/modules/registry.md`.
+
+## Assigned versus derived names
+
+`qp init` assigns the name: `--name` if given, otherwise the slug of the
+directory holding `.quipu/`. An assigned name is then fixed for the life of the
+store, and a later `qp init --name` that disagrees is refused — registry entries
+point at the name, so a quiet rename would leave every one of them naming a
+project that no longer answers.
+
+A store created before names existed has none, and `project::backfill_name` gives
+it one on the next open of any kind: `<prefix>-<first 8 of project_uuid>`.
+Derived from the store's own identity rather than from where the file sits,
+because a name taken from a directory would change the moment the store moved,
+and a name that drifts is worse than an ugly one.
+
+`project_name_origin` records which of the two happened, and that is the whole
+reason it exists: a derived name is a placeholder this binary invented, so
+`qp init --name` may replace it — that is the migration finishing, not a rename —
+while an assigned one may not.
+
+## The trap the name backfill avoids
+
+The `INSERT OR IGNORE INTO meta(...) VALUES (...)` batch in `db::migrate` ignores
+per ROW, not per statement. A store missing only one key still gets a freshly
+minted value from that batch, which is how the derived `project_key` above became
+unreachable for stores that already existed. So the name is deliberately NOT in
+that batch: it is written by `backfill_name`, ungated by `schema_version` for the
+same reason `backfill` is, and by `assign_name` at init.
+
+No `SCHEMA_VERSION` bump accompanies the name. There is no DDL to apply — `meta`
+is a key/value table that has shipped since version 1 — and the two mechanisms
+that reach an existing store, the ungated backfill and `add_missing_columns`, are
+precisely the ones that work *without* a bump. Bumping to move a `meta` row would
+re-run the whole schema batch on every store to no effect, and would misreport
+what changed.

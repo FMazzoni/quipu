@@ -36,6 +36,10 @@ pub struct InitArgs {
     /// Start a NEW project even where a ledger already holds others.
     #[arg(long)]
     pub new_project: bool,
+    /// Human name this store answers to. Lowercase letters, digits, hyphens.
+    /// Defaults to the directory name; fixed once assigned.
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
     /// Emit JSON instead of human-readable text.
     #[arg(long)]
     pub json: bool,
@@ -52,6 +56,9 @@ pub struct InitArgs {
 pub struct InitOutcome {
     db_path: String,
     prefix: String,
+    /// What this store answers to by name. Read back out of the store for the
+    /// same reason `prefix` is: re-initialising keeps the name it already had.
+    project_name: String,
     schema_version: String,
     project_uuid: String,
     project_key: String,
@@ -68,7 +75,10 @@ impl Outcome for InitOutcome {
             "minted" => format!("started project {}", self.project_key),
             _ => format!("project {}", self.project_key),
         };
-        format!("initialized at {} — {what}", self.db_path)
+        format!(
+            "initialized at {} — {what} (name `{}`)",
+            self.db_path, self.project_name
+        )
     }
 }
 
@@ -174,6 +184,10 @@ impl Source {
 }
 
 pub fn run(db_path: &Path, a: InitArgs) -> Result<()> {
+    // Before anything opens the store: `db::init` creates it, and by the time
+    // the naming below runs there is no way left to tell a store this command
+    // just made from one that was already here.
+    let fresh = existing_store_uuid(db_path).is_none();
     let intent = decide(db_path, &a)?;
 
     let (conn, identity) = match &intent {
@@ -238,9 +252,15 @@ pub fn run(db_path: &Path, a: InitArgs) -> Result<()> {
         }
     };
 
+    // After the store exists and before anything is reported: the name is not
+    // part of `db::init`'s DDL bookkeeping, and every intent above ends with a
+    // store that must have one.
+    let project_name = project::assign_name(&conn, db_path, a.name.as_deref(), fresh)?;
+
     let outcome = InitOutcome {
         db_path: db_path.display().to_string(),
         prefix: db::display_prefix(&conn)?,
+        project_name,
         schema_version: db::SCHEMA_VERSION.to_string(),
         project_uuid: crate::claimref::project_uuid(&conn)?,
         project_key: project::require(&conn)?,
@@ -251,6 +271,12 @@ pub fn run(db_path: &Path, a: InitArgs) -> Result<()> {
 
 /// Resolves the flags into one intent, or refuses to guess.
 fn decide(db_path: &Path, a: &InitArgs) -> Result<Intent> {
+    // Before anything is created. A name refused after `db::init` would leave a
+    // store on disk that the failed command claims not to have made, carrying
+    // the derived placeholder rather than the name that was asked for.
+    if let Some(name) = &a.name {
+        project::validate_name(name)?;
+    }
     if a.new_project && (a.from.is_some() || a.project_key.is_some()) {
         return Err(db::invalid_input(
             "`--new-project` starts a project and `--from`/`--project-key` join one; \

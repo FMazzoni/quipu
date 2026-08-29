@@ -386,6 +386,22 @@ informational: `QP-1`, `QP-001`, and `qp-1` all reach the same row. It returns
 both the rowid and the canonical `display_id`, which is what mutating commands
 echo — never the raw argument the user typed.
 
+A store also carries a **name** — `meta(key='project_name')`, lowercase letters,
+digits and hyphens. Neither of the other two identifiers can do that job: the
+project key is a uuid nobody types, and the display prefix is not unique across
+stores. The name is assigned at `qp init` (from `--name`, else the directory
+holding `.quipu/`) and fixed thereafter; a store that predates naming is healed
+with a derived placeholder that `qp init --name` may still replace. It lives in
+the store so it survives a move and cannot drift from the data it names.
+
+`qp project register` puts the store in a machine-local registry — a versioned
+JSON file at `$QUIPU_REGISTRY`, else `$XDG_CONFIG_HOME/quipu/registry.json`,
+else `~/.config/quipu/registry.json` — and `qp project lookup <NAME>` resolves a
+name back to a store file. The registry is only an index: everything in it also
+lives in a store, so it is rebuildable by re-registering. Registration is always
+explicit, never a side effect of a read. See
+[`registry.rs`](https://github.com/FMazzoni/quipu/blob/main/src/registry.rs).
+
 ## Exit codes
 
 Agents branch on these, so they are a contract. They come from two places:
@@ -400,7 +416,7 @@ directly, and `remote doctor` exits 5.
 | 2 | `conflict`, `not_owner`, `not_found`, `invariant` — the state of the store refused the operation |
 | 3 | `wait` timed out |
 | 4 | `wait --cohort-done` matched an empty cohort |
-| 5 | `remote doctor` found a fault in a configured remote |
+| 5 | `remote doctor` found a fault — in a configured remote, or in this store's name or its registry entry |
 | 6 | `no_store` — there is no store here; this process is not attached to a project |
 
 Code 6 is the counterpart to code 2, and the reason it is not code 2. Every
