@@ -386,11 +386,27 @@ informational: `QP-1`, `QP-001`, and `qp-1` all reach the same row. It returns
 both the rowid and the canonical `display_id`, which is what mutating commands
 echo — never the raw argument the user typed.
 
+A store also carries a **name** — `meta(key='project_name')`, lowercase letters,
+digits and hyphens. Neither of the other two identifiers can do that job: the
+project key is a uuid nobody types, and the display prefix is not unique across
+stores. The name is assigned at `qp init` (from `--name`, else the directory
+holding `.quipu/`) and fixed thereafter; a store that predates naming is healed
+with a derived placeholder that `qp init --name` may still replace. It lives in
+the store so it survives a move and cannot drift from the data it names.
+
+`qp project register` puts the store in a machine-local registry — a versioned
+JSON file at `$QUIPU_REGISTRY`, else `$XDG_CONFIG_HOME/quipu/registry.json`,
+else `~/.config/quipu/registry.json` — and `qp project lookup <NAME>` resolves a
+name back to a store file. The registry is only an index: everything in it also
+lives in a store, so it is rebuildable by re-registering. Registration is always
+explicit, never a side effect of a read. See
+[`registry.rs`](https://github.com/FMazzoni/quipu/blob/main/src/registry.rs).
+
 ## Exit codes
 
 Agents branch on these, so they are a contract. They come from two places:
 `QuipuError::exit_code` in [`db.rs`](https://github.com/FMazzoni/quipu/blob/main/src/db.rs) maps the error taxonomy to
-0/1/2, and [`main.rs`](https://github.com/FMazzoni/quipu/blob/main/src/main.rs) applies it; `wait` exits 3 and 4
+0/1/2/6, and [`main.rs`](https://github.com/FMazzoni/quipu/blob/main/src/main.rs) applies it; `wait` exits 3 and 4
 directly, and `remote doctor` exits 5.
 
 | code | meaning |
@@ -400,7 +416,18 @@ directly, and `remote doctor` exits 5.
 | 2 | `conflict`, `not_owner`, `not_found`, `invariant` — the state of the store refused the operation |
 | 3 | `wait` timed out |
 | 4 | `wait --cohort-done` matched an empty cohort |
-| 5 | `remote doctor` found a fault in a configured remote |
+| 5 | `remote doctor` found a fault — in a configured remote, or in this store's name or its registry entry |
+| 6 | `no_store` — there is no store here; this process is not attached to a project |
+
+Code 6 is the counterpart to code 2, and the reason it is not code 2. Every
+command but `qp init` requires a store that already exists; when there is none,
+it says so and creates nothing. Before that, resolution and creation were the
+same act: `qp list` in an unconfigured directory printed `[]` with exit 0 *and
+left a new `.quipu/db.sqlite` behind*, `qp add` filed into a project nobody
+meant to make, and only `qp show` objected — as a `not_found`, exit 2, which
+reads like a bad ticket id rather than a machine that is not attached to
+anything. A misconfiguration must not be answerable by retrying, and must not
+be indistinguishable from an empty project.
 
 Code 5 is not an error envelope. `remote doctor` succeeded at what it was asked
 — it diagnosed the remote — and its report goes to stdout in the requested format
@@ -461,6 +488,7 @@ explanation.
 | exit 2, code `not_editable` | `qp show <id>` | `edit` on a terminal task, or the row vanished |
 | exit 2, kind `invariant`, code `dependency_cycle` | `qp tree <id>` | the edge would close a loop; `would_cycle` in [`db.rs`](https://github.com/FMazzoni/quipu/blob/main/src/db.rs) rejects it before the insert. Replan — retrying cannot help |
 | exit 2, kind `not_found` | `qp list` | no such task or edge. Raised by `resolve_full` in [`id.rs`](https://github.com/FMazzoni/quipu/blob/main/src/id.rs) |
+| exit 6, kind `no_store` | `pwd`, then `qp init` | there is no store here and nothing created one. The message names the directory searched; the envelope's `path` names the store that was looked for. Retrying cannot help — the machine is not attached to a project |
 | barrier released immediately, work unfinished | `qp wave` | `qp wait --state running --empty` releases on any *gap* — including before the first agent has started. Use `qp wait --cohort-done --tag <t>`, which additionally requires `total > 0` |
 | barrier exits 4 | `qp list --tag <t>` | `--cohort-done` matched zero tasks: wrong tag, or nothing tagged yet |
 | barrier exits 3 | `qp wave` | `--timeout-secs` elapsed with the cohort still unfinished. A timeout, not a conflict |

@@ -78,15 +78,16 @@ pub const STATE_READY: &str = State::Ready.as_str();
 /// `main` matches on the variant to pick an exit code and (in `--json` mode) a
 /// `kind` string for the `{"error": {...}}` envelope.
 ///
-/// Five buckets, deliberately — not one variant per failure site. The
+/// Six buckets, deliberately — not one variant per failure site. The
 /// *variant* is what a calling agent branches retry-vs-give-up on; the *code*
 /// string inside `Conflict`/`Invariant` is for logs and precise skill
 /// authoring, and can grow additively without breaking existing matchers.
 ///
-/// The `--json` envelope carries a sixth `kind`, `internal`, which is not a
+/// The `--json` envelope carries a seventh `kind`, `internal`, which is not a
 /// variant here: `main.rs` emits it for any error that does not downcast to
-/// this type. Adding a variant means updating `kind()`, `exit_code()`, and
-/// `README.md`'s envelope table together.
+/// this type. Adding a variant means updating `kind()`, `exit_code()`,
+/// `README.md`'s envelope table and the exit-code table in
+/// `docs/architecture.md` together.
 #[derive(Debug, Error)]
 pub enum QuipuError {
     /// Wrong state / lost race — retrying may succeed once state settles. Exit 2.
@@ -115,6 +116,17 @@ pub enum QuipuError {
     /// Bad CLI input — exit 1.
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    /// No store here — this process is not attached to a project. Exit 6.
+    ///
+    /// Not `NotFound` (which is about a row inside a store that *is* open) and
+    /// not `InvalidInput` (the arguments were fine; the machine is not set up).
+    /// It gets its own exit code because it is the one failure a caller must
+    /// never retry and must never read as "empty project".
+    #[error("{message}")]
+    NoStore {
+        message: String,
+        path: Option<String>,
+    },
 }
 
 impl QuipuError {
@@ -126,13 +138,22 @@ impl QuipuError {
             Self::NotFound { .. } => "not_found",
             Self::Invariant { .. } => "invariant",
             Self::InvalidInput(_) => "invalid_input",
+            Self::NoStore { .. } => "no_store",
         }
     }
 
-    /// Exit code contract, documented in `main.rs`: everything but `InvalidInput` is 2.
+    /// Exit code contract, tabulated in `docs/architecture.md` under "Exit codes".
+    ///
+    /// 1 is "your input was wrong", 2 is "the store said no — retrying may
+    /// succeed", 6 is "there is no store to say anything". 6 is deliberately
+    /// not 2: a skill that retries on 2 would loop forever against a machine
+    /// that will never grow a store on its own. 3/4 (`wait`) and 5
+    /// (`remote doctor`) are exited directly by those commands and never
+    /// reach this table.
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::InvalidInput(_) => 1,
+            Self::NoStore { .. } => 6,
             _ => 2,
         }
     }
@@ -162,6 +183,9 @@ impl QuipuError {
             }),
             Self::InvalidInput(message) => serde_json::json!({
                 "kind": self.kind(), "message": message,
+            }),
+            Self::NoStore { message, path } => serde_json::json!({
+                "kind": self.kind(), "message": message, "path": path,
             }),
         }
     }
@@ -209,6 +233,60 @@ pub fn invalid_input(msg: impl Into<String>) -> anyhow::Error {
     anyhow::Error::from(QuipuError::InvalidInput(msg.into()))
 }
 
+/// Nothing to work in: the store this command would have used does not exist.
+pub fn no_store(msg: impl Into<String>, path: Option<String>) -> anyhow::Error {
+    anyhow::Error::from(QuipuError::NoStore {
+        message: msg.into(),
+        path,
+    })
+}
+
+/// Refuse to proceed unless a store is already on disk at `path`.
+///
+/// The backstop under `open`, so a command module cannot reintroduce
+/// create-on-demand by calling `open` on a path nobody created. `main.rs`
+/// checks first and produces a friendlier, cwd-aware message; by the time this
+/// fires the caller reached `open` some other way, so it names the path.
+pub fn require_store(path: &Path) -> Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    Err(no_store(
+        format!(
+            "no quipu store at {}; run `qp init` to create one, or point --db/QP_DB at an existing store",
+            path.display()
+        ),
+        Some(path.display().to_string()),
+    ))
+}
+
+/// The attach check every command but `qp init` runs, before it opens anything.
+///
+/// `explicit` says whether the path came from `--db`/`QP_DB`, which changes the
+/// advice but not the outcome: an explicit path at a file that is not there is
+/// a misconfigured machine just as surely as an unconfigured cwd is, and it
+/// must not be answered by creating the store the operator asked for by name.
+pub fn require_attached(path: &Path, explicit: bool) -> Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    let message = if explicit {
+        format!(
+            "no quipu store at {} (from --db/QP_DB); run `qp init` with that path to create one, \
+             or point it at an existing store",
+            path.display()
+        )
+    } else {
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| ".".to_string());
+        format!(
+            "no quipu store in {cwd} or any parent; run `qp init` here, or run from a project directory"
+        )
+    };
+    Err(no_store(message, Some(path.display().to_string())))
+}
+
 /// Locates the store.
 ///
 /// Explicit `--db`/`QP_DB` wins. Otherwise, in order:
@@ -245,9 +323,12 @@ pub fn invalid_input(msg: impl Into<String>) -> anyhow::Error {
 /// git is only spawned when the checkout itself has no store, so the common
 /// case — a repo with `.quipu/` at its root — costs no subprocess.
 ///
-/// Never fails on a missing store: when nothing is found it returns the path
-/// where one *would* live, so `qp init` has somewhere to create it and every
-/// other command fails later with a real SQLite error.
+/// Never fails on a missing store: it answers "where *would* the store be",
+/// which is a question with an answer even on a machine that has none. Whether
+/// that path may be *created* is a separate and deliberate decision, made by
+/// `require_attached`/`require_store` and taken only by `qp init` — because a
+/// tool that creates on demand cannot tell an empty project from a
+/// misconfigured machine, and answers both with exit 0.
 pub fn resolve_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(p) = explicit {
         return Ok(p);
@@ -573,6 +654,11 @@ fn migrate(
     // is already stamped at a version this binary knows, so a gated backfill
     // would never reach one.
     crate::project::backfill(conn)?;
+    // Ungated for the same reason, and NOT folded into the INSERT OR IGNORE
+    // batch above: that statement ignores per row, so a store missing only the
+    // name would be handed a value there and never reach the derivation that
+    // knows what the name should be. See `project::backfill_name`.
+    crate::project::backfill_name(conn)?;
     Ok(current)
 }
 
@@ -583,7 +669,13 @@ fn migrate(
 /// remain migration-capable so a stale on-disk schema self-heals on the first
 /// read command after a binary upgrade, rather than surfacing as a confusing
 /// `no such table` / `no such column` error.
+///
+/// It opens; it does not create. `require_store` fires first, so a caller
+/// pointed at a path with no store gets `no_store` (exit 6) instead of a fresh
+/// empty database. `init` is the only creator, and reaches `open_conn`
+/// directly.
 pub fn open(path: &Path) -> Result<Connection> {
+    require_store(path)?;
     let conn = open_conn(path)?;
     migrate(&conn, None, None)?;
     Ok(conn)
@@ -1352,7 +1444,9 @@ mod prefix_tests {
     fn display_prefix_defaults_to_qp() {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("db.sqlite");
-        let conn = open(&db).unwrap();
+        // `init`, not `open`: `open` no longer creates, so a store has to be
+        // made deliberately before there is a prefix to default.
+        let conn = init(&db, None, &[], None).unwrap();
         assert_eq!(display_prefix(&conn).unwrap(), "QP");
     }
 

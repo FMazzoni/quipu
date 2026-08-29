@@ -126,3 +126,11 @@ name the same ticket two different ways.
 A store's project is fixed when the store is created. `qp init --project-key`
 against a store that already answers to a different key fails rather than
 re-homing tickets that are already published under the old one.
+
+## `--name`
+
+`qp init` also settles what the store is called: `--name` if given, otherwise the
+slug of the directory holding `.quipu/`. The rules, and why an assigned name
+cannot then be changed while a derived one can, are in
+`docs/modules/project.md`. `qp init` never registers the store — that is
+`qp project register`, and it is deliberately a separate, explicit act.
