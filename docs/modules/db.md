@@ -97,3 +97,33 @@ The project-uuid mismatch warning fires only under an explicit path — that is,
 only in automation — which is why it respects `--json`. Under `--json`, stderr is
 JSON Lines, and a prose warning would leave the consumer unable to parse the
 error that might follow it.
+
+## Claim liveness (`schema_version` 7)
+
+`assignment` carries three nullable columns — `last_contact`, `lease_seconds`,
+`holder_host` — and `lease` is where they are read and written. Two things about
+them belong here, next to the migration machinery they constrain.
+
+Nullable and defaultless is a decision, not an omission. It makes the migration
+inert: every open claim written before the columns existed lands with no stated
+expiry, and a claim with no stated expiry never expires. Backfilling
+`last_contact` with `now` would have been the tidy-looking choice and would have
+invented a lease nobody took, handing every live claim in every existing store an
+expiry date it never agreed to.
+
+Adding them to `schema.sql` reaches fresh stores only, exactly as `dep.mode`
+did — `CREATE TABLE IF NOT EXISTS` is a no-op wherever the table already exists.
+Each one needs its own entry in `add_missing_columns`, and the bump to `"7"` is
+what makes `migrate` look at all.
+
+## Renewal rides on `insert_event`
+
+`insert_event` calls `lease::touch` for any event carrying a task. That is
+deliberate placement rather than convenience: every write against a task already
+passes through this one statement, so renewal cannot be forgotten by the next
+command somebody adds — and the symptom of forgetting would be a live holder's
+lease breaking under it.
+
+It is also the one place that can refuse a write from a holder whose lease was
+already broken. The refusal returns an error like any other, so `with_tx` unwinds
+and the ticket is left untouched by the machine that no longer owns it.

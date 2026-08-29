@@ -2,7 +2,7 @@
 //!
 #![doc = include_str!("../../docs/modules/show.md")]
 
-use crate::{db, id, store};
+use crate::{db, id, lease, store};
 use anyhow::Result;
 use clap::Args;
 use serde_json::Value;
@@ -46,6 +46,9 @@ pub fn run(db_path: &std::path::Path, a: ShowArgs) -> Result<()> {
     )?;
 
     let agent = store::latest_agent(&conn, tid)?;
+    // The open hold, if there is one, and whether it has gone quiet past its
+    // lease. Evaluated here, on read, because nothing in quipu runs on a timer.
+    let hold = lease::hold_of(&conn, tid)?;
 
     let mut tag_stmt = conn.prepare("SELECT name FROM tag WHERE task_id = ?1 ORDER BY name")?;
     let mut tags: Vec<String> = tag_stmt
@@ -130,6 +133,7 @@ pub fn run(db_path: &std::path::Path, a: ShowArgs) -> Result<()> {
             }).collect::<Vec<_>>(),
             "last_event": last_event,
             "recent_events": recent_events,
+            "hold": hold.as_ref().map(lease::Hold::to_json),
         });
         if let Some(d) = description.as_ref() {
             obj.as_object_mut()
@@ -167,6 +171,20 @@ pub fn run(db_path: &std::path::Path, a: ShowArgs) -> Result<()> {
     println!("{}", title);
     println!();
     println!("  agent: {}", agent.as_deref().unwrap_or("—"));
+    if let Some(h) = &hold {
+        let host = h.host.as_deref().unwrap_or("unknown host");
+        match (&h.expires_at, h.stale) {
+            (Some(e), true) => println!(
+                "  hold: STALE — {} on {} went quiet before {}",
+                h.agent_id, host, e
+            ),
+            (Some(e), false) => println!(
+                "  hold: {} on {} (stale if quiet past {})",
+                h.agent_id, host, e
+            ),
+            (None, _) => println!("  hold: {} on {} (no stated expiry)", h.agent_id, host),
+        }
+    }
     if let Some(t) = &tier {
         println!("  tier: {}", t);
     }

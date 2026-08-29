@@ -1415,7 +1415,10 @@ fn a_historic_running_to_ready_release_closes_its_assignment() {
     ok(&src, &["assign", "AAA-1", "--to", "agentA"]);
     ok(&src, &["claim", "AAA-1", "--as", "agentA"]);
     tick();
-    ok(&src, &["reclaim", "AAA-1", "--reason", "agent wedged"]);
+    ok(
+        &src,
+        &["reclaim", "AAA-1", "--reason", "agent wedged", "--force"],
+    );
     tick();
     ok(&src, &["assign", "AAA-1", "--to", "agentB"]);
     ok(&src, &["claim", "AAA-1", "--as", "agentB"]);
@@ -1468,7 +1471,10 @@ fn a_release_with_no_via_is_reported_and_still_closes_the_claim() {
     ok(&src, &["assign", "AAA-1", "--to", "agentA"]);
     ok(&src, &["claim", "AAA-1", "--as", "agentA"]);
     tick();
-    ok(&src, &["reclaim", "AAA-1", "--reason", "agent wedged"]);
+    ok(
+        &src,
+        &["reclaim", "AAA-1", "--reason", "agent wedged", "--force"],
+    );
     tick();
     ok(&src, &["assign", "AAA-1", "--to", "agentB"]);
     Connection::open(&src)

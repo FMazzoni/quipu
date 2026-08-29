@@ -72,3 +72,18 @@ by string in a way no reader expects once a store passes ten tasks.
 
 `wrap_text` lives here rather than in `store.rs` because it touches no database;
 `store.rs` is for queries, and a text helper is not one.
+
+## The hold
+
+`hold` is the open, claimed assignment plus whether it has gone quiet past its
+lease — the detail view's answer to "is the machine holding this still there".
+It is `null` when nothing holds the task, and its `stale` flag is computed by the
+same SQL predicate `reclaim` guards on, so what a reader is told is stale is
+exactly what `reclaim` will release without force.
+
+Evaluated here, on read, because nothing in quipu runs on a timer. A hold that
+lapsed overnight reads as stale the first time anybody looks, with nothing having
+had to notice in the meantime.
+
+It sits in the labelled block rather than in the header line, which carries
+`list`'s columns in `list`'s order and nothing else — see the note in the code.

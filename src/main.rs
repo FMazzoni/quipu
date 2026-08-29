@@ -7,6 +7,7 @@ mod cmd;
 mod db;
 mod doctor;
 mod id;
+mod lease;
 mod merge;
 mod outcome;
 mod project;
