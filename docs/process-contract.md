@@ -119,12 +119,22 @@ request was malformed".
 
 ## 3. Shutdown
 
-**Decision: `SIGTERM` means stop. Its default disposition — terminate the
-process immediately — is already correct, and quipu is allowed to ship with no
-handler at all.**
+**Decision: `SIGTERM` means stop, and a handler is installed — but the reason
+is bookkeeping, not durability. The default disposition is already correct for
+everything that matters.**
 
-That is the part worth stating plainly, because the instinct is to reach for a
-graceful-shutdown mechanism first and justify it afterwards. Durability here
+*Amended when this was first implemented.* The original decision went further
+and said quipu was allowed to ship with **no handler at all**. That sentence
+contradicted two obligations stated within a few lines of it: the exit-0
+requirement below, and the shutdown log line in §5. A process terminated by the
+default disposition never runs another instruction, so it cannot log its own
+exit, and its wait status is death-by-signal rather than exit 0 — which a
+supervisor configured to restart on failure reads as a failure. The handler
+exists to make those two true. Everything the original paragraph said about
+*durability* stands unchanged and is the important half.
+
+That durability argument is worth stating plainly, because the instinct is to
+reach for a graceful-shutdown mechanism first and justify it afterwards. Durability here
 does not come from a clean exit. It comes from SQLite: a transaction that
 committed is on disk in the WAL, and a transaction that did not commit is
 rolled back on the next open. Killing the process between two requests loses

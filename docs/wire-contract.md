@@ -453,8 +453,16 @@ implementation is a pure function of its own struct's fields.** No `Connection`,
 no path lookup, no environment read, no I/O of any kind, across all of them. The
 decision is implementable as stated.
 
-**The cost, which is real: every `Outcome` struct derives `Serialize` only —
-never `Deserialize` — and every one is private to its `cmd` module.** The client
+*Since resolved — kept as the record of what the decision cost.* The change
+below landed before the first endpoint was written: every payload now derives
+`Deserialize`, is reachable from outside its module, and is held there by a
+registry test that fails when a new one is added without them. The count was
+29, not the 28 stated here — one implementation is spelled through the full
+path and a plain grep misses it. Read the rest of this section as a cost
+statement, not as work outstanding.
+
+**The cost, which was real: every `Outcome` struct derived `Serialize` only —
+never `Deserialize` — and every one was private to its `cmd` module.** The client
 cannot reconstruct a payload to call `human()` on it. Making them
 round-trippable means `#[derive(Serialize, Deserialize)]` and `pub` (or a
 `pub(crate)` re-export) on every one, plus their nested types: `take`'s inner
