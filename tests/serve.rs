@@ -1,4 +1,5 @@
-//! End-to-end tests for the HTTP front door: four verbs, over a real socket.
+//! End-to-end tests for the HTTP front door: every served verb, over a real
+//! socket.
 //!
 //! Every server here binds an ephemeral loopback port and is torn down with the
 //! test. Nothing reaches a network.
@@ -12,8 +13,10 @@
 //!    keeps working with a server in the path.
 //! 2. **The envelope survives.** Success is the bare payload, failure is
 //!    `{"error": ...}`, and the status is the documented projection of `kind`.
-//! 3. **`_effects` crosses the socket.** `complete` promotes dependents the
-//!    caller never named, and the remote caller has no other way to be told.
+//! 3. **`_effects` crosses the socket, in both directions of travel.**
+//!    `complete` and `cancel` promote dependents through the readiness sweep;
+//!    `block` freezes a container's subtree and demotes it. The caller never
+//!    named any of them and has no other way to be told.
 //! 4. **A lost race is a lost race.** Several client *processes* against one
 //!    ticket, through the server, produce exactly one winner — because
 //!    `BEGIN IMMEDIATE` is the guarantee and the server changes nothing about
@@ -22,6 +25,9 @@
 //! 5. **A client that leaves mid-response does not kill the process.** With
 //!    `SIGPIPE` at its CLI disposition that write is a remote shutdown of a
 //!    process serving everyone else.
+//! 6. **An empty queue is not a failure.** `take` chooses, and choosing nothing
+//!    is exit 0 with a null payload and a 200 on the status line. A poller that
+//!    read "no work" as "something broke" would retry forever.
 
 use assert_cmd::Command;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -160,8 +166,17 @@ fn remote(srv: &Server, args: &[&str]) -> Run {
     run(&mut c, args)
 }
 
+/// `--json` is appended unless the caller already placed it.
+///
+/// `qp tag` declares its flag on the *parent* args, so `tag QP-1 add x --json`
+/// is a parse error — the trailing flag lands on the subcommand. Callers that
+/// need it earlier pass it themselves.
 fn run(c: &mut std::process::Command, args: &[&str]) -> Run {
-    let out = c.args(args).arg("--json").output().expect("run qp");
+    let mut argv: Vec<&str> = args.to_vec();
+    if !argv.contains(&"--json") {
+        argv.push("--json");
+    }
+    let out = c.args(&argv).output().expect("run qp");
     Run {
         code: out.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -363,6 +378,10 @@ fn every_failure_exits_the_same_as_it_does_locally() {
         &["add", "held"],
         &["assign", "QP-1", "--to", "w-owner"],
         &["claim", "QP-1", "--as", "w-owner"],
+        // The second task and the edge that makes a cycle reachable: QP-2 now
+        // waits on QP-1, so pointing QP-1 back at QP-2 closes one.
+        &["add", "downstream"],
+        &["depends", "QP-2", "--on", "QP-1"],
     ];
     for step in setup {
         assert_eq!(local(&local_db, step).code, 0);
@@ -380,6 +399,45 @@ fn every_failure_exits_the_same_as_it_does_locally() {
             &["claim", "QP-1", "--as", "w-owner", "--for", "banana"],
             "invalid_input",
             1,
+        ),
+        // The fan-out verbs. Every one of these is a failure that leaves the
+        // store untouched, so the two fixtures stay identical down the list.
+        (&["abandon", "QP-1", "--as", "w-other"], "not_owner", 2),
+        (&["reclaim", "QP-99"], "not_found", 2),
+        (&["reclaim", "QP-1"], "conflict", 2),
+        (&["cancel", "QP-99"], "not_found", 2),
+        (
+            &["block", "QP-99", "--as", "w-x", "--new", "a blocker"],
+            "not_found",
+            2,
+        ),
+        (&["log", "QP-99", "note", "into the void"], "not_found", 2),
+        (&["tag", "QP-99", "--json", "add", "kind:x"], "not_found", 2),
+        (
+            &["tag", "QP-1", "--json", "add", "trailing:"],
+            "invalid_input",
+            1,
+        ),
+        (&["relation", "add", "QP-1", "", "QP-2"], "invalid_input", 1),
+        (
+            &["relation", "add", "QP-1", "variant-of", "QP-99"],
+            "not_found",
+            2,
+        ),
+        (&["relation", "list", "QP-99"], "not_found", 2),
+        (&["depends", "QP-1", "--on", "QP-99"], "not_found", 2),
+        // No `--as`, and QP-1 is running: the edge-ownership gate, not a lookup.
+        (&["depends", "QP-1", "--on", "QP-2", "--rm"], "not_owner", 2),
+        (&["contains", "QP-99", "QP-1"], "not_found", 2),
+        (&["edit", "QP-99", "--title", "x"], "not_found", 2),
+        (&["edit", "QP-1"], "invalid_input", 1),
+        // The one kind the vertical slice could not reach: adding QP-1 → QP-2
+        // on top of the setup's QP-2 → QP-1 closes a cycle, which is `invariant`
+        // (422) rather than `conflict` — waiting will never make it succeed.
+        (
+            &["depends", "QP-1", "--on", "QP-2", "--as", "w-owner"],
+            "invariant",
+            2,
         ),
     ];
     for (args, kind, exit) in cases {
@@ -801,4 +859,309 @@ fn a_project_with_no_store_refuses_to_start() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
+}
+
+// ---------------------------------------------------------------------------
+// the fan-out: every remaining write verb, over the same socket
+// ---------------------------------------------------------------------------
+
+/// Every verb the fan-out added, end to end, asserting the payload it returns.
+///
+/// One store and one sequence rather than a test per verb: the interesting
+/// half is that the payloads are the same ones the CLI produces, and a single
+/// walk through the state machine exercises them against state the previous
+/// step actually created.
+#[test]
+fn every_fanned_out_verb_round_trips_through_the_front_door() {
+    let tmp = tempfile::tempdir().unwrap();
+    let srv = Server::start(&store(tmp.path()));
+    let ok = |r: &Run, what: &str| assert_eq!(r.code, 0, "{what} failed: {}", r.stderr);
+
+    for title in ["root", "child", "spare"] {
+        ok(&remote(&srv, &["add", title]), "add");
+    }
+
+    let edited = remote(
+        &srv,
+        &["edit", "QP-1", "--title", "renamed", "--tier", "slice"],
+    );
+    ok(&edited, "edit");
+    assert_eq!(edited.payload()["changed"], true);
+    assert_eq!(edited.payload()["changes"]["title"]["to"], "renamed");
+    assert_eq!(edited.payload()["changes"]["tier"]["to"], "slice");
+
+    let tagged = remote(&srv, &["tag", "QP-1", "--json", "add", "kind:wave"]);
+    ok(&tagged, "tag add");
+    assert_eq!(tagged.payload()["op"], "added");
+    assert_eq!(tagged.payload()["name"], "kind:wave");
+    let untagged = remote(&srv, &["tag", "QP-1", "--json", "rm", "kind:wave"]);
+    ok(&untagged, "tag rm");
+    assert_eq!(untagged.payload()["op"], "removed");
+
+    let logged = remote(&srv, &["log", "QP-1", "note", "over the wire"]);
+    ok(&logged, "log");
+    assert_eq!(logged.payload()["kind"], "note");
+    assert_eq!(logged.payload()["display_id"], "QP-1");
+
+    let linked = remote(&srv, &["relation", "add", "QP-2", "variant-of", "QP-1"]);
+    ok(&linked, "relation add");
+    assert_eq!(linked.payload()["added"], true);
+    let listed = remote(&srv, &["relation", "list", "QP-1"]);
+    ok(&listed, "relation list");
+    assert_eq!(
+        listed.payload(),
+        serde_json::json!({
+            "outgoing": [],
+            "incoming": [{"from": "QP-2", "kind": "variant-of"}]
+        }),
+        "the listing keeps the shape it has always had; the untagged outcome \
+         enum must not wrap it"
+    );
+    let unlinked = remote(&srv, &["relation", "rm", "QP-2", "variant-of", "QP-1"]);
+    ok(&unlinked, "relation rm");
+    assert_eq!(unlinked.payload()["removed"], true);
+
+    let held = remote(&srv, &["contains", "QP-1", "QP-2"]);
+    ok(&held, "contains");
+    assert_eq!(held.payload()["changed"], serde_json::json!(["QP-2"]));
+    let released = remote(&srv, &["contains", "QP-1", "QP-2", "--rm"]);
+    ok(&released, "contains --rm");
+    assert_eq!(released.payload()["op"], "rm");
+    assert_eq!(released.payload()["changed"], serde_json::json!(["QP-2"]));
+
+    let dep = remote(&srv, &["depends", "QP-2", "--on", "QP-3"]);
+    ok(&dep, "depends");
+    assert_eq!(dep.payload()["op"], "add");
+    assert_eq!(dep.payload()["on_id"], "QP-3");
+    let undep = remote(&srv, &["depends", "QP-2", "--on", "QP-3", "--rm"]);
+    ok(&undep, "depends --rm");
+    assert_eq!(undep.payload()["op"], "rm");
+    assert_eq!(
+        undep.payload()["promoted"],
+        true,
+        "removing the last unresolved dep promotes the named task"
+    );
+
+    // `take` chooses; the caller never named a task, so the id in the response
+    // is information the request did not contain.
+    let took = remote(&srv, &["take", "--as", "w-taker"]);
+    ok(&took, "take");
+    assert_eq!(took.payload()["taken"]["display_id"], "QP-1");
+    assert_eq!(took.payload()["taken"]["state"], "assigned");
+    assert_eq!(took.payload()["agent_id"], "w-taker");
+
+    let gone = remote(
+        &srv,
+        &["abandon", "QP-1", "--as", "w-taker", "--reason", "busy"],
+    );
+    ok(&gone, "abandon");
+    assert_eq!(gone.payload()["display_id"], "QP-1");
+    assert_eq!(gone.payload()["reason"], "busy");
+
+    ok(&remote(&srv, &["assign", "QP-1", "--to", "w-b"]), "assign");
+    ok(&remote(&srv, &["claim", "QP-1", "--as", "w-b"]), "claim");
+    let back = remote(&srv, &["reclaim", "QP-1", "--force"]);
+    ok(&back, "reclaim");
+    assert_eq!(back.payload()["forced"], true);
+
+    // `block` is the one verb here that needs the task in flight: it closes the
+    // caller's own assignment, so a ready task is `not_blockable`.
+    ok(&remote(&srv, &["assign", "QP-2", "--to", "w-b"]), "assign");
+    ok(&remote(&srv, &["claim", "QP-2", "--as", "w-b"]), "claim");
+    let blocked = remote(
+        &srv,
+        &["block", "QP-2", "--as", "w-b", "--new", "a real blocker"],
+    );
+    ok(&blocked, "block");
+    assert_eq!(blocked.payload()["display_id"], "QP-2");
+    assert_eq!(blocked.payload()["state"], "pending");
+    assert_eq!(blocked.payload()["blocker_title"], "a real blocker");
+    assert_eq!(
+        blocked.payload()["blocker_tags"],
+        serde_json::json!(["kind:blocker"])
+    );
+
+    let cancelled = remote(&srv, &["cancel", "QP-3", "--reason", "not needed"]);
+    ok(&cancelled, "cancel");
+    assert_eq!(cancelled.payload()["state"], "cancelled");
+    assert_eq!(cancelled.payload()["reason"], "not needed");
+}
+
+/// 200 on the status line for every fanned-out verb, read off the wire.
+///
+/// Through raw POSTs rather than the client, for the reason `post` exists: the
+/// status is what is under test. It doubles as the only place the *request*
+/// body of a subcommand group is written out — `{"op":{"add":{...}}}` is what
+/// a hand-written client has to send, and nothing else pins that shape.
+#[test]
+fn every_fanned_out_verb_answers_200() {
+    let tmp = tempfile::tempdir().unwrap();
+    let srv = Server::start(&store(tmp.path()));
+    let port = srv.port();
+
+    let steps: &[(&str, &str)] = &[
+        ("/v1/add", r#"{"title":"one"}"#),
+        ("/v1/add", r#"{"title":"two"}"#),
+        ("/v1/edit", r#"{"task":"QP-1","title":"one renamed"}"#),
+        (
+            "/v1/tag",
+            r#"{"task":"QP-1","op":{"add":{"name":"kind:x"}}}"#,
+        ),
+        (
+            "/v1/tag",
+            r#"{"task":"QP-1","op":{"rm":{"name":"kind:x"}}}"#,
+        ),
+        ("/v1/log", r#"{"task":"QP-1","kind":"note","body":"hi"}"#),
+        (
+            "/v1/relation",
+            r#"{"op":{"add":{"from":"QP-2","kind":"variant-of","to":"QP-1"}}}"#,
+        ),
+        ("/v1/relation", r#"{"op":{"list":{"task":"QP-1"}}}"#),
+        (
+            "/v1/relation",
+            r#"{"op":{"rm":{"from":"QP-2","kind":"variant-of","to":"QP-1"}}}"#,
+        ),
+        ("/v1/depends", r#"{"task":"QP-2","on":"QP-1"}"#),
+        ("/v1/depends", r#"{"task":"QP-2","on":"QP-1","rm":true}"#),
+        ("/v1/contains", r#"{"parent":"QP-1","children":["QP-2"]}"#),
+        (
+            "/v1/contains",
+            r#"{"parent":"QP-1","children":["QP-2"],"rm":true}"#,
+        ),
+        ("/v1/take", r#"{"agent":"w-x"}"#),
+        ("/v1/abandon", r#"{"task":"QP-1","agent":"w-x"}"#),
+        ("/v1/assign", r#"{"task":"QP-1","to":"w-y"}"#),
+        ("/v1/claim", r#"{"task":"QP-1","agent":"w-y"}"#),
+        (
+            "/v1/block",
+            r#"{"task":"QP-1","agent":"w-y","new":"blocker"}"#,
+        ),
+        ("/v1/assign", r#"{"task":"QP-2","to":"w-z"}"#),
+        ("/v1/reclaim", r#"{"task":"QP-2","force":true}"#),
+        ("/v1/cancel", r#"{"task":"QP-2"}"#),
+    ];
+    for (path, body) in steps {
+        let (status, got) = post(port, path, body);
+        assert_eq!(status, 200, "{path} {body} answered {status}: {got}");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&got).is_ok(),
+            "{path} body is not JSON: {got}"
+        );
+    }
+}
+
+/// `_effects` crosses the socket in both directions of travel.
+///
+/// Two verbs that reach it by opposite routes: `cancel` resolves a blocker and
+/// the readiness sweep promotes its dependent, and `block` freezes a container's
+/// subtree and demotes it. A caller with no store has no other way to be told
+/// either happened.
+#[test]
+fn effects_cross_the_socket_for_promotions_and_demotions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let srv = Server::start(&store(tmp.path()));
+
+    // Promotion, via the readiness sweep: QP-2 waits on QP-1, and cancelling
+    // QP-1 resolves it.
+    remote(&srv, &["add", "blocker"]);
+    remote(&srv, &["add", "dependent", "--depends-on", "QP-1"]);
+    let cancelled = remote(&srv, &["cancel", "QP-1"]);
+    assert_eq!(cancelled.code, 0, "{}", cancelled.stderr);
+    assert_eq!(
+        cancelled.payload()["_effects"],
+        serde_json::json!([{
+            "kind": "state_change", "task": "QP-2",
+            "from": "pending", "to": "ready", "via": "cancel"
+        }]),
+        "the promotion the caller never named must cross the socket"
+    );
+
+    // Demotion, via `block`'s freeze: QP-3 contains QP-4, and blocking the
+    // container freezes what is inside it.
+    remote(&srv, &["add", "container"]);
+    remote(&srv, &["add", "inside"]);
+    // The container is taken in flight *before* it gains contents: a container
+    // with an open child is pending, and a pending task cannot be blocked.
+    remote(&srv, &["assign", "QP-3", "--to", "w-a"]);
+    remote(&srv, &["claim", "QP-3", "--as", "w-a"]);
+    remote(&srv, &["contains", "QP-3", "QP-4", "--as", "w-a"]);
+    let blocked = remote(
+        &srv,
+        &["block", "QP-3", "--as", "w-a", "--new", "the reason"],
+    );
+    assert_eq!(blocked.code, 0, "{}", blocked.stderr);
+    assert_eq!(
+        blocked.payload()["_effects"],
+        serde_json::json!([{
+            "kind": "state_change", "task": "QP-4",
+            "from": "ready", "to": "pending", "via": "block"
+        }]),
+        "`block` moves the subtree the other way, and that must cross too"
+    );
+}
+
+/// An empty queue is a success with a null payload, not a 404.
+///
+/// The distinction a polling client depends on: "no work right now" and
+/// "something broke" must never arrive as the same thing. Exit 0 locally, exit
+/// 0 through the server, and 200 on the status line.
+#[test]
+fn take_on_an_empty_queue_is_success_over_the_wire() {
+    let tmp = tempfile::tempdir().unwrap();
+    let local_db = store(&tmp.path().join("a"));
+    let srv = Server::start(&store(&tmp.path().join("b")));
+
+    let l = local(&local_db, &["take", "--as", "w-poller"]);
+    let r = remote(&srv, &["take", "--as", "w-poller"]);
+    assert_eq!(l.code, 0, "local take on an empty queue: {}", l.stderr);
+    assert_eq!(
+        r.code, l.code,
+        "an empty queue must exit the same through the server: {}",
+        r.stderr
+    );
+    assert_eq!(r.payload(), l.payload());
+    assert!(
+        r.payload()["taken"].is_null(),
+        "an empty queue is a null payload, not an error: {}",
+        r.stdout
+    );
+
+    let (status, body) = post(srv.port(), "/v1/take", r#"{"agent":"w-poller"}"#);
+    assert_eq!(
+        status, 200,
+        "nothing to take is 200; a 404 would make a poller retry a failure it \
+         does not have: {body}"
+    );
+
+    // And the prose is the same sentence, rendered client-side from a payload
+    // whose interesting field is `null`.
+    let out = std::process::Command::new(qp_bin())
+        .env("QP_SERVER", &srv.url)
+        .env("QP_DB", "/nonexistent/quipu/db.sqlite")
+        .args(["take", "--as", "w-poller"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "nothing to take"
+    );
+}
+
+/// A dependency cycle is 422, the one status the first four verbs could not reach.
+///
+/// 422 rather than 409 because the two answer different questions: 409 means
+/// "not now", and a cycle does not resolve by waiting.
+#[test]
+fn a_dependency_cycle_is_422_invariant() {
+    let tmp = tempfile::tempdir().unwrap();
+    let srv = Server::start(&store(tmp.path()));
+    remote(&srv, &["add", "first"]);
+    remote(&srv, &["add", "second"]);
+    remote(&srv, &["depends", "QP-2", "--on", "QP-1"]);
+
+    let (status, body) = post(srv.port(), "/v1/depends", r#"{"task":"QP-1","on":"QP-2"}"#);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status, 422, "a cycle is 422: {body}");
+    assert_eq!(v["error"]["kind"], "invariant");
 }

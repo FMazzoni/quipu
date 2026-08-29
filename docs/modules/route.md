@@ -45,3 +45,23 @@ client renders `human()` from it — which is why `Served::Out` is bound by
 Every served args struct sets it. A typo'd field in a hand-written request is
 then `invalid_input` (400) with the field named, rather than a silently ignored
 argument and a request that did something other than what was asked.
+
+## A subcommand group is one route, never several
+
+`Served` is implemented for an args *struct*, and `is_served` matches on a `Cmd`
+*variant*. Both are the group, not the op: there is no `Cmd::RelationAdd`, so
+`relation` and `tag` are served whole or not at all.
+
+That is not a limitation to work around — it is the same rule the wire contract
+applies to `remote`, arrived at from the other side. Serving `relation add` and
+leaving `relation list` local would send the write to the front door and run the
+read against whatever store is on the *client's* disk, which for a caller
+pointed at a server is usually no store at all. The op therefore travels inside
+the request body (`{"op":{"add":{…}}}`, lower-cased to match what the caller
+types), and the response is one `untagged` enum over the payloads the ops
+already had — untagged so each variant stays the bare object it has always been
+on the wire, rather than every existing `--json` consumer gaining a wrapper.
+
+The cost is that a group is served only when *every* one of its ops can be. That
+is a real constraint on which slice may serve a group, and it is why `relation`'s
+read op landed with its writes rather than with the other reads.

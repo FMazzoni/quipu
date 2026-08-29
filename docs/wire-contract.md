@@ -15,9 +15,10 @@ When this document was written no server, client or HTTP code existed; the only
 code it shipped was the `unavailable` error kind, reserved so a later slice
 could not renumber it. The vertical slice has since built the first four verbs —
 `add`, `assign`, `claim`, `complete` — against it, in `src/cmd/serve.rs`,
-`src/route.rs`, `src/wire.rs` and `src/client.rs`. Two notes from that build are
-marked **implemented as** below, where the shipped answer is narrower or
-different from what this document assumed.
+`src/route.rs`, `src/wire.rs` and `src/client.rs`, and the fan-out slice has
+since added the other eleven write verbs. Notes from those builds are marked
+**implemented as** below, where the shipped answer is narrower or different from
+what this document assumed.
 
 ## The server is not the writer
 
@@ -226,6 +227,36 @@ read this as a checklist.
 All of these open the store, run one `with_tx`, and emit an `Outcome`. Nothing
 in any of them touches process-local state (see the finding on `claimref`
 below, which is about latency rather than correctness).
+
+**Implemented as: a subcommand group is one route, so `relation list` was
+served with the writes rather than with the reads.** This list splits `relation`
+across the write bucket (`add`, `rm`) and the read bucket (`list`), and the
+routing cannot honour that split: `Served` is implemented per args-struct and
+`route::is_served` matches per `Cmd` variant, and both of those are the *group*.
+Serving only the two writes would have left `relation list` running against
+whatever store is on the client's disk — for a caller pointed at a front door,
+usually none — which is the failure this document keeps `remote`'s subtree whole
+to avoid. So the whole group went over together, one route, with the op as a
+field in the request body. The buckets are still right about which ops are
+writes and which is a read; what they cannot do is assign the two halves to
+different slices. `docs/modules/route.md` carries the shape.
+
+**Also implemented as: `edit` never touches the state machine, and that is
+fine.** It is in this bucket and it belongs here, but unlike every other entry it
+moves no task between states — its guarded `UPDATE` names
+`state NOT IN ('done','cancelled')` as a *precondition* on editing rather than as
+a transition, and it writes no `state_change`. Nothing about the envelope
+depends on a verb being a transition, so it needed no special handling; the
+statement is here so the next reader does not go looking for the edge it does
+not have.
+
+**And: `take` returning nothing is a success.** An empty queue is exit 0 with a
+`{"taken": null}` payload locally, and it stays exit 0 with a 200 on the wire.
+Nothing in the status table above tempts one to make it a 404 — a 404 answers
+"the thing addressed does not exist", and `take` addresses no thing — but the
+mistake is cheap to make and expensive to have: a poller that reads "no work
+right now" as "something broke" retries a failure that is not there. It is
+pinned by `take_on_an_empty_queue_is_success_over_the_wire` in `tests/serve.rs`.
 
 ### Served — reads (8, plus one nested)
 
