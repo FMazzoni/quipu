@@ -7363,3 +7363,92 @@ fn report_since_rejects_unrepresentable_offset_shifts() {
             .success();
     }
 }
+
+// --- display-id prefix scoping --------------------------------------------
+//
+// The prefix is part of the identifier: a reference carrying some other
+// store's prefix names nothing here, and must fail rather than land on the
+// row that happens to sit at that rowid.
+
+#[test]
+fn matching_prefix_resolves_and_echoes_canonical_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db)
+        .args(["init", "--prefix", "ACME"])
+        .assert()
+        .success();
+    qp(&db).args(["add", "a"]).assert().success(); // ACME-1
+
+    let out = qp(&db)
+        .args(["show", "acme-001", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(v["display_id"], "ACME-1");
+}
+
+#[test]
+fn foreign_prefix_is_invalid_input_naming_both_prefixes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db)
+        .args(["init", "--prefix", "ACME"])
+        .assert()
+        .success();
+    qp(&db).args(["add", "a"]).assert().success(); // ACME-1
+
+    let out = qp(&db).args(["show", "QP-1"]).assert().code(1);
+    let s = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(s.contains("QP"), "should name the supplied prefix: {s}");
+    assert!(s.contains("ACME"), "should name the store's prefix: {s}");
+
+    // A prefix no store has ever used is the same error, not a resolution.
+    let out = qp(&db).args(["show", "ZZZZ-1", "--json"]).assert().code(1);
+    let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    let last = err.lines().rfind(|l| !l.is_empty()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(last).unwrap();
+    assert_eq!(v["error"]["kind"], "invalid_input");
+}
+
+#[test]
+fn foreign_prefix_does_not_mutate_the_row_at_that_rowid() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db)
+        .args(["init", "--prefix", "ACME"])
+        .assert()
+        .success();
+    qp(&db).args(["add", "a"]).assert().success(); // ACME-1
+
+    qp(&db).args(["tag", "QP-1", "add", "x"]).assert().code(1);
+    qp(&db).args(["tag", "ZZZZ-1", "add", "y"]).assert().code(1);
+    qp(&db)
+        .args(["cancel", "QP-1", "--reason", "wrong store"])
+        .assert()
+        .code(1);
+
+    let out = qp(&db)
+        .args(["show", "ACME-1", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(
+        v["tags"],
+        serde_json::json!([]),
+        "a foreign-prefixed tag must not land: {v}"
+    );
+    assert_eq!(v["state"], "ready", "state must be untouched: {v}");
+}
+
+#[test]
+fn bare_integer_is_still_not_a_task_reference() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success(); // QP-1
+
+    let out = qp(&db).args(["show", "1"]).assert().code(1);
+    let s = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(s.contains("invalid id"), "{s}");
+}

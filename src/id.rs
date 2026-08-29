@@ -1,4 +1,4 @@
-//! Display-id encoding for human-friendly task references.
+//! Display-id encoding, where the prefix is part of the identifier rather than decoration.
 //!
 #![doc = include_str!("../docs/modules/id.md")]
 
@@ -18,7 +18,17 @@ pub fn encode(rowid: i64, prefix: &str) -> String {
     format!("{prefix}-{rowid}")
 }
 
-pub fn parse(s: &str) -> Result<i64> {
+/// A task reference as the user spelled it: the rowid, and the prefix if one
+/// was given.
+///
+/// `prefix` is `None` only for the legacy `T<DIGITS>` form, which predates
+/// per-store prefixes and so cannot be checked against one.
+pub struct TaskRef {
+    pub prefix: Option<String>,
+    pub rowid: i64,
+}
+
+pub fn parse(s: &str) -> Result<TaskRef> {
     let s = s.trim();
     // New form: <LETTERS>-<DIGITS>
     if let Some((head, tail)) = s.split_once('-') {
@@ -31,7 +41,10 @@ pub fn parse(s: &str) -> Result<i64> {
             if n <= 0 {
                 return Err(anyhow!("invalid id `{s}`"));
             }
-            return Ok(n);
+            return Ok(TaskRef {
+                prefix: Some(head.to_string()),
+                rowid: n,
+            });
         }
     }
     // Legacy form: T<DIGITS> (case-insensitive). Kept for one release.
@@ -41,7 +54,10 @@ pub fn parse(s: &str) -> Result<i64> {
             if n <= 0 {
                 return Err(anyhow!("invalid id `{s}`"));
             }
-            return Ok(n);
+            return Ok(TaskRef {
+                prefix: None,
+                rowid: n,
+            });
         }
     }
     Err(anyhow!("invalid id `{s}` (expected <PREFIX>-<n>)"))
@@ -58,17 +74,33 @@ pub fn resolve(conn: &rusqlite::Connection, s: &str) -> Result<i64> {
 
 /// Resolve a task reference to both its rowid and its canonical `display_id`.
 ///
-/// Matches numerically on the parsed rowid, so `QP-1`, `qp-001`, and (for one
-/// more release) `T1` all resolve to the same row regardless of case,
-/// zero-padding, or the store's actual prefix.
+/// Case and zero-padding are still forgiven (`QP-1`, `qp-001`, `  qp-1  ` are
+/// one id), but a prefix that is not this store's is rejected rather than
+/// ignored: an id names a row in the store that minted it, and the same number
+/// exists in every other store under a different prefix.
 pub fn resolve_full(conn: &rusqlite::Connection, s: &str) -> Result<Resolved> {
-    let n = parse(s)?;
-    conn.query_row("SELECT id, display_id FROM task WHERE id = ?", [n], |r| {
-        Ok(Resolved {
-            id: r.get(0)?,
-            display_id: r.get(1)?,
-        })
-    })
+    let r = parse(s)?;
+    if let Some(given) = &r.prefix {
+        let store = crate::db::display_prefix(conn)?;
+        if !given.eq_ignore_ascii_case(&store) {
+            return Err(crate::db::invalid_input(format!(
+                "id `{}` has prefix `{}`, but this store's prefix is `{}`",
+                s.trim(),
+                given.to_ascii_uppercase(),
+                store
+            )));
+        }
+    }
+    conn.query_row(
+        "SELECT id, display_id FROM task WHERE id = ?",
+        [r.rowid],
+        |r| {
+            Ok(Resolved {
+                id: r.get(0)?,
+                display_id: r.get(1)?,
+            })
+        },
+    )
     .map_err(|e| match e {
         rusqlite::Error::QueryReturnedNoRows => {
             crate::db::not_found(format!("no such task: {s}"), Some(s.trim().to_string()))
@@ -89,15 +121,20 @@ mod tests {
 
     #[test]
     fn parse_accepts_new_form() {
-        assert_eq!(parse("QP-1").unwrap(), 1);
-        assert_eq!(parse("ACME-42").unwrap(), 42);
-        assert_eq!(parse("  qp-7  ").unwrap(), 7);
+        let r = parse("QP-1").unwrap();
+        assert_eq!((r.prefix.as_deref(), r.rowid), (Some("QP"), 1));
+        let r = parse("ACME-42").unwrap();
+        assert_eq!((r.prefix.as_deref(), r.rowid), (Some("ACME"), 42));
+        let r = parse("  qp-7  ").unwrap();
+        assert_eq!((r.prefix.as_deref(), r.rowid), (Some("qp"), 7));
     }
 
     #[test]
     fn parse_accepts_legacy_t_form() {
-        assert_eq!(parse("T7").unwrap(), 7);
-        assert_eq!(parse("t99").unwrap(), 99);
+        let r = parse("T7").unwrap();
+        assert_eq!((r.prefix.as_deref(), r.rowid), (None, 7));
+        let r = parse("t99").unwrap();
+        assert_eq!((r.prefix.as_deref(), r.rowid), (None, 99));
     }
 
     #[test]
@@ -169,6 +206,49 @@ mod tests {
         let r = resolve_full(&conn, "  qp-001  ").unwrap();
         assert_eq!(r.id, rowid);
         assert_eq!(r.display_id, "QP-1");
+    }
+
+    #[test]
+    fn resolve_rejects_foreign_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("db.sqlite");
+        let conn = crate::db::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO task(display_id, title) VALUES ('QP-1', 'first')",
+            [],
+        )
+        .unwrap();
+        for foreign in ["ACME-1", "acme-1", "ZZZZ-1"] {
+            let err = resolve(&conn, foreign).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("QP"), "{msg} should name the store prefix");
+            assert!(
+                msg.to_ascii_uppercase()
+                    .contains(&foreign.split('-').next().unwrap().to_ascii_uppercase()),
+                "{msg} should name the supplied prefix"
+            );
+            assert_eq!(
+                err.downcast_ref::<crate::db::QuipuError>()
+                    .map(crate::db::QuipuError::exit_code),
+                Some(1)
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_honors_non_default_store_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("db.sqlite");
+        let conn = crate::db::init(&db, Some("ACME"), &[], None).unwrap();
+        conn.execute(
+            "INSERT INTO task(display_id, title) VALUES ('ACME-1', 'first')",
+            [],
+        )
+        .unwrap();
+        let rowid = conn.last_insert_rowid();
+        assert_eq!(resolve(&conn, "ACME-1").unwrap(), rowid);
+        assert_eq!(resolve(&conn, "acme-001").unwrap(), rowid);
+        assert!(resolve(&conn, "QP-1").is_err());
     }
 
     #[test]
