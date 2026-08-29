@@ -49,8 +49,7 @@ impl crate::route::Served for ShowArgs {
 /// with each other about what a ticket's history is.
 #[derive(Serialize, Deserialize)]
 #[serde(transparent)]
-#[cfg_attr(test, derive(Default))]
-pub(crate) struct ShowView(Value);
+pub(crate) struct ShowView(#[serde(deserialize_with = "body_is_the_view")] Value);
 
 /// Comma-joined display ids from one of the edge arrays.
 fn ids(v: &Value, key: &str) -> Vec<String> {
@@ -60,6 +59,28 @@ fn ids(v: &Value, key: &str) -> Vec<String> {
         .flatten()
         .filter_map(|x| x.as_str().map(str::to_string))
         .collect()
+}
+
+
+/// Refuses a response body that is not the object this view renders.
+///
+/// See `wire::expect_object`. The named keys are the ones `human()` reads, so
+/// their absence is exactly the case that used to render as a blank view at
+/// exit 0.
+fn body_is_the_view<'de, D>(d: D) -> std::result::Result<Value, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    crate::wire::expect_object(Value::deserialize(d)?, &["display_id", "state", "tags"]).map_err(D::Error::custom)
+}
+
+/// A minimal valid sample; see `list.rs` for why this is not derived.
+#[cfg(test)]
+impl Default for ShowView {
+    fn default() -> Self {
+        ShowView(serde_json::json!({"display_id": "QP-1", "state": "ready", "tags": []}))
+    }
 }
 
 impl Outcome for ShowView {

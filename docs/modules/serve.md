@@ -174,3 +174,22 @@ while `unavailable` means none did.
 
 `/healthz` sits outside the verb namespace on purpose, so a project named
 `healthz` can never collide with it.
+
+## Every response names the process that wrote it
+
+`write_response` attaches `wire::VERSION_HEADER` alongside the content type, on
+successes and failures alike. It is what lets a client tell "quipu answered"
+from "something answered", and it is a header rather than an envelope field so
+it costs no payload shape and covers the error path too. `docs/wire-contract.md`
+carries the failure that forced it — a service returning `200 {}` on every path
+rendered as an empty board at exit 0 — and why the refusal is exit 1 rather than
+exit 7.
+
+## A request that reaches no verb is `invalid_input`
+
+Both routing misses — a path that is not under `/v1/`, and a verb this table
+does not hold — are 400 and exit 1. Neither is `not_found`: 404 is exit 2, which
+the README's table calls a lost race that a retry may win, so a reverse proxy
+mounted at a subpath it does not strip produced an infinite retry loop against a
+base url that could never work. `not_found` is about entities in a store; a
+routing failure is about the request.

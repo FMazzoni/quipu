@@ -202,6 +202,72 @@ Never a status outside `{400, 404, 409, 422, 500}` without adding a row above
 and a reason. Never `200` for a failure. Never `5xx` for something the caller
 caused.
 
+### A path that does not route is `invalid_input`, not `not_found`
+
+The table above answers "which status for which `kind`". It does not answer
+"which kind for a request that never reached a verb", and the first answer given
+was wrong in a way that turned a permanent misconfiguration into an infinite
+loop.
+
+`POST /qp/v1/list` — an ordinary reverse proxy at a subpath that does not strip
+its mount point — was `not_found`: 404, exit 2. Exit 2 is documented as "wrong
+state / lost race — retry may succeed" and this document encourages retrying on
+it, so a skill that follows the documentation retries a base url that can never
+work, forever.
+
+Apply the decision procedure above and the answer falls out. Could a different
+request *body* have worked? No; the body was never read. Does the thing
+addressed not exist? That question is about a store entity, and this is a URL —
+`not_found` asserts something about the store, and a store that was never
+reached asserts nothing. So it is **`invalid_input` / 400 / exit 1**, and the
+same holds for a verb the front door does not serve, which is a version skew and
+equally unhelped by waiting.
+
+The general rule this settles, for the next reader: **`not_found` is about
+entities in a store; a routing failure is about the request.** A `no_store` is
+the third thing again — the process is right, the path is right, and the named
+project is not one this process opened.
+
+### The response says who wrote it
+
+**Decision: every response this server writes carries `X-Quipu-Version`, and a
+client that gets a 2xx without one refuses the answer.**
+
+The failure that forced it. `src/client.rs` accepted any 2xx whose body was
+valid JSON, of any shape, and returned it untyped. Against a service answering
+`200 {}` on every path — a misrouted reverse proxy, a health-check stub, the
+wrong port — `list` printed an empty table, `status` printed all zeros, `wave`
+printed an actively reassuring sentence, and `show` rendered a **fabricated
+blank ticket**. Every one of them exited 0. `200 null` behaved identically.
+
+That is worse than a wrong board. The process contract prescribes "read before
+writing — `qp show` is the answer to did my write land". Under a misrouted proxy
+`show` answers "it did not land" about a store it never reached, and the
+contract then tells the agent to re-issue the write.
+
+`qp remote doctor` never had the bug, because it probes `/healthz` and checks
+the body is a quipu health payload. The ordinary client path checked nothing.
+This generalises that check to every request, and does it in a header rather
+than in the body so it costs no payload shape and applies to the failures too.
+
+The refusal is **`invalid_input`, exit 1, and deliberately not `unavailable`,
+exit 7.** Something answered: the configured front door was reached at the TCP
+level, so a caller must not read this as "nothing is listening" and go start a
+process on a port that is already held. What is wrong is the url, which is
+configuration, and no retry fixes configuration.
+
+**This is one of two checks and neither replaces the other.** The header catches
+a service that is not quipu at all, before the body is read. It cannot catch a
+*quipu* that answered the wrong shape — a version skew between two real
+processes — and that is what the per-view payload check is for: each of the
+eight transparent read views carries a `deserialize_with` that refuses a body
+which is not the array or the object it renders. Crucially that check does **not
+re-type the payloads**: the value stays a `serde_json::Value`, so the bytes and
+their key order are exactly what `--json` has always printed, and the deliberate,
+measured decision not to derive `Serialize` on the read-layer row types stands.
+`no_payload_accepts_an_empty_body` in `outcome.rs` holds it over the whole
+registry, so the next view added without a shape check fails there.
+
 ### 503 is reserved and the server must never send it
 
 `unavailable` means *no store saw the request*. A 503 written by the quipu

@@ -54,11 +54,42 @@ impl crate::route::Served for ListArgs {
 /// it changes how many lines `human` prints and nothing about the data.
 #[derive(Serialize, Deserialize)]
 #[serde(transparent)]
-#[cfg_attr(test, derive(Default))]
 pub(crate) struct ListView {
+    #[serde(deserialize_with = "rows_are_an_array")]
     rows: Value,
     #[serde(skip)]
     with_description: bool,
+}
+
+
+/// Refuses a response body that is not the array this view renders.
+///
+/// The whole argument is on `wire::expect_array`; the short version is that a
+/// `#[serde(transparent)]` newtype over `Value` accepts any JSON at all, and
+/// every one of these views renders a mismatch as *empty* rather than as a
+/// failure. `deserialize_with` keeps the payload a `Value` — so the bytes and
+/// their key order are untouched — and adds the one refusal.
+fn rows_are_an_array<'de, D>(d: D) -> std::result::Result<Value, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    crate::wire::expect_array(Value::deserialize(d)?).map_err(D::Error::custom)
+}
+
+/// A minimal *valid* sample, for the payload registry's round-trip test.
+///
+/// Hand-written rather than derived: `Value`'s own `Default` is `null`, which
+/// this view now refuses, and a registry sample that cannot survive its own
+/// deserialiser proves nothing.
+#[cfg(test)]
+impl Default for ListView {
+    fn default() -> Self {
+        ListView {
+            rows: Value::Array(vec![]),
+            with_description: false,
+        }
+    }
 }
 
 impl Outcome for ListView {
