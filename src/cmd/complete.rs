@@ -44,25 +44,35 @@ pub fn run(db_path: &std::path::Path, a: CompleteArgs) -> Result<()> {
     let release = claimref::release_for(db_path, &conn, task_id, &a.agent)?;
     db::with_tx(&mut conn, |tx| {
         let Some(open) = db::current_assignment(tx, task_id)? else {
-            return Err(db::conflict(
-                "no_open_assignment",
+            return Err(db::no_open_assignment(
+                tx,
+                task_id,
+                &resolved.display_id,
+                Some(&a.agent),
                 format!("{} not assigned", a.task),
-                Some(resolved.display_id.clone()),
-            ));
+            )?);
         };
         let aid = open.id;
+        // Ownership before claimed-ness: when both are wrong, "this is not
+        // yours" is the answer the caller can act on, and it is the only one
+        // that can name a holder whose lease was broken while it was away.
+        if open.agent_id != a.agent {
+            // A holder that was dispossessed while it was away is told so by
+            // name, rather than being handed the generic "not yours".
+            if let Some(e) = crate::lease::dispossessed(tx, task_id, &a.agent)? {
+                return Err(e);
+            }
+            return Err(db::not_owner(
+                format!("{} not yours", a.task),
+                Some(resolved.display_id.clone()),
+                Some(open.agent_id.clone()),
+            ));
+        }
         if open.claimed_at.is_none() {
             return Err(db::conflict(
                 "not_claimed",
                 format!("{} not claimed", a.task),
                 Some(resolved.display_id.clone()),
-            ));
-        }
-        if open.agent_id != a.agent {
-            return Err(db::not_owner(
-                format!("{} not yours", a.task),
-                Some(resolved.display_id.clone()),
-                Some(open.agent_id.clone()),
             ));
         }
         let n = tx.execute(

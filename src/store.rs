@@ -515,3 +515,47 @@ pub fn subtree_ids(conn: &Connection, root_task_id: i64) -> Result<HashSet<i64>>
         .collect::<Result<_, _>>()?;
     Ok(ids)
 }
+
+#[cfg(test)]
+mod tests {
+    /// Every `pub fn` here must hand back an owned collection, never a cursor.
+    ///
+    /// Reading this module's own source is the point: a review comment saying
+    /// "materialize before responding" is advice, and advice does not fail a
+    /// build. A signature returning `Rows`, a `MappedRows`, or an
+    /// `impl Iterator` would let a caller hold a read transaction open across
+    /// a response, which pins the WAL checkpoint for every writer in the
+    /// process (see `docs/modules/db.md`).
+    ///
+    /// What it cannot cover is stated in `docs/modules/store.md`: most command
+    /// modules still issue rusqlite directly, and this test never sees them.
+    #[test]
+    fn every_public_query_returns_an_owned_collection() {
+        const FORBIDDEN: [&str; 5] = [
+            "impl Iterator",
+            "rusqlite::Rows",
+            "MappedRows",
+            "CachedStatement",
+            "rusqlite::Statement",
+        ];
+        let src = include_str!("store.rs");
+        let mut checked = 0;
+        for line in src.lines() {
+            let line = line.trim_start();
+            if !line.starts_with("pub fn ") {
+                continue;
+            }
+            checked += 1;
+            for bad in FORBIDDEN {
+                assert!(
+                    !line.contains(bad),
+                    "`{line}` hands back a live cursor; collect into an owned value instead"
+                );
+            }
+        }
+        assert!(
+            checked >= 10,
+            "signature scan found only {checked} pub fns — did the scan break?"
+        );
+    }
+}

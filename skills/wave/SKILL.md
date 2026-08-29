@@ -66,8 +66,11 @@ while [ -n "$(qp list --tag wave:$WAVE --tag kind:critique --state ready --json 
   qp wait --tag wave:$WAVE --cohort-done --interval-ms 1000 --timeout-secs 600
 done
 
-# 7) Reclaim any orphans (e.g. subagent crashed without completing)
-for t in $(qp wave --json | jq -r '.running[].display_id'); do
+# 7) Reclaim orphans — a subagent that crashed without completing.
+# Only the STALE ones: a hold whose lease has lapsed. `qp reclaim` now refuses a
+# live hold without --force, so reclaiming everything `running` would fail on
+# the agents still working, which is the point.
+for t in $(qp wave --json | jq -r '.running[] | select(.stale) | .display_id'); do
   qp reclaim $t --reason "post-wave cleanup"
 done
 ```

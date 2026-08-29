@@ -92,7 +92,24 @@ whole of the control. If something is `pending` with an empty `blocked_by`,
 
     qp cancel QP-5 --reason "no longer needed"
     qp abandon QP-5 --as alice              # agent self-release
-    qp reclaim QP-5 --reason "agent dead"   # orchestrator force-release
+    qp reclaim QP-5 --reason "agent dead"   # release a hold that has gone stale
+    qp reclaim QP-5 --reason "..." --force  # break a hold that is still live
+
+A claim takes a lease: `qp claim QP-5 --as alice --for 45m`, defaulting to `8h`.
+The suffix is required, because a bare number is ambiguous in exactly the way
+that sets a lease to seconds when hours were meant.
+
+**A lease bounds how long a ticket may sit quiet while held — not how long the
+work may take.** Every write by the holder (`log`, `tag`, `block`, `complete`, …)
+pushes the expiry out, so a ticket that runs for days but is written against
+along the way never goes stale. One that was claimed by a machine that then died
+does. Say it twice: the limit is on silence, not on duration.
+
+Nothing sweeps on a timer. Expiry is evaluated when someone asks, so a stale hold
+shows up in `qp show` and `qp wave` the next time a human or an orchestrator
+looks, and `qp reclaim` releases it. A claim recorded before leases existed
+states no expiry and therefore never expires — releasing one still takes
+`--force`.
 
 ## Machine-readable output
 
@@ -489,7 +506,10 @@ attribute a ticket without guessing.
 
 ## Known MVP limitations
 
-- No liveness detection (no PID/heartbeat). Orchestrator runs `qp reclaim` on detected failures.
+- Liveness is a lease on the assignment row, not a heartbeat: no process is
+  watched and nothing runs on a timer, so a hold is judged stale only when a
+  read command asks. A machine that dies leaves its ticket held until its lease
+  lapses and somebody looks.
 - Single SQLite per machine. `qp export`, `qp import` and `qp sync` are the
   interchange format, its reader and the transfer between machines. The claim
   authority url is still unused — the claim-over-git path is to come, and there

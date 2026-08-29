@@ -29,3 +29,27 @@ assignment check.
 The event carries no agent id. Nobody authenticated, so recording an actor would
 be a fiction; the `via: "reclaim"` payload field is what tells a reader how the
 task moved.
+
+## Stale by default, live only under force
+
+Releasing a hold that has gone quiet past its lease needs no flag. Releasing one
+that is still live needs the force flag, and reports `hold_is_live` naming the
+holder, the machine and the instant it would expire. That is the whole shift this
+command underwent: the manual override stays, and it stops being the only option.
+
+A task sitting `assigned` and never claimed has no holder, so no force is needed
+there — nobody had started.
+
+Staleness is part of the guarded `UPDATE`, not a check in front of it. The
+predicate is `lease::LIVE_HOLD`, embedded in the `WHERE` clause as a correlated
+`NOT EXISTS`, so one conditional statement and one `changes() == 1` decide both
+that the task was in flight and that its hold had lapsed. Two machines racing to
+break the same dead hold therefore produce exactly one winner — the loser finds
+the task already `pending` and reports `not_assigned_or_running` — and a hold
+renewed in the moment between reading and writing survives, because there is no
+read to race with. `concurrent_reclaims_of_one_stale_hold_produce_exactly_one_winner`
+pins it.
+
+The state read after a failed `UPDATE` is for the message only, the same
+permitted exception the origin read above already takes: it decides which of the
+two refusals to phrase, never whether the transition happened.

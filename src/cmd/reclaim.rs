@@ -3,7 +3,7 @@
 #![doc = include_str!("../../docs/modules/reclaim.md")]
 
 use crate::outcome::{emit, Outcome};
-use crate::{claimref, db, id};
+use crate::{claimref, db, id, lease};
 use anyhow::Result;
 use clap::Args;
 use serde::Serialize;
@@ -13,6 +13,10 @@ pub struct ReclaimArgs {
     pub task: String,
     #[arg(long)]
     pub reason: Option<String>,
+    /// Break a hold that is still live. Without it only a stale hold — one
+    /// whose holder has been quiet past its lease — can be released.
+    #[arg(long)]
+    pub force: bool,
     #[arg(long)]
     pub json: bool,
 }
@@ -22,6 +26,7 @@ struct Reclaimed {
     display_id: String,
     state: String,
     reason: Option<String>,
+    forced: bool,
 }
 impl Outcome for Reclaimed {
     fn human(&self) -> String {
@@ -42,11 +47,51 @@ pub fn run(db_path: &std::path::Path, a: ReclaimArgs) -> Result<()> {
         // so the log cannot tell `assigned` from `running` otherwise. The
         // `UPDATE` stays conditional and `changes() == 1` still decides.
         let from = db::state_of(tx, task_id)?;
+        // Staleness is part of the guard, not a check before it. One
+        // conditional `UPDATE` decides both that the task was in flight and
+        // that its hold had expired, so two machines racing to reclaim the same
+        // dead hold produce exactly one winner — and a hold renewed between the
+        // read and the write survives, because there is no read to race with.
+        let sql = format!(
+            "UPDATE task SET state = ?1 WHERE id = ?2 AND state IN ('assigned','running')
+               AND (?3 = 1 OR NOT EXISTS (
+                     SELECT 1 FROM assignment a
+                      WHERE a.task_id = task.id AND a.completed_at IS NULL
+                        AND {live}))",
+            live = lease::LIVE_HOLD
+        );
         let n = tx.execute(
-            "UPDATE task SET state = ?1 WHERE id = ?2 AND state IN ('assigned','running')",
-            rusqlite::params![db::State::Pending, task_id],
+            &sql,
+            rusqlite::params![db::State::Pending, task_id, i64::from(a.force)],
         )?;
         if n != 1 {
+            // Read for the message only; the `UPDATE` above already decided.
+            let state = db::state_of(tx, task_id)?;
+            if matches!(state.as_deref(), Some("assigned") | Some("running")) {
+                let held = lease::hold_of(tx, task_id)?;
+                let who = held
+                    .as_ref()
+                    .map(|h| match &h.host {
+                        Some(host) => format!("`{}` on `{host}`", h.agent_id),
+                        None => format!("`{}`", h.agent_id),
+                    })
+                    .unwrap_or_else(|| "someone".to_string());
+                let until = held
+                    .as_ref()
+                    .and_then(|h| h.expires_at.clone())
+                    .map(|e| format!(" until {e}"))
+                    .unwrap_or_else(|| " indefinitely (the hold states no expiry)".to_string());
+                return Err(db::conflict(
+                    "hold_is_live",
+                    format!(
+                        "{} is held by {who}{until}; the holder has not gone quiet long \
+                         enough to be treated as gone. Reclaiming a live hold takes the \
+                         force flag.",
+                        a.task
+                    ),
+                    Some(resolved.display_id.clone()),
+                ));
+            }
             return Err(db::conflict(
                 "not_assigned_or_running",
                 format!("{} not assigned/running", a.task),
@@ -96,6 +141,7 @@ pub fn run(db_path: &std::path::Path, a: ReclaimArgs) -> Result<()> {
             display_id: resolved.display_id,
             state: resulting,
             reason: a.reason,
+            forced: a.force,
         },
     )
 }
