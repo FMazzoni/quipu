@@ -2,6 +2,7 @@
 //!
 #![doc = include_str!("../../docs/modules/complete.md")]
 
+use crate::effects::{self, Effect};
 use crate::outcome::{emit, Outcome};
 use crate::{claimref, db, id};
 use anyhow::Result;
@@ -28,6 +29,9 @@ pub(crate) struct Completed {
     state: String,
     decisions: Vec<String>,
     artifacts: Vec<String>,
+    /// Tasks this transaction moved that the caller did not name.
+    #[serde(rename = "_effects", default, skip_serializing_if = "Vec::is_empty")]
+    effects: Vec<Effect>,
 }
 impl Outcome for Completed {
     fn human(&self) -> String {
@@ -43,7 +47,7 @@ pub fn run(db_path: &std::path::Path, a: CompleteArgs) -> Result<()> {
     // local release has committed. `None` on a local-only store, which is
     // what keeps this edge offline and unchanged.
     let release = claimref::release_for(db_path, &conn, task_id, &a.agent)?;
-    db::with_tx(&mut conn, |tx| {
+    let effects = db::with_tx(&mut conn, |tx| {
         let Some(open) = db::current_assignment(tx, task_id)? else {
             return Err(db::no_open_assignment(
                 tx,
@@ -121,8 +125,13 @@ pub fn run(db_path: &std::path::Path, a: CompleteArgs) -> Result<()> {
         // Logged: finishing a blocker is the single most common way work gets
         // unblocked in this system, and the bare sweep left that promotion —
         // the entire point of the dependency graph — with no event at all.
-        db::refresh_ready_logged(tx, Some(&a.agent), "complete")?;
-        Ok(())
+        let promoted = db::refresh_ready_logged(tx, Some(&a.agent), "complete")?;
+        effects::collateral(
+            tx,
+            &[task_id],
+            "complete",
+            &db::Movements::promoted(promoted),
+        )
     })?;
     if let Some(r) = &release {
         r.finish(&conn);
@@ -134,6 +143,7 @@ pub fn run(db_path: &std::path::Path, a: CompleteArgs) -> Result<()> {
             state: "done".to_string(),
             decisions: a.decision,
             artifacts: a.artifact,
+            effects,
         },
     )
 }

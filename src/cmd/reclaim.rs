@@ -2,6 +2,7 @@
 //!
 #![doc = include_str!("../../docs/modules/reclaim.md")]
 
+use crate::effects::{self, Effect};
 use crate::outcome::{emit, Outcome};
 use crate::{claimref, db, id, lease};
 use anyhow::Result;
@@ -28,6 +29,9 @@ pub(crate) struct Reclaimed {
     state: String,
     reason: Option<String>,
     forced: bool,
+    /// Tasks this transaction moved that the caller did not name.
+    #[serde(rename = "_effects", default, skip_serializing_if = "Vec::is_empty")]
+    effects: Vec<Effect>,
 }
 impl Outcome for Reclaimed {
     fn human(&self) -> String {
@@ -43,7 +47,7 @@ pub fn run(db_path: &std::path::Path, a: ReclaimArgs) -> Result<()> {
     // local release has committed. `None` on a local-only store, which is
     // what keeps this edge offline and unchanged.
     let release = claimref::release_for(db_path, &conn, task_id, &resolved.display_id)?;
-    let resulting = db::with_tx(&mut conn, |tx| {
+    let (resulting, effects) = db::with_tx(&mut conn, |tx| {
         // Origin read first, for the event payload only — the guard names a set,
         // so the log cannot tell `assigned` from `running` otherwise. The
         // `UPDATE` stays conditional and `changes() == 1` still decides.
@@ -113,7 +117,14 @@ pub fn run(db_path: &std::path::Path, a: ReclaimArgs) -> Result<()> {
             ],
         )?;
         let promoted = db::refresh_ready_logged(tx, None, "reclaim")?;
-        let resulting = if promoted.contains(&task_id) {
+        let named_returned = promoted.contains(&task_id);
+        let effects = effects::collateral(
+            tx,
+            &[task_id],
+            "reclaim",
+            &db::Movements::promoted(promoted),
+        )?;
+        let resulting = if named_returned {
             db::State::Ready.to_string()
         } else {
             db::State::Pending.to_string()
@@ -131,7 +142,7 @@ pub fn run(db_path: &std::path::Path, a: ReclaimArgs) -> Result<()> {
                 Some(resolved.display_id.clone()),
             ));
         }
-        Ok(resulting)
+        Ok((resulting, effects))
     })?;
     if let Some(r) = &release {
         r.finish(&conn);
@@ -143,6 +154,7 @@ pub fn run(db_path: &std::path::Path, a: ReclaimArgs) -> Result<()> {
             state: resulting,
             reason: a.reason,
             forced: a.force,
+            effects,
         },
     )
 }

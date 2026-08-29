@@ -299,12 +299,16 @@ main.rs      clap subcommand enum → dispatch. Routing only.
   store.rs   canonical read queries + the row types they return
   outcome.rs the Outcome trait and emit — one success payload per mutator,
              rendered as either JSON or a prose line
+  effects.rs the reserved `_effects` key: tasks a transaction moved that the
+             caller never named, resolved from rowids to display ids
   cmd/*.rs   argument parsing and rendering
 ```
 
 `outcome.rs` is why `--json` is not a second code path: a mutator builds one
 struct and `emit` chooses the representation, so the two output modes cannot
-drift apart.
+drift apart. Every payload also deserialises, and the prose it renders from the
+reconstituted value is asserted to be identical — so the sentence is a function
+of the payload rather than something carried alongside it.
 
 [`store.rs`](https://github.com/FMazzoni/quipu/blob/main/src/store.rs) exists because the same read queries were
 hand-written across many command files in subtly divergent forms. Its own module

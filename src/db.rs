@@ -1389,10 +1389,10 @@ pub fn link_dep(
     on_display: &str,
     mode: &str,
     agent: Option<&str>,
-) -> Result<bool> {
+) -> Result<(bool, Movements)> {
     let changed = write_dep_edge(tx, task_id, task_display, on_id, on_display, mode, agent)?;
-    reconcile_readiness(tx, agent, mode)?;
-    Ok(changed)
+    let moved = reconcile_readiness(tx, agent, mode)?;
+    Ok((changed, moved))
 }
 
 /// Writes one dep edge and demotes the depender if the edge blocks it.
@@ -1488,10 +1488,44 @@ pub fn write_dep_edge(
 /// Call this **once**, after every edge in the transaction is written. Calling
 /// it per edge sweeps a graph that is still half-written, and the promotions it
 /// then logs are transitions no committed state ever held.
-pub fn reconcile_readiness(tx: &Transaction, agent: Option<&str>, via: &str) -> Result<()> {
-    demote_frozen(tx, agent, via)?;
-    refresh_ready_logged(tx, agent, via)?;
-    Ok(())
+pub fn reconcile_readiness(tx: &Transaction, agent: Option<&str>, via: &str) -> Result<Movements> {
+    let demoted = demote_frozen(tx, agent, via)?;
+    let promoted = refresh_ready_logged(tx, agent, via)?;
+    Ok(Movements { promoted, demoted })
+}
+
+/// What a readiness sweep actually moved, by direction.
+///
+/// The two sweeps are disjoint within one [`reconcile_readiness`] and it is
+/// worth knowing why: `refresh_ready` excludes the frozen set, so a task
+/// [`demote_frozen`] has just pushed back to `pending` cannot be promoted again
+/// by the sweep that follows it. A task therefore appears in at most one of
+/// these vectors per call, and `crate::effects` can render both without
+/// reconciling them against each other.
+///
+/// Rowids, not display ids. The resolution happens once, in `crate::effects`.
+#[derive(Debug, Default)]
+pub struct Movements {
+    pub promoted: Vec<i64>,
+    pub demoted: Vec<i64>,
+}
+
+impl Movements {
+    /// A sweep that could only promote, such as a bare [`refresh_ready_logged`].
+    pub fn promoted(promoted: Vec<i64>) -> Self {
+        Self {
+            promoted,
+            demoted: Vec::new(),
+        }
+    }
+
+    /// A sweep that could only demote, such as a bare [`demote_frozen`].
+    pub fn demoted(demoted: Vec<i64>) -> Self {
+        Self {
+            promoted: Vec::new(),
+            demoted,
+        }
+    }
 }
 
 #[cfg(test)]

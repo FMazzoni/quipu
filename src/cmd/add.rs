@@ -2,6 +2,7 @@
 //!
 #![doc = include_str!("../../docs/modules/add.md")]
 
+use crate::effects::{self, Effect};
 use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;
@@ -45,6 +46,13 @@ pub(crate) struct Created {
     /// Containers this task was attached to, empty unless `--part-of` was given.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     part_of: Vec<String>,
+    /// Tasks this transaction moved that the caller did not name.
+    ///
+    /// A create can move existing work in both directions: joining a container
+    /// whose deps are resolved promotes nothing, but joining a blocked one
+    /// freezes its siblings' subtree, and naming a `--depends-on` can free it.
+    #[serde(rename = "_effects", default, skip_serializing_if = "Vec::is_empty")]
+    effects: Vec<Effect>,
 }
 impl Outcome for Created {
     fn human(&self) -> String {
@@ -162,7 +170,14 @@ pub fn run(db_path: &std::path::Path, a: AddArgs) -> Result<()> {
         // The one sweep, after every edge is written. It promotes the new task
         // when all its deps were already resolved, and freezes it when a
         // container it just joined is itself blocked.
-        db::reconcile_readiness(tx, a.agent.as_deref(), "add")?;
+        let moved = db::reconcile_readiness(tx, a.agent.as_deref(), "add")?;
+        // Everything the request itself mentions: the new row, its
+        // `--depends-on` targets, and the containers it joined.
+        let named: Vec<i64> = std::iter::once(row)
+            .chain(dep_ids.iter().map(|d| d.id))
+            .chain(parents.iter().map(|p| p.id))
+            .collect();
+        let effects = effects::collateral(tx, &named, "add", &moved)?;
         let defaults = db::default_tags(tx)?;
         let mut merged: HashSet<String> = HashSet::new();
         for t in defaults {
@@ -206,6 +221,7 @@ pub fn run(db_path: &std::path::Path, a: AddArgs) -> Result<()> {
             description: a.description.clone(),
             tags: merged_tags,
             part_of: parents.iter().map(|p| p.display_id.clone()).collect(),
+            effects,
         })
     })?;
 
@@ -230,6 +246,13 @@ mod tests {
             description: Some("two tickets, one sweep".to_string()),
             tags: vec!["kind:chore".to_string()],
             part_of: vec!["QP-1".to_string()],
+            effects: vec![Effect {
+                kind: "state_change".to_string(),
+                task: "QP-9".to_string(),
+                from: "ready".to_string(),
+                to: "pending".to_string(),
+                via: "add".to_string(),
+            }],
         });
     }
 }

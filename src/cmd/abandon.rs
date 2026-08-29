@@ -2,6 +2,7 @@
 //!
 #![doc = include_str!("../../docs/modules/abandon.md")]
 
+use crate::effects::{self, Effect};
 use crate::outcome::{emit, Outcome};
 use crate::{claimref, db, id};
 use anyhow::Result;
@@ -25,6 +26,9 @@ pub(crate) struct Abandoned {
     display_id: String,
     state: String,
     reason: Option<String>,
+    /// Tasks this transaction moved that the caller did not name.
+    #[serde(rename = "_effects", default, skip_serializing_if = "Vec::is_empty")]
+    effects: Vec<Effect>,
 }
 impl Outcome for Abandoned {
     fn human(&self) -> String {
@@ -40,7 +44,7 @@ pub fn run(db_path: &std::path::Path, a: AbandonArgs) -> Result<()> {
     // local release has committed. `None` on a local-only store, which is
     // what keeps this edge offline and unchanged.
     let release = claimref::release_for(db_path, &conn, task_id, &a.agent)?;
-    let resulting = db::with_tx(&mut conn, |tx| {
+    let (resulting, effects) = db::with_tx(&mut conn, |tx| {
         let Some(open) = db::current_assignment(tx, task_id)? else {
             return Err(db::no_open_assignment(
                 tx,
@@ -100,7 +104,14 @@ pub fn run(db_path: &std::path::Path, a: AbandonArgs) -> Result<()> {
             ],
         )?;
         let promoted = db::refresh_ready_logged(tx, Some(&a.agent), "abandon")?;
-        let resulting = if promoted.contains(&task_id) {
+        let named_returned = promoted.contains(&task_id);
+        let effects = effects::collateral(
+            tx,
+            &[task_id],
+            "abandon",
+            &db::Movements::promoted(promoted),
+        )?;
+        let resulting = if named_returned {
             db::State::Ready.to_string()
         } else {
             db::State::Pending.to_string()
@@ -118,7 +129,7 @@ pub fn run(db_path: &std::path::Path, a: AbandonArgs) -> Result<()> {
                 Some(resolved.display_id.clone()),
             ));
         }
-        Ok(resulting)
+        Ok((resulting, effects))
     })?;
     if let Some(r) = &release {
         r.finish(&conn);
@@ -129,6 +140,7 @@ pub fn run(db_path: &std::path::Path, a: AbandonArgs) -> Result<()> {
             display_id: resolved.display_id,
             state: resulting,
             reason: a.reason,
+            effects,
         },
     )
 }

@@ -27,6 +27,12 @@ set — so an add can free work elsewhere, and both reconciliation sweeps run on
 both branches. Assuming otherwise left tasks stranded `pending` with nothing on
 the ticket to explain it, until an unrelated later command happened to sweep.
 
+`promoted` is deliberately narrow and stays that way: it answers a question
+about the *named* task. Everything else a sweep moved is reported separately, in
+`_effects`, which excludes both endpoints the command named — so the two never
+describe the same task and neither can be derived from the other. See
+[`effects`](effects.md).
+
 The demotion is itself a guarded `UPDATE` with the unresolved-dep predicate
 inline: it matches only a `ready` task that now genuinely has an open
 prerequisite. So it is a no-op when the new dep is already `done` — no spurious

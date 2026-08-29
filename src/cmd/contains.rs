@@ -2,6 +2,7 @@
 //!
 #![doc = include_str!("../../docs/modules/contains.md")]
 
+use crate::effects::{self, Effect};
 use crate::outcome::{emit, Outcome};
 use crate::{db, id};
 use anyhow::Result;
@@ -38,6 +39,9 @@ pub(crate) struct ContainsOutcome {
     /// requested shape or (on `--rm`) was not a containment edge at all.
     /// Reported rather than hidden so a re-run reads as "nothing to do".
     unchanged: Vec<String>,
+    /// Tasks this transaction moved that the caller did not name.
+    #[serde(rename = "_effects", default, skip_serializing_if = "Vec::is_empty")]
+    effects: Vec<Effect>,
 }
 impl Outcome for ContainsOutcome {
     fn human(&self) -> String {
@@ -109,11 +113,20 @@ pub fn run(db_path: &std::path::Path, a: ContainsArgs) -> Result<()> {
         .map(|c| id::resolve_full(&conn, c))
         .collect::<Result<Vec<_>>>()?;
 
-    let (changed, unchanged) =
-        db::with_tx(&mut conn, |tx| -> Result<(Vec<String>, Vec<String>)> {
+    // Every task the request itself mentions, so `_effects` can exclude them.
+    let named: Vec<i64> = std::iter::once(parent.id)
+        .chain(children.iter().map(|c| c.id))
+        .collect();
+    let via = if a.rm { "contains_rm" } else { "contains" };
+    let (changed, unchanged, effects) = db::with_tx(
+        &mut conn,
+        |tx| -> Result<(Vec<String>, Vec<String>, Vec<Effect>)> {
             db::require_edge_owner(tx, parent.id, &parent.display_id, a.agent.as_deref())?;
             let mut changed = Vec::new();
             let mut unchanged = Vec::new();
+            // Accumulated across the loop: `link_dep` sweeps after every edge,
+            // so one call can move a task an earlier one did not.
+            let mut effects = Vec::new();
             for child in &children {
                 if a.rm {
                     let n = tx.execute(
@@ -134,30 +147,37 @@ pub fn run(db_path: &std::path::Path, a: ContainsArgs) -> Result<()> {
                             &serde_json::json!({"on": child.display_id, "mode": db::MODE_CONTAINS}),
                         ),
                     )?;
-                } else if db::link_dep(
-                    tx,
-                    parent.id,
-                    &parent.display_id,
-                    child.id,
-                    &child.display_id,
-                    db::MODE_CONTAINS,
-                    a.agent.as_deref(),
-                )? {
-                    changed.push(child.display_id.clone());
                 } else {
-                    unchanged.push(child.display_id.clone());
+                    let (linked, moved) = db::link_dep(
+                        tx,
+                        parent.id,
+                        &parent.display_id,
+                        child.id,
+                        &child.display_id,
+                        db::MODE_CONTAINS,
+                        a.agent.as_deref(),
+                    )?;
+                    effects.extend(effects::collateral(tx, &named, via, &moved)?);
+                    if linked {
+                        changed.push(child.display_id.clone());
+                    } else {
+                        unchanged.push(child.display_id.clone());
+                    }
                 }
             }
             // Removing the last open child can make the container ready; adding one
             // can never promote anything, and `refresh_ready` only ever promotes, so
             // running it on both paths costs a query and keeps the paths symmetric.
-            db::refresh_ready_logged(
+            let promoted = db::refresh_ready_logged(tx, a.agent.as_deref(), via)?;
+            effects.extend(effects::collateral(
                 tx,
-                a.agent.as_deref(),
-                if a.rm { "contains_rm" } else { "contains" },
-            )?;
-            Ok((changed, unchanged))
-        })?;
+                &named,
+                via,
+                &db::Movements::promoted(promoted),
+            )?);
+            Ok((changed, unchanged, effects))
+        },
+    )?;
 
     emit(
         a.json,
@@ -167,6 +187,7 @@ pub fn run(db_path: &std::path::Path, a: ContainsArgs) -> Result<()> {
             op: if a.rm { "rm" } else { "add" }.to_string(),
             changed,
             unchanged,
+            effects,
         },
     )
 }
