@@ -115,6 +115,25 @@ impl Server {
     fn lines(&self) -> Vec<String> {
         self.log.lock().unwrap().clone()
     }
+
+    /// Waits until at least `n` lines match `needle`, or gives up after a while.
+    ///
+    /// The server logs a request *after* it has answered it, on the worker
+    /// thread, so a test that reads stderr the instant its last response lands
+    /// is racing a write it has already been told is coming. Reading once
+    /// passes on an idle machine and fails on a loaded CI runner, which is the
+    /// worst way for a real assertion to look flaky. Returns the final count so
+    /// the caller still asserts rather than trusting the wait.
+    fn wait_for_lines(&self, needle: &str, n: usize) -> usize {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let got = self.lines().iter().filter(|l| l.contains(needle)).count();
+            if got >= n || std::time::Instant::now() >= deadline {
+                return got;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
 }
 
 impl Drop for Server {
@@ -543,11 +562,7 @@ fn each_kind_carries_its_documented_http_status() {
 
     // Every one of those was refused before or by the store, so each is on
     // stderr — that line is the only record of the ones the store never saw.
-    let logged = srv
-        .lines()
-        .iter()
-        .filter(|l| l.contains("\"event\":\"request\""))
-        .count();
+    let logged = srv.wait_for_lines("\"event\":\"request\"", cases.len());
     assert!(
         logged >= cases.len(),
         "every 4xx must be logged; saw {logged}"
