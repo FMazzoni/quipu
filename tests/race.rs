@@ -26,6 +26,15 @@
 //! assertion: every racer succeeds, and what must hold is that no ticket is
 //! handed to two of them. Its losers exit 0 with a null payload, so they are
 //! tallied out of stdout rather than out of the exit code.
+//!
+//! The last two `take` tests race it through a front door, because the route a
+//! writer took must not matter: a server fronting a store is a store with one
+//! MORE writer, never a store with one, and the CLI never stopped opening these
+//! files directly. Both assert the front door was actually used — a client that
+//! quietly fell back to the store beside it would produce identical output
+//! while proving nothing — and both assert the server outlived the race, since
+//! a dead one answers nothing and "no ticket taken twice" is trivially true of
+//! no tickets at all.
 
 use assert_cmd::Command;
 use std::path::{Path, PathBuf};
@@ -61,16 +70,36 @@ fn race(db: &Path, args: &[&str]) -> Vec<RaceResult> {
 
 /// [`race`] with the racer count named, for a case that wants a smaller field.
 fn race_n(db: &Path, args: &[&str], racers: usize) -> Vec<RaceResult> {
-    let children: Vec<Child> = (0..racers)
-        .map(|_| {
-            std::process::Command::new(qp_bin())
-                .args(args)
+    race_mixed(db, args, &vec![None; racers])
+}
+
+/// Racers that may each go through a different front door, or through none.
+///
+/// One spawner rather than a served twin of [`race_n`], because the property
+/// under test is that the route a writer took does not matter: a racer holding
+/// the file and a racer holding a socket are two writers of one store, and the
+/// mix has to be spawnable in one batch or the overlap the file exists to
+/// produce is lost between two loops.
+///
+/// A racer with `Some(url)` still carries `QP_DB`, and it has to: `--server`
+/// decides where a *served* verb goes, and the store beside it is what the
+/// client falls back to. Pointing it at the real file is what makes a routing
+/// regression visible as a wrong answer here rather than as a silent pass.
+fn race_mixed(db: &Path, args: &[&str], routes: &[Option<&str>]) -> Vec<RaceResult> {
+    let children: Vec<Child> = routes
+        .iter()
+        .map(|route| {
+            let mut c = std::process::Command::new(qp_bin());
+            c.args(args)
                 .arg("--json")
                 .env("QP_DB", db)
                 .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap()
+                .stderr(Stdio::piped());
+            match route {
+                Some(url) => c.env("QP_SERVER", url),
+                None => c.env_remove("QP_SERVER"),
+            };
+            c.spawn().unwrap()
         })
         .collect();
 
@@ -85,6 +114,101 @@ fn race_n(db: &Path, args: &[&str], racers: usize) -> Vec<RaceResult> {
             }
         })
         .collect()
+}
+
+/// A `qp serve` child fronting one store, on an ephemeral loopback port.
+///
+/// Nothing here reaches a network: the port is whatever the kernel hands out on
+/// `127.0.0.1`, and the child dies with the test.
+struct Serve {
+    child: Child,
+    url: String,
+    log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Serve {
+    fn start(db: &Path) -> Self {
+        let mut child = std::process::Command::new(qp_bin())
+            .env("QP_DB", db)
+            .args(["serve", "--bind", "127.0.0.1:0", "--access-log"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn qp serve");
+        let mut reader = std::io::BufReader::new(child.stderr.take().expect("piped stderr"));
+        // A child that died on its argv still has a pid and a wait status, and a
+        // test that reads one as evidence of a running server passes forever
+        // against nothing. The startup line is the proof the process exists AND
+        // is listening; a zero-length read means it exited instead.
+        let bind = loop {
+            let mut line = String::new();
+            let n = std::io::BufRead::read_line(&mut reader, &mut line).expect("read stderr");
+            assert!(n > 0, "qp serve exited before logging startup");
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim_end()) {
+                if v["event"] == "startup" {
+                    break v["bind"].as_str().expect("bind address").to_string();
+                }
+            }
+        };
+        // Drained on a thread: a full stderr pipe blocks the process under test.
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&log);
+        std::thread::spawn(move || {
+            for line in std::io::BufRead::lines(reader).map_while(Result::ok) {
+                sink.lock().unwrap().push(line);
+            }
+        });
+        Serve {
+            child,
+            url: format!("http://{bind}"),
+            log,
+        }
+    }
+
+    /// How many `take` requests this front door has finished answering.
+    ///
+    /// The request line is written after the response, on the worker thread, so
+    /// a reader that looks the instant its last client exits is racing a write
+    /// it has already been promised. Settles first, then answers.
+    fn takes_served(&self) -> usize {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let count = || {
+            self.log
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|l| l.contains(r#""url":"/v1/take"#))
+                .count()
+        };
+        let mut last = count();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let now = count();
+            if now == last || std::time::Instant::now() >= deadline {
+                return now;
+            }
+            last = now;
+        }
+    }
+
+    /// Fails if the front door died at any point during the race.
+    ///
+    /// Without this the whole test is vacuous in the one way that matters: a
+    /// server that exited answers nothing, every racer comes back empty, and
+    /// "no ticket was taken twice" is trivially true of no tickets at all.
+    fn assert_alive(&mut self) {
+        assert!(
+            self.child.try_wait().unwrap().is_none(),
+            "the front door died during the race"
+        );
+    }
+}
+
+impl Drop for Serve {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 /// Under `--json`, stderr is JSON Lines: zero or more `{"warning":...}` then at
@@ -361,6 +485,136 @@ fn concurrent_takes_never_hand_the_same_ticket_twice() {
     );
     assert_eq!(empty, RACERS - READY, "the rest must report no work");
 
+    for t in &expected {
+        assert_eq!(
+            state_change_count(&db, t, "assigned"),
+            1,
+            "exactly one assignment may land on {t}"
+        );
+    }
+}
+
+/// K tickets, N client processes, one front door: every ticket taken once.
+///
+/// `take` through the socket had no automated cover at all, and the file it
+/// belongs in asserted the property in a docstring instead — "the same
+/// guarantee whether the writers are processes, threads, or a concurrent `qp`
+/// in someone's terminal". That sentence is true and it is not a test, and this
+/// is the load-bearing one to leave resting on prose: `take` is the only verb
+/// whose racers do not name a row, so nothing serialises them but the statement
+/// itself, and every wave worker in the project reaches for it.
+///
+/// The tally is [`take_tally`]'s, unchanged. A served `take` reports no-work
+/// exactly as a local one does — exit 0 with a null payload — which is itself
+/// part of what is being asserted: a poller that read the wire's "no work" as a
+/// failure would retry forever.
+#[test]
+fn served_takes_never_hand_the_same_ticket_twice() {
+    const READY: usize = 3; // < RACERS, so some racers must come back empty
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    for i in 1..=READY {
+        qp(&db)
+            .args(["add", &format!("slice {i}")])
+            .assert()
+            .success();
+    }
+    let mut srv = Serve::start(&db);
+
+    let url = srv.url.clone();
+    let routes = vec![Some(url.as_str()); RACERS];
+    let results = race_mixed(&db, &["take", "--as", "w"], &routes);
+    srv.assert_alive();
+    // Without this the test is vacuous in the way that would never be noticed:
+    // a client that fell back to the store beside it would produce identical
+    // output while proving nothing about the wire. Every racer must have been
+    // answered by the front door.
+    assert_eq!(
+        srv.takes_served(),
+        RACERS,
+        "every racer must have gone over the wire"
+    );
+    let (mut took, empty) = take_tally(&results);
+    took.sort();
+
+    let expected: Vec<String> = (1..=READY).map(|i| format!("QP-{i}")).collect();
+    assert_eq!(
+        took, expected,
+        "every ready ticket taken exactly once through the front door, none twice"
+    );
+    assert_eq!(empty, RACERS - READY, "the rest must report no work");
+    for t in &expected {
+        assert_eq!(
+            state_change_count(&db, t, "assigned"),
+            1,
+            "exactly one assignment may land on {t}"
+        );
+    }
+}
+
+/// Two front doors and a local `qp`, all writing one file, still hand out once.
+///
+/// The case a single-server test cannot reach. Inside one process the racers
+/// share a connection pool and could in principle be serialised by something
+/// other than SQLite; two `qp serve` processes plus a taker holding the file
+/// directly removes every such explanation, and it is the deployment quipu
+/// actually has — the CLI never stopped opening these files, so a store behind
+/// a front door is a store with one MORE writer rather than a store with one.
+///
+/// Interleaved rather than grouped so the routes overlap: three writers of one
+/// kind followed by three of another can serialise by accident and still pass.
+#[test]
+fn served_and_local_takers_never_take_the_same_ticket() {
+    const READY: usize = 4;
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    for i in 1..=READY {
+        qp(&db)
+            .args(["add", &format!("slice {i}")])
+            .assert()
+            .success();
+    }
+    let mut a = Serve::start(&db);
+    let mut b = Serve::start(&db);
+
+    // Six racers: two through one door, two through the other, two straight at
+    // the file, alternating so no route's writers are adjacent.
+    let (ua, ub) = (a.url.clone(), b.url.clone());
+    let routes = vec![
+        Some(ua.as_str()),
+        None,
+        Some(ub.as_str()),
+        Some(ua.as_str()),
+        None,
+        Some(ub.as_str()),
+    ];
+    let results = race_mixed(&db, &["take", "--as", "w"], &routes);
+    a.assert_alive();
+    b.assert_alive();
+    // Two through each door, and the other two never touched one — a fallback
+    // to the local store would make this a six-way local race wearing a
+    // server-shaped hat.
+    assert_eq!(
+        a.takes_served(),
+        2,
+        "both of this door's racers must use it"
+    );
+    assert_eq!(
+        b.takes_served(),
+        2,
+        "both of that door's racers must use it"
+    );
+    let (mut took, empty) = take_tally(&results);
+    took.sort();
+
+    let expected: Vec<String> = (1..=READY).map(|i| format!("QP-{i}")).collect();
+    assert_eq!(
+        took, expected,
+        "one ticket per taker across two front doors and the file itself"
+    );
+    assert_eq!(empty, routes.len() - READY);
     for t in &expected {
         assert_eq!(
             state_change_count(&db, t, "assigned"),
