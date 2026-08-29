@@ -3,7 +3,7 @@
 #![doc = include_str!("../../docs/modules/list.md")]
 
 use crate::outcome::Outcome;
-use crate::{db, store};
+use crate::{db, lease, store};
 use anyhow::Result;
 use clap::Args;
 use serde::{Deserialize, Serialize};
@@ -66,8 +66,13 @@ impl Outcome for ListView {
         let mut out = String::from("ID\tSTATE\tAGENT\tTAGS\tTITLE");
         for r in self.rows.as_array().into_iter().flatten() {
             out.push('\n');
+            // The stale marker trails TITLE rather than becoming a sixth
+            // column. `show`'s header is pinned to this column set in this
+            // order, so a column here moves both views at once for every
+            // reader; TITLE is last, so trailing text shifts nothing. Same
+            // spelling as `wave` — see `lease::stale_marker`.
             out.push_str(&format!(
-                "{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}{}",
                 r["display_id"].as_str().unwrap_or(""),
                 r["state"].as_str().unwrap_or(""),
                 r["agent"].as_str().unwrap_or("-"),
@@ -79,7 +84,8 @@ impl Outcome for ListView {
                         .collect::<Vec<_>>()
                         .join(","))
                     .unwrap_or_default(),
-                r["title"].as_str().unwrap_or("")
+                r["title"].as_str().unwrap_or(""),
+                lease::stale_marker(&r["hold"])
             ));
             if self.with_description {
                 if let Some(d) = r
@@ -111,9 +117,14 @@ pub fn exec(db_path: &std::path::Path, a: ListArgs) -> Result<ListView> {
     let mut tags_by = store::tags_by_task(&conn, &ids)?;
     let mut blockers_by = store::unresolved_blockers_by_task(&conn, &ids)?;
     let mut last_event_by = store::last_event_by_task(&conn, &ids)?;
+    // One statement for the page, like every other enrichment above it: a
+    // per-row liveness query would turn a listing into an N+1, and the
+    // predicate is the same one `reclaim` breaks holds with.
+    let holds = lease::holds_by_task(&conn, &ids)?;
 
     let mut out = Vec::with_capacity(core.len());
     for row in core {
+        let hold = holds.get(&row.id);
         let obj = serde_json::json!({
             "id": row.id, "display_id": row.display_id, "title": row.title,
             "state": row.state, "tier": row.tier,
@@ -122,6 +133,8 @@ pub fn exec(db_path: &std::path::Path, a: ListArgs) -> Result<ListView> {
             "tags": tags_by.remove(&row.id).unwrap_or_default(),
             "blocked_by": blockers_by.remove(&row.id).unwrap_or_default(),
             "last_event": last_event_by.remove(&row.id),
+            "stale": hold.is_some_and(|h| h.stale),
+            "hold": hold.map(lease::Hold::to_json),
         });
         out.push(obj);
     }
