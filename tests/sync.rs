@@ -354,41 +354,6 @@ fn a_store_with_no_ledger_remote_fails_and_changes_nothing() {
 }
 
 #[test]
-fn an_authority_url_is_never_used_as_a_ledger() {
-    let tmp = tempfile::tempdir().unwrap();
-    let store = ObjectStore::start();
-    let authority = tmp.path().join("authority.git");
-    std::process::Command::new("git")
-        .args(["init", "--bare", "-q"])
-        .arg(&authority)
-        .status()
-        .unwrap();
-    let dir = tmp.path().join("solo");
-    std::fs::create_dir_all(&dir).unwrap();
-    let db = dir.join("db.sqlite");
-    qp(&db, &store).arg("init").assert().success();
-    qp(&db, &store)
-        .args(["remote", "set", "--authority", authority.to_str().unwrap()])
-        .assert()
-        .success();
-    qp(&db, &store)
-        .args(["add", "local only"])
-        .assert()
-        .success();
-
-    qp(&db, &store).arg("sync").assert().failure();
-    assert!(
-        store.keys().is_empty(),
-        "sync published despite having no ledger"
-    );
-    let refs = git(&authority, &["for-each-ref", "--format=%(refname)"]);
-    assert!(
-        refs.is_empty(),
-        "sync fell back to the authority url: {refs}"
-    );
-}
-
-#[test]
 fn a_sync_leaves_nothing_for_the_project_repo_to_commit() {
     let tmp = tempfile::tempdir().unwrap();
     let store = ObjectStore::start();

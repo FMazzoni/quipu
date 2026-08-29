@@ -40,9 +40,9 @@ and the machine name onto the assignment row in the same transaction as
 `claimed_at`. The default length is eight hours and was measured against real
 usage, not guessed — the detail is in `lease`.
 
-The length is parsed before anything moves, ahead of the authority round-trip and
-ahead of the transaction. A lease length the operator got wrong must fail with
-nothing claimed, rather than leaving a ticket held for a duration nobody meant.
+The length is parsed before anything else moves, ahead of the transaction. A
+lease length the operator got wrong must fail with nothing claimed, rather than
+leaving a ticket held for a duration nobody meant.
 
 The lease bounds how long the hold may sit **quiet**, not how long the work may
 take: every subsequent write by the holder pushes the expiry out. Nothing here

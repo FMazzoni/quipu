@@ -4,7 +4,6 @@
 //!
 #![doc = include_str!("../docs/wire-contract.md")]
 
-mod claimref;
 mod cmd;
 mod db;
 mod doctor;

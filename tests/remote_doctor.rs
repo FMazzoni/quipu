@@ -1,16 +1,15 @@
 //! `qp remote doctor` — every fault this command claims to tell apart, produced for real.
 //!
 //! Hermetic, and it has to be: the object store is an in-process
-//! `TcpListener` stub and the authority is a bare repository in a temp dir.
-//! Nothing here resolves a name, leaves loopback, or reads a credential that
-//! belongs to anybody. Every host is RFC 2606 or `127.0.0.1`.
+//! `TcpListener` stub. Nothing here resolves a name, leaves loopback, or reads
+//! a credential that belongs to anybody. Every host is RFC 2606 or
+//! `127.0.0.1`.
 //!
 //! The tests are organised by CAUSE rather than by code path, because the whole
 //! claim of this command is that two failures which look identical are reported
 //! differently. So the load-bearing assertions are the negative ones: a missing
-//! bucket must NOT be reported as a policy problem, a skewed clock must NOT be
-//! reported as a bad key, and an authority that answers `ls-remote` must NOT
-//! pass a check about writing. Each of those pairs is one mutation away from
+//! bucket must NOT be reported as a policy problem, and a skewed clock must NOT
+//! be reported as a bad key. Each of those pairs is one mutation away from
 //! collapsing, and a test that only asserts the happy phrase would not notice.
 
 mod common;
@@ -35,33 +34,37 @@ fn a_store_with_nothing_configured_is_reported_and_is_not_a_fault() {
     assert!(r.detail("config", "configured").contains("local-only"));
     // Nothing else ran, because there is nothing to check.
     assert!(
-        !r.has_target("ledger") && !r.has_target("authority"),
+        !r.has_target("ledger"),
         "an unconfigured store must not be probed: {}",
         r.text
     );
 }
 
 #[test]
-fn a_ledger_only_store_checks_the_ledger_and_says_the_authority_is_absent() {
+fn a_ledger_store_checks_the_ledger_and_nothing_else() {
     let store = ObjectStore::start();
     let s = Store::new();
     s.set_ledger(&store.url());
     let r = s.doctor_with(&store);
-    assert_eq!(r.code, 0, "a healthy ledger-only store is fine: {}", r.text);
+    assert_eq!(r.code, 0, "a healthy ledger store is fine: {}", r.text);
     assert!(r.has_target("ledger"));
-    assert!(!r.has_target("authority"));
-    assert!(r.detail("config", "configured").contains("ledger only"));
-}
-
-#[test]
-fn an_authority_only_store_checks_the_authority_and_says_the_ledger_is_absent() {
-    let s = Store::new();
-    s.set_authority(&s.bare_repo("authority"));
-    let r = s.doctor();
-    assert_eq!(r.code, 0, "{}", r.text);
-    assert!(r.has_target("authority"));
-    assert!(!r.has_target("ledger"));
-    assert!(r.detail("config", "configured").contains("authority only"));
+    assert!(r.detail("config", "configured").contains("ledger set"));
+    // The unconditional sequences still run; nothing else does.
+    let targets: std::collections::BTreeSet<String> = r.json["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["target"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        targets,
+        ["config", "ledger", "project", "registry"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<std::collections::BTreeSet<_>>(),
+        "an unexpected sequence ran: {}",
+        r.text
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -321,210 +324,6 @@ fn a_healthy_ledger_passes_list_put_and_get_and_leaves_one_flat_probe_key() {
 }
 
 // ---------------------------------------------------------------------------
-// the authority
-// ---------------------------------------------------------------------------
-
-#[test]
-fn a_bare_repository_passes_every_authority_check_and_leaves_no_ref_behind() {
-    let s = Store::new();
-    let repo = s.bare_repo("authority");
-    s.set_authority(&repo);
-    let r = s.doctor();
-    assert_eq!(r.code, 0, "{}", r.text);
-    assert_eq!(r.status("authority", "reach"), "pass");
-    assert_eq!(r.status("authority", "write"), "pass");
-    assert!(
-        refs_of(&repo).is_empty(),
-        "the write probe left a ref behind: {:?}",
-        refs_of(&repo)
-    );
-}
-
-#[test]
-fn an_authority_that_answers_reads_but_refuses_a_ref_fails_the_write_check() {
-    let s = Store::new();
-    let repo = s.bare_repo("authority");
-    // A repository that serves reads and rejects every push: exactly what a
-    // read-only account looks like, and exactly what `ls-remote` cannot see.
-    reject_pushes(&repo);
-    s.set_authority(&repo);
-    let r = s.doctor();
-    assert_eq!(r.code, 5);
-    assert_eq!(
-        r.status("authority", "reach"),
-        "pass",
-        "reading is fine here, and that is the trap: {}",
-        r.text
-    );
-    assert_eq!(r.status("authority", "write"), "fail");
-    let fix = r.remedy("authority", "write");
-    assert!(fix.contains("read-only"), "{fix}");
-    assert!(fix.contains("CREATION"), "{fix}");
-}
-
-#[test]
-fn a_local_repository_that_is_not_there_names_ownership_and_absence() {
-    let s = Store::new();
-    s.set_authority(&format!("{}/nothing-here.git", s.dir().display()));
-    let r = s.doctor();
-    assert_eq!(r.code, 5);
-    assert_eq!(r.status("authority", "reach"), "fail");
-    let fix = r.remedy("authority", "reach");
-    // The failure that sent someone looking for a missing repository that was
-    // present the whole time.
-    assert!(fix.contains("OWNERSHIP"), "{fix}");
-    assert!(fix.contains("chmod does nothing"), "{fix}");
-    assert!(fix.contains("BARE"), "{fix}");
-    // A filesystem path has no daemon, no login session and no credential, so
-    // the remedy must not send anyone to look at any of them.
-    assert!(fix.contains("filesystem path"), "{fix}");
-    for word in [
-        "authentication",
-        "credential",
-        "authorized_keys",
-        "non-interactive",
-    ] {
-        assert!(
-            !fix.to_lowercase().contains(word),
-            "a local path has no `{word}` to be wrong: {fix}"
-        );
-    }
-    assert_eq!(r.status("authority", "write"), "skipped");
-}
-
-#[test]
-fn a_refused_connection_names_the_service_the_address_and_the_network_lockout() {
-    let port = free_port();
-    let s = Store::new();
-    s.set_authority(&format!("git://127.0.0.1:{port}/authority.git"));
-    let r = s.doctor();
-    assert_eq!(r.code, 5);
-    assert_eq!(r.status("authority", "reach"), "fail");
-    let fix = r.remedy("authority", "reach");
-    assert!(fix.contains("not running"), "{fix}");
-    assert!(fix.contains("stale"), "{fix}");
-    assert!(fix.contains("quarantined"), "{fix}");
-    assert!(
-        !fix.contains("OWNERSHIP"),
-        "a refused connection is not a repository problem: {fix}"
-    );
-}
-
-#[test]
-fn an_authority_that_accepts_and_drops_the_connection_points_at_the_server() {
-    let hangup = Hangup::start();
-    let s = Store::new();
-    s.set_authority(&format!("git://127.0.0.1:{}/authority.git", hangup.port));
-    let r = s.doctor();
-    assert_eq!(r.code, 5);
-    let fix = r.remedy("authority", "reach");
-    // git prints its catch-all sentence here — the SAME text a `git://` daemon
-    // prints when it refuses a repository — so the daemon dying must be named
-    // as one of the causes rather than dropped in favour of the other reading.
-    assert!(
-        fix.contains("SERVER's log"),
-        "a daemon that answers and dies is a server-side problem, and this transport's \
-         message cannot rule it out: {fix}"
-    );
-    // And still not a credential problem: `git://` has no login to get wrong.
-    for word in ["authentication", "credential", "authorized_keys"] {
-        assert!(
-            !fix.to_lowercase().contains(word),
-            "`git://` has no login, yet the remedy says `{word}`: {fix}"
-        );
-    }
-}
-
-/// The exact failure a real `git://` authority produced, reproduced on loopback.
-///
-/// A git daemon says "access denied or repository not exported" when a
-/// repository is absent, unexported, or owned by a different user than the
-/// daemon process. There is no key, no user and no secret anywhere in a
-/// `git://` request, so a diagnosis naming a credential is confidently pointing
-/// at a subsystem that took no part in the failure — and sends the reader to
-/// inspect an ssh key while the repository sits there owned by the wrong user.
-#[test]
-fn a_git_daemon_refusing_a_repository_is_never_diagnosed_as_authentication() {
-    let daemon = ErrDaemon::start("ERR access denied or repository not exported: /authority.git");
-    let s = Store::new();
-    s.set_authority(&format!("git://127.0.0.1:{}/authority.git", daemon.port));
-    let r = s.doctor();
-    assert_eq!(r.code, 5);
-    assert_eq!(r.status("authority", "reach"), "fail");
-    let whole = format!(
-        "{} {}",
-        r.detail("authority", "reach"),
-        r.remedy("authority", "reach")
-    )
-    .to_lowercase();
-    for word in [
-        "authentication",
-        "credential",
-        "authorized_keys",
-        "password",
-        "token",
-    ] {
-        assert!(
-            !whole.contains(word),
-            "`git://` carries no login, yet the diagnosis says `{word}`:\n{whole}"
-        );
-    }
-    let fix = r.remedy("authority", "reach");
-    // The three causes this sentence actually means on this transport.
-    assert!(fix.contains("OWNERSHIP"), "{fix}");
-    assert!(fix.contains("chmod does nothing"), "{fix}");
-    assert!(fix.contains("git-daemon-export-ok"), "{fix}");
-    assert!(fix.contains("never created"), "{fix}");
-}
-
-/// A machine that forbids the git protocol is diagnosed as local policy.
-///
-/// Nothing is contacted in this case, so the far end may be perfectly healthy
-/// and every network-shaped remedy would be a wild goose chase. The environment
-/// is what changes the answer here — not the git version and not the far end —
-/// which is exactly why the other `git://` tests state the policy rather than
-/// inherit it.
-#[test]
-fn an_environment_that_forbids_the_git_protocol_is_named_as_local_policy() {
-    let port = free_port();
-    let s = Store::new();
-    s.set_authority(&format!("git://127.0.0.1:{port}/authority.git"));
-    // Every protocol EXCEPT the one the url names.
-    let r = s.doctor_with_env(&[("GIT_ALLOW_PROTOCOL", "file:ssh:http:https")]);
-    assert_eq!(r.code, 5);
-    let fix = r.remedy("authority", "reach");
-    assert!(fix.contains("GIT_ALLOW_PROTOCOL"), "{fix}");
-    assert!(
-        fix.contains("nothing was contacted"),
-        "the far end took no part in this and the remedy must say so: {fix}"
-    );
-    // The port is closed, so a classifier that ignored the policy message would
-    // reach for the network causes instead. It must not.
-    assert!(
-        !fix.contains("not running"),
-        "local policy must not be reported as the service being down: {fix}"
-    );
-}
-
-/// A port serving something that is not git gets its own answer.
-///
-/// Neither reachability nor permissions: something IS listening and talking,
-/// and it does not speak the git protocol. Before this was named, it fell
-/// through to a message that told the reader nothing.
-#[test]
-fn a_far_end_that_does_not_speak_git_is_named_as_such() {
-    let daemon = ErrDaemon::raw("HTTP/1.1 200 OK\r\n\r\n");
-    let s = Store::new();
-    s.set_authority(&format!("git://127.0.0.1:{}/authority.git", daemon.port));
-    let r = s.doctor();
-    assert_eq!(r.code, 5);
-    let fix = r.remedy("authority", "reach");
-    assert!(fix.contains("does not speak the git protocol"), "{fix}");
-    assert!(!fix.contains("OWNERSHIP"), "{fix}");
-    assert!(!fix.contains("not running"), "{fix}");
-}
-
-// ---------------------------------------------------------------------------
 // output contract
 // ---------------------------------------------------------------------------
 
@@ -534,14 +333,12 @@ fn json_carries_every_check_by_name_and_agrees_with_the_exit_code() {
     store.fail_with(403, "InvalidAccessKeyId");
     let s = Store::new();
     s.set_ledger(&store.url());
-    s.set_authority(&s.bare_repo("authority"));
     let r = s.doctor_with(&store);
     assert_eq!(r.code, 5);
     assert_eq!(r.json["ok"], Value::from(false));
     assert_eq!(r.json["local_only"], Value::from(false));
     let checks = r.json["checks"].as_array().unwrap();
     assert!(checks.iter().any(|c| c["target"] == "ledger"));
-    assert!(checks.iter().any(|c| c["target"] == "authority"));
     // Every failure carries a remedy; that is the contract, not a nicety.
     for c in checks.iter().filter(|c| c["status"] == "fail") {
         assert!(
@@ -554,9 +351,18 @@ fn json_carries_every_check_by_name_and_agrees_with_the_exit_code() {
 #[test]
 fn the_human_form_prints_a_remedy_under_each_failure() {
     let s = Store::new();
-    s.set_authority(&format!("{}/nothing-here.git", s.dir().display()));
-    let r = s.doctor();
-    assert!(r.text.contains("FAIL  reach"), "{}", r.text);
+    // A url of the right shape pointed at a port nothing is listening on: the
+    // failure is real, and it is produced without leaving loopback.
+    s.set_ledger(&format!("s3://127.0.0.1:{}/quipu-ledger", free_port()));
+    let r = s.doctor_with_env(&[
+        ("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE"),
+        (
+            "AWS_SECRET_ACCESS_KEY",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        ),
+        ("QUIPU_S3_PLAINTEXT", "1"),
+    ]);
+    assert!(r.text.contains("FAIL  endpoint"), "{}", r.text);
     assert!(r.text.contains("→"), "{}", r.text);
     assert!(r.text.contains("FAULTS FOUND"), "{}", r.text);
 }
@@ -567,7 +373,9 @@ fn the_human_form_prints_a_remedy_under_each_failure() {
 
 /// A store in its own temp dir, with the ambient environment scrubbed.
 struct Store {
-    tmp: tempfile::TempDir,
+    /// Held, never read: dropping it deletes the directory the store lives in,
+    /// so the binding is the lifetime and the underscore says so.
+    _tmp: tempfile::TempDir,
     db: std::path::PathBuf,
 }
 
@@ -575,13 +383,9 @@ impl Store {
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("db.sqlite");
-        let s = Self { tmp, db };
+        let s = Self { _tmp: tmp, db };
         s.qp().arg("init").assert().success();
         s
-    }
-
-    fn dir(&self) -> &std::path::Path {
-        self.tmp.path()
     }
 
     /// `qp` with every credential and store pointer removed from the environment.
@@ -607,19 +411,9 @@ impl Store {
             "AWS_REGION",
             "AWS_DEFAULT_REGION",
             "QUIPU_S3_PLAINTEXT",
-            "GIT_SSH_COMMAND",
-            "GIT_SSH",
         ] {
             c.env_remove(k);
         }
-        // Pin what git is allowed to speak, rather than inheriting whatever the
-        // machine happens to permit. Some environments disable the plain git
-        // protocol, and a test that measures a `git://` DIAGNOSIS gets a
-        // different one there — `fatal: transport 'git' not allowed`, which is
-        // correct behaviour and the wrong subject. Stating the policy makes
-        // these tests measure the same thing on every machine; the one test
-        // that covers a hostile policy sets its own.
-        c.env("GIT_ALLOW_PROTOCOL", "file:git:ssh:http:https");
         c
     }
 
@@ -628,25 +422,6 @@ impl Store {
             .args(["remote", "set", "--ledger", url])
             .assert()
             .success();
-    }
-
-    fn set_authority(&self, url: &str) {
-        self.qp()
-            .args(["remote", "set", "--authority", url])
-            .assert()
-            .success();
-    }
-
-    fn bare_repo(&self, name: &str) -> String {
-        let path = self.tmp.path().join(format!("{name}.git"));
-        let ok = std::process::Command::new("git")
-            .args(["init", "--bare", "-q"])
-            .arg(&path)
-            .status()
-            .expect("spawn git")
-            .success();
-        assert!(ok, "git init --bare failed");
-        path.to_str().unwrap().to_string()
     }
 
     fn doctor(&self) -> Run {
@@ -730,150 +505,4 @@ impl Run {
 fn free_port() -> u16 {
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     l.local_addr().unwrap().port()
-}
-
-/// A listener that accepts a connection and closes it without a word.
-///
-/// This is a git daemon that cannot run its own helpers: it answers, so the
-/// host is plainly up, and the client sees only a reset.
-struct Hangup {
-    port: u16,
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    addr: std::net::SocketAddr,
-}
-
-impl Hangup {
-    fn start() -> Self {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = l.local_addr().unwrap();
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let s = stop.clone();
-        std::thread::spawn(move || {
-            for c in l.incoming() {
-                if s.load(std::sync::atomic::Ordering::Relaxed) {
-                    return;
-                }
-                if let Ok(mut c) = c {
-                    // Read the request first. Closing before the client has
-                    // written turns this into a connection RESET, which git
-                    // words differently — a race that would make the test
-                    // measure whichever of the two shapes won. Both are
-                    // diagnosed identically, deliberately, but the test should
-                    // still exercise one of them on purpose.
-                    use std::io::Read;
-                    let mut buf = [0u8; 4096];
-                    let _ = c.read(&mut buf);
-                    let _ = c.shutdown(std::net::Shutdown::Both);
-                    drop(c);
-                } else {
-                    return;
-                }
-            }
-        });
-        Self {
-            port: addr.port(),
-            stop,
-            addr,
-        }
-    }
-}
-
-impl Drop for Hangup {
-    fn drop(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        let _ = std::net::TcpStream::connect(self.addr);
-    }
-}
-
-/// A stand-in git daemon that answers one request with a protocol error packet.
-///
-/// Fifteen lines rather than a real `git daemon`: the git protocol's error
-/// reply is a single pkt-line beginning `ERR `, and the client turns it into
-/// `fatal: remote error: <message>`. That is enough to reproduce the exact
-/// sentence a real daemon produced, on loopback, with no daemon to configure,
-/// no repository to own and nothing to leave running.
-struct ErrDaemon {
-    port: u16,
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    addr: std::net::SocketAddr,
-}
-
-impl ErrDaemon {
-    /// Answers with bytes that are not the git protocol at all.
-    ///
-    /// What a port serving something else — a web server, a proxy, a TLS
-    /// endpoint — looks like to a git client.
-    fn raw(bytes: &str) -> Self {
-        Self::serving(bytes.to_string())
-    }
-
-    /// A git protocol error packet: length-prefixed, four hex digits counting the prefix.
-    fn start(message: &str) -> Self {
-        Self::serving(format!("{:04x}{message}", message.len() + 4))
-    }
-
-    fn serving(packet: String) -> Self {
-        use std::io::{Read, Write};
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = l.local_addr().unwrap();
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let s = stop.clone();
-        std::thread::spawn(move || {
-            for c in l.incoming() {
-                if s.load(std::sync::atomic::Ordering::Relaxed) {
-                    return;
-                }
-                match c {
-                    Ok(mut c) => {
-                        let mut buf = [0u8; 4096];
-                        let _ = c.read(&mut buf);
-                        let _ = c.write_all(packet.as_bytes());
-                    }
-                    Err(_) => return,
-                }
-            }
-        });
-        Self {
-            port: addr.port(),
-            stop,
-            addr,
-        }
-    }
-}
-
-impl Drop for ErrDaemon {
-    fn drop(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        let _ = std::net::TcpStream::connect(self.addr);
-    }
-}
-
-/// Makes a bare repository serve reads and refuse every push.
-///
-/// A `pre-receive` hook rather than file permissions: permissions do nothing
-/// when the suite runs as root, which is how CI containers usually run, and a
-/// check that quietly stops checking is worse than no check.
-fn reject_pushes(repo: &str) {
-    let hook = std::path::Path::new(repo).join("hooks").join("pre-receive");
-    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(&hook, "#!/bin/sh\necho 'read-only mirror' >&2\nexit 1\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-}
-
-/// Every ref a repository holds, so a probe that failed to clean up is visible.
-fn refs_of(repo: &str) -> Vec<String> {
-    let out = std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(repo)
-        .args(["for-each-ref", "--format=%(refname)"])
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(str::to_string)
-        .collect()
 }

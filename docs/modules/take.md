@@ -80,11 +80,10 @@ reserved for things that actually went wrong.
 ## Boundaries
 
 `take` stops at `assigned`, exactly where `assign` stops. It does not claim, so
-the `assigned` → `running` edge — and with it the claim-authority handshake in
-`claimref.rs`, which is what makes a claim safe across machines — stays in
+the `assigned` → `running` edge — and with it the lease a claim takes — stays in
 `claim.rs`. A machine that has taken a ticket still runs `qp claim`. Folding the
-two together would put a network round-trip inside a statement whose whole value
-is that it is one local transaction.
+two together would collapse two distinct edges into one, and a caller that wants
+the first without the second would have no way to ask.
 
 Which ticket a wave *should* hand out next is not modelled here either. This
 command answers "the oldest ready one matching this filter"; anything cleverer

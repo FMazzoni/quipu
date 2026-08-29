@@ -235,86 +235,59 @@ is asking".
 Optional, and off by default. A store with no remote configured behaves exactly
 as it always has: no network, no daemon, no external service.
 
-    qp remote set --authority ssh://host.example/srv/authority.git
-    qp remote set --ledger    s3://minio.host.example/quipu-ledger
+    qp remote set --ledger s3://minio.host.example/quipu-ledger
     qp remote show
     qp remote doctor
     qp remote clear
 
-Two independent urls, either one omittable:
+One url:
 
-- **authority** — where claims are refereed. A claim is a git ref push the far
-  end either accepts or rejects, and that rejection is the mutual exclusion.
-  Reachability matters here; ticket content never crosses this url.
 - **ledger** — where the exported event log syncs, as objects in a bucket:
   `s3://<host>/<bucket>[/<prefix>]`, https implied. Content crosses it, so only
-  machines you own need to reach it. It referees nothing.
+  machines you own need to reach it. It referees nothing: claims are settled
+  locally, by one writer at a time, and never leave the machine.
 
 Credentials come from the standard `AWS_ACCESS_KEY_ID` and
 `AWS_SECRET_ACCESS_KEY` environment variables, plus `AWS_SESSION_TOKEN` when
 they are temporary. quipu never writes a credential to disk and has no config
 file for one; when they are absent it names the variables it looked for.
 
-Setting one does not require the other. Authority-only is a referee over content
-that stays local; ledger-only is backup and sync with no referee. Both are
-supported configurations.
-
 `set` writes config and stops — a remote that happens to be down right now is
 still a remote you are allowed to configure. `--check` adds an opt-in probe and
-reports what it found; it never blocks the write. The authority is probed with
-`git ls-remote` and the ledger with a listing of its own prefix, and a ledger
-probe reports the object store's own diagnosis rather than a flat "unreachable":
-absent credentials, rejected credentials, a missing bucket, a prefix outside your
-policy, a TLS trust failure and a skewed clock all want different fixes.
-`qp remote show` is likewise local unless you pass `--check`.
+reports what it found; it never blocks the write. The ledger is probed with a
+listing of its own prefix, and the probe reports the object store's own
+diagnosis rather than a flat "unreachable": absent credentials, rejected
+credentials, a missing bucket, a prefix outside your policy, a TLS trust failure
+and a skewed clock all want different fixes. `qp remote show` is likewise local
+unless you pass `--check`.
 
 ### When it does not work
 
 `--check` answers "is it there". **`qp remote doctor` answers "why is it not"**,
 which is the question that actually costs time. It runs a sequence of checks
-against whatever is configured — object storage and the claim authority both —
+against whatever is configured — the ledger, plus this store's name and the
+project registry, which are checked whether or not a remote is attached —
 stopping at the first failure, and it NAMES the cause instead of leaving you to
 reverse-engineer an error that points somewhere else.
 
-That is the whole point. A repository that is present and complete is refused by
-git's dubious-ownership check and reported to the client as missing, so you go
-looking for a repository that was there all along, and `chmod` does nothing. A
-clock a quarter of an hour out makes an object store refuse a key that was never
-wrong, and the error says nothing about time. A host that moved onto a private
-network stops answering on its old address with a refusal identical to the
-service being down. A key scoped to a prefix that cannot list looks exactly like
-a bucket that does not exist, and the two fixes are opposite.
+That is the whole point. A clock a quarter of an hour out makes an object store
+refuse a key that was never wrong, and the error says nothing about time. A host
+that moved onto a private network stops answering on its old address with a
+refusal identical to the service being down. A key scoped to a prefix that
+cannot list looks exactly like a bucket that does not exist, and the two fixes
+are opposite.
 
 So each result says what was checked, what happened, and — on failure — what to
 actually do. Where a check genuinely cannot separate two causes it names both
 rather than guessing. It is the only command here that writes to a remote: it
-creates and deletes a probe ref on the authority, because a claim is a ref
-creation and a read-only probe proves nothing about whether one will ever work.
-`--json` gives the same report with a stable name per check. Exit 0 when nothing
-failed, 5 when something did, so it can gate a setup script.
+PUTs one fixed probe key and reads it back, because a policy can grant a listing
+and refuse a write, and sync needs both. `--json` gives the same report with a
+stable name per check. Exit 0 when nothing failed, 5 when something did, so it
+can gate a setup script.
 
-**`qp remote clear` is the escape hatch, not a convenience.** A configured but
-unreachable authority makes a claim fail rather than fall back, precisely
-because clearing exists as the deliberate way to get unblocked. Bare
-`qp remote clear` clears both urls; `--authority` or `--ledger` clears one.
-
-### ssh multiplexing
-
-This concerns the claim authority alone — it is the only git remote left, since
-the ledger moved to object storage. Where the authority is reached over ssh,
-quipu sets `GIT_SSH_COMMAND` on the git child it spawns, enabling `ControlMaster` with a socket under the store's own
-directory. This is measured, not cosmetic: a claim costs ~2400 ms against a
-hosted remote without multiplexing and ~16 ms with it.
-
-The socket is keyed by the acting agent's id, which matters. Multiplexing helps
-*sequential* claims and breaks *bursts* — ten concurrent pushes through one
-shared master all fail, because sshd's `MaxSessions` counts the master
-alongside its channels. Keying by agent means one agent working through a queue
-reuses its own connection, while a wave of ten agents gets ten independent
-connections, which is the arrangement measured to work.
-
-To opt out: an existing `GIT_SSH_COMMAND` in the environment is never
-overwritten, and `QUIPU_SSH_MULTIPLEX=0` disables the injection entirely.
+**`qp remote clear` is the escape hatch, not a convenience.** It is the
+deliberate, recorded way back to a local-only store. Bare `qp remote clear`
+clears everything; `--ledger` names the url it means.
 
 ## Exporting the ledger
 
@@ -421,9 +394,9 @@ storage grew as the square of the number of projects — a handful is nothing, a
 few hundred is tens of gigabytes per machine. Partial clone was tested against a
 real daemon and the filter was ignored; sparse checkout only hides objects the
 pack still holds. A GET names one prefix, so a store reads its own project and a
-project nobody has touched in a year costs nothing. Claims did **not** move: the
-authority is still git, because the atomic ref compare-and-swap is what makes a
-claim a claim.
+project nobody has touched in a year costs nothing. Claims are not in the ledger
+at all: mutual exclusion between writers is settled locally, by one writer
+holding the store's write lock, and is not content to be replicated.
 
 **It never runs by itself.** No write syncs, nothing refreshes in the
 background, and no other command grows a network dependency because this one
@@ -447,12 +420,6 @@ key as well, because a prefix says where an object was filed and a header says
 what it is — and the header wins. Batches written before project keys existed are
 matched as the store that wrote them, never as a wildcard, so an old ledger still
 reaches its own machines and nobody else's.
-
-**It never touches `refs/quipu/claims/*`.** Claims are the authority's business
-and travel by the claim path. That is why the authority and the ledger are two
-separate urls: `sync` is given the ledger one and denied the other. Mirroring
-claim refs would create a second referee, and mutual exclusion with two referees
-is not mutual exclusion.
 
 **Nothing is mirrored locally.** A sync downloads what is new into a temp
 directory that removes itself, so it never leaves a file you could accidentally
@@ -511,9 +478,9 @@ attribute a ticket without guessing.
   read command asks. A machine that dies leaves its ticket held until its lease
   lapses and somebody looks.
 - Single SQLite per machine. `qp export`, `qp import` and `qp sync` are the
-  interchange format, its reader and the transfer between machines. The claim
-  authority url is still unused — the claim-over-git path is to come, and there
-  is no command yet to settle a marked conflict.
+  interchange format, its reader and the transfer between machines. Claims are
+  settled per store, so two machines can both hold the same logical ticket until
+  their ledgers meet — and there is no command yet to settle a marked conflict.
 - A ledger containing pre-fidelity history (any store written before the event
   log recorded every write) cannot be fully restored — permanently, not pending
   a fix, and the shortfall cannot even be enumerated. `qp import` warns on every
