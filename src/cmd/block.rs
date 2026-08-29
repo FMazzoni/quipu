@@ -154,6 +154,12 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
                 .ok();
             let state_ok = matches!(cur_state.as_deref(), Some("assigned") | Some("running"));
             if !state_ok {
+                // A task that left `running` under this agent's feet is usually
+                // one whose hold was reclaimed. Say so by name before falling
+                // back to the state-shaped message.
+                if let Some(e) = crate::lease::dispossessed(tx, task_id, &a.agent)? {
+                    return Err(e);
+                }
                 return Err(db::conflict(
                     "not_blockable",
                     format!(
@@ -163,6 +169,11 @@ pub fn run(db_path: &std::path::Path, a: BlockArgs) -> Result<()> {
                     ),
                     Some(resolved.display_id.clone()),
                 ));
+            }
+            // A holder that was dispossessed while it was away is told so by
+            // name, rather than being handed the generic "not yours".
+            if let Some(e) = crate::lease::dispossessed(tx, task_id, &a.agent)? {
+                return Err(e);
             }
             return Err(db::not_owner(
                 format!("{} is not yours to block", a.task),

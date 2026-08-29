@@ -32,3 +32,19 @@ task appears to still belong to the agent that dropped it.
 Claiming stamps `claimed_at` on the assignment row. `complete` rejects an
 assignment whose `claimed_at` is null with `not_claimed`, so `assign` straight to
 `complete` fails rather than quietly working.
+
+## The lease
+
+Claiming takes a lease: `lease::take` stamps `last_contact`, the lease *length*,
+and the machine name onto the assignment row in the same transaction as
+`claimed_at`. The default length is eight hours and was measured against real
+usage, not guessed — the detail is in `lease`.
+
+The length is parsed before anything moves, ahead of the authority round-trip and
+ahead of the transaction. A lease length the operator got wrong must fail with
+nothing claimed, rather than leaving a ticket held for a duration nobody meant.
+
+The lease bounds how long the hold may sit **quiet**, not how long the work may
+take: every subsequent write by the holder pushes the expiry out. Nothing here
+enforces it — expiry is evaluated on read, because nothing in quipu runs on a
+timer.

@@ -8,7 +8,7 @@ use predicates::str::contains;
 /// migrating, not on any particular number, so a version bump belongs here and
 /// nowhere else in this file. If a bump makes some other test fail, that test
 /// found a real migration bug — do not chase it back to a literal.
-const CURRENT_SCHEMA_VERSION: &str = "6";
+const CURRENT_SCHEMA_VERSION: &str = "7";
 
 #[test]
 fn cancel_terminates_task_unblocks_dependents() {
@@ -71,7 +71,13 @@ fn reclaim_force_releases_without_agent_id() {
         .assert()
         .success();
     qp(&db)
-        .args(["reclaim", "QP-1", "--reason", "agent unresponsive"])
+        .args([
+            "reclaim",
+            "QP-1",
+            "--reason",
+            "agent unresponsive",
+            "--force",
+        ])
         .assert()
         .success();
     qp(&db)
@@ -101,7 +107,13 @@ fn reclaim_returns_to_pending_when_unresolved_dep_exists() {
         .assert()
         .success();
     qp(&db)
-        .args(["reclaim", "QP-2", "--reason", "agent unresponsive"])
+        .args([
+            "reclaim",
+            "QP-2",
+            "--reason",
+            "agent unresponsive",
+            "--force",
+        ])
         .assert()
         .success();
     // Should be pending now — assign rejected.
@@ -339,7 +351,7 @@ fn open_assignment_implies_assigned_or_running() {
             vec!["assign", "QP-6", "--to", "a"],
             vec!["claim", "QP-6", "--as", "a"],
             vec!["depends", "QP-6", "--on", "QP-3", "--as", "a"],
-            vec!["reclaim", "QP-6", "--reason", "r"],
+            vec!["reclaim", "QP-6", "--reason", "r", "--force"],
             vec!["depends", "QP-6", "--on", "QP-3", "--rm"],
         ],
     ];
@@ -464,6 +476,9 @@ fn qp(db: &std::path::Path) -> Command {
 fn qp_bare() -> Command {
     let mut c = Command::cargo_bin("qp").unwrap();
     c.env_remove("QP_DB");
+    // Pin the machine name a claim records, for the same reason `QP_DB` is
+    // scrubbed: a test must not describe the machine it happens to run on.
+    c.env("QP_HOST", "host.invalid");
     c
 }
 
@@ -4407,7 +4422,12 @@ fn claim_echoes_canonical_id_for_mixed_case_input() {
         .assert()
         .success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert_eq!(s, "QP-1 claimed by bob\n");
+    // Prefix, not equality: the line also states when the hold goes stale, and
+    // what this test is about is the canonical id being echoed back.
+    assert!(
+        s.starts_with("QP-1 claimed by bob"),
+        "expected the canonical id echoed back, got: {s:?}"
+    );
 }
 
 #[test]
@@ -4431,7 +4451,12 @@ fn zero_padded_id_resolves_identically_across_show_claim_depends() {
         .assert()
         .success();
     let s = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert_eq!(s, "QP-1 claimed by bob\n");
+    // Prefix, not equality: the line also states when the hold goes stale, and
+    // what this test is about is the canonical id being echoed back.
+    assert!(
+        s.starts_with("QP-1 claimed by bob"),
+        "expected the canonical id echoed back, got: {s:?}"
+    );
 
     qp(&db)
         .args(["depends", "QP-002", "--on", "QP-01"])
@@ -4582,7 +4607,9 @@ fn json_reclaim_emits_bare_object() {
         .assert()
         .success();
     let assert = qp(&db)
-        .args(["reclaim", "QP-1", "--reason", "timeout", "--json"])
+        .args([
+            "reclaim", "QP-1", "--reason", "timeout", "--force", "--json",
+        ])
         .assert()
         .success();
     let v = json_stdout(&assert);
@@ -7737,4 +7764,404 @@ fn explicit_db_at_a_missing_path_fails_rather_than_creating() {
     // ...and `init` with the same path is how you actually mean it.
     qp(&db).arg("init").assert().success();
     assert!(db.exists());
+}
+
+// ---------------------------------------------------------------------------
+// Claim liveness.
+//
+// A TTL bounds how long a ticket may sit QUIET while held, not how long the
+// work may take — every write by the holder pushes the expiry out. Said twice
+// because every reader gets it wrong on the first pass: a slice that runs long
+// is not at risk; a slice whose machine died is.
+//
+// Time is made testable by writing `last_contact` into the past directly rather
+// than by sleeping or by injecting a clock. That is available precisely because
+// the schema stores the lease *length* alongside the last contact: move the
+// contact back further than the length and the hold has expired, with no wait
+// and nothing mocked.
+// ---------------------------------------------------------------------------
+
+/// Rewind a task's open hold so its stored lease has run out.
+fn age_hold(db: &std::path::Path, task_id: i64, seconds_ago: i64) {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let n = conn
+        .execute(
+            "UPDATE assignment
+                SET last_contact = strftime('%Y-%m-%dT%H:%M:%fZ','now', ?1)
+              WHERE task_id = ?2 AND completed_at IS NULL",
+            rusqlite::params![format!("-{seconds_ago} seconds"), task_id],
+        )
+        .unwrap();
+    assert_eq!(n, 1, "expected exactly one open hold to age");
+}
+
+fn hold_of(db: &std::path::Path, task: &str) -> serde_json::Value {
+    let assert = qp(db).args(["show", task, "--json"]).assert().success();
+    json_stdout(&assert)["hold"].clone()
+}
+
+#[test]
+fn a_fresh_claim_is_live_and_a_lapsed_one_is_stale() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x", "--for", "45m"])
+        .assert()
+        .success();
+
+    let hold = hold_of(&db, "QP-1");
+    assert_eq!(hold["agent"], "x");
+    assert_eq!(hold["stale"], false, "a fresh claim is not stale: {hold}");
+    assert_eq!(hold["lease_seconds"], 2_700);
+    // The machine is named, not just the role: `x` is a role every box reuses.
+    assert_eq!(hold["host"], "host.invalid");
+    assert!(hold["expires_at"].is_string());
+
+    // Past its stated length, and nothing had to notice in the meantime —
+    // expiry is evaluated when someone asks.
+    age_hold(&db, 1, 46 * 60);
+    assert_eq!(hold_of(&db, "QP-1")["stale"], true);
+
+    // And it is legible in the view an orchestrator already reads.
+    let assert = qp(&db).args(["wave", "--json"]).assert().success();
+    let v = json_stdout(&assert);
+    assert_eq!(v["running"][0]["display_id"], "QP-1");
+    assert_eq!(v["running"][0]["stale"], true);
+    qp(&db)
+        .args(["wave"])
+        .assert()
+        .success()
+        .stdout(contains("STALE"));
+}
+
+#[test]
+fn a_write_by_the_holder_pushes_the_expiry_out() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x", "--for", "45m"])
+        .assert()
+        .success();
+
+    // Quiet for longer than the lease: stale.
+    age_hold(&db, 1, 46 * 60);
+    assert_eq!(hold_of(&db, "QP-1")["stale"], true);
+
+    // One ordinary write by the holder, and the hold is live again — this is
+    // why a ticket that takes days but is written against never goes stale.
+    qp(&db)
+        .args(["log", "QP-1", "note", "still working", "--as", "x"])
+        .assert()
+        .success();
+    assert_eq!(hold_of(&db, "QP-1")["stale"], false);
+
+    // Renewal is not specific to `log`: it rides on the event insert every
+    // write goes through, so `tag` renews too.
+    age_hold(&db, 1, 46 * 60);
+    qp(&db)
+        .args(["tag", "QP-1", "--as", "x", "add", "prio:high"])
+        .assert()
+        .success();
+    assert_eq!(hold_of(&db, "QP-1")["stale"], false);
+}
+
+#[test]
+fn a_hold_with_no_stated_expiry_never_goes_stale() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+
+    // The shape every open claim written before leases existed is in: no length
+    // and no contact stamp. The only safe reading is that it is unbreakable.
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE assignment SET lease_seconds = NULL, last_contact = NULL
+              WHERE completed_at IS NULL",
+            [],
+        )
+        .unwrap();
+    }
+    let hold = hold_of(&db, "QP-1");
+    assert_eq!(
+        hold["stale"], false,
+        "a claim with no stated expiry never expires"
+    );
+    assert!(hold["expires_at"].is_null());
+
+    // So reclaiming it still takes the operator saying so.
+    qp(&db)
+        .args(["reclaim", "QP-1", "--reason", "r"])
+        .assert()
+        .failure()
+        .code(2);
+    qp(&db)
+        .args(["reclaim", "QP-1", "--reason", "r", "--force"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn a_lease_length_without_a_unit_suffix_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+
+    // A bare number is ambiguous in exactly the way that sets a lease to eight
+    // seconds when eight hours was meant, so it is refused rather than guessed.
+    for bad in ["8", "", "8hours", "0h", "-1h"] {
+        let assert = qp(&db)
+            .args(["claim", "QP-1", "--as", "x", "--for", bad, "--json"])
+            .assert()
+            .failure()
+            .code(1);
+        assert_eq!(json_stderr(&assert)["error"]["kind"], "invalid_input");
+    }
+    // Nothing was claimed on the way through.
+    assert!(hold_of(&db, "QP-1").is_null());
+    for good in ["30s", "45m", "8h", "2d"] {
+        qp(&db)
+            .args(["claim", "QP-1", "--as", "x", "--for", good])
+            .assert()
+            .success();
+        qp(&db)
+            .args(["abandon", "QP-1", "--as", "x", "--reason", "r"])
+            .assert()
+            .success();
+        qp(&db)
+            .args(["assign", "QP-1", "--to", "x"])
+            .assert()
+            .success();
+    }
+}
+
+#[test]
+fn reclaiming_a_stale_hold_lands_where_a_manual_reclaim_would() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x", "--for", "45m"])
+        .assert()
+        .success();
+    age_hold(&db, 1, 46 * 60);
+
+    let assert = qp(&db)
+        .args(["reclaim", "QP-1", "--reason", "machine gone", "--json"])
+        .assert()
+        .success();
+    let v = json_stdout(&assert);
+    // Same destination as the manual path: `pending`, promoted to `ready` when
+    // nothing blocks it, with the assignment closed as `reclaimed`.
+    assert_eq!(v["state"], "ready");
+    assert_eq!(v["forced"], false);
+    assert!(hold_of(&db, "QP-1").is_null(), "the hold is gone");
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "y"])
+        .assert()
+        .success();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let outcome: String = conn
+        .query_row(
+            "SELECT outcome FROM assignment WHERE agent_id = 'x'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(outcome, "reclaimed");
+}
+
+#[test]
+fn reclaiming_a_live_hold_needs_the_force_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x", "--for", "8h"])
+        .assert()
+        .success();
+
+    let assert = qp(&db)
+        .args(["reclaim", "QP-1", "--reason", "impatience", "--json"])
+        .assert()
+        .failure()
+        .code(2);
+    let env = json_stderr(&assert);
+    assert_eq!(env["error"]["code"], "hold_is_live");
+    // The refusal names who holds it and where, which is the whole reason the
+    // machine is recorded on the row.
+    let msg = env["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("`x`"), "refusal must name the holder: {msg}");
+    assert!(msg.contains("host.invalid"), "and the machine: {msg}");
+    // The ticket did not move.
+    qp(&db)
+        .args(["show", "QP-1", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""state":"running""#));
+
+    // The manual override stays — it just stops being the only option.
+    qp(&db)
+        .args(["reclaim", "QP-1", "--reason", "operator says so", "--force"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn a_dispossessed_holder_is_told_by_name_on_its_next_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x", "--for", "45m"])
+        .assert()
+        .success();
+    age_hold(&db, 1, 46 * 60);
+    qp(&db)
+        .args(["reclaim", "QP-1", "--reason", "stale"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "y"])
+        .assert()
+        .success();
+
+    // The machine comes back. Every write it tries is refused, by name, and
+    // told not to retry — this is the headline failure arriving through the
+    // back door, so it must not surface as a vague state error.
+    for args in [
+        vec!["log", "QP-1", "note", "back from the dead", "--as", "x"],
+        vec!["complete", "QP-1", "--as", "x"],
+        vec!["abandon", "QP-1", "--as", "x", "--reason", "r"],
+        vec!["block", "QP-1", "--as", "x", "--new", "b"],
+    ] {
+        let mut with_json = args.clone();
+        with_json.push("--json");
+        let assert = qp(&db).args(&with_json).assert().failure().code(2);
+        let env = json_stderr(&assert);
+        let msg = env["error"]["message"].as_str().unwrap_or_default();
+        assert_eq!(
+            env["error"]["kind"], "not_owner",
+            "`qp {}` must be a not_owner, not a retryable conflict: {env}",
+            args[0]
+        );
+        assert!(
+            msg.contains("`x`") && msg.contains("QP-1"),
+            "`qp {}` must name the dispossessed holder and the ticket: {msg}",
+            args[0]
+        );
+    }
+
+    // And the ticket was left alone: still assigned to the new holder, with no
+    // blocker minted by the refused `block`.
+    let assert = qp(&db).args(["show", "QP-1", "--json"]).assert().success();
+    let v = json_stdout(&assert);
+    assert_eq!(v["state"], "assigned");
+    assert_eq!(v["agent"], "y");
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let tasks: i64 = conn
+        .query_row("SELECT count(*) FROM task", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(tasks, 1, "a refused write must not leave a blocker behind");
+}
+
+/// The liveness columns must reach stores that already exist, not just fresh
+/// ones — and must land empty, so a claim taken before leases existed keeps the
+/// only safe reading: no stated expiry, never expires.
+#[test]
+fn existing_store_gains_the_liveness_columns_on_migration() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success();
+    qp(&db)
+        .args(["assign", "QP-1", "--to", "x"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "x"])
+        .assert()
+        .success();
+    // Rewind to a store built by a binary from before the columns existed.
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE assignment DROP COLUMN last_contact;
+             ALTER TABLE assignment DROP COLUMN lease_seconds;
+             ALTER TABLE assignment DROP COLUMN holder_host;
+             UPDATE meta SET value = '6' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+    }
+
+    // Any command goes through `open()`, which must migrate the store forward.
+    qp(&db).args(["list"]).assert().success();
+
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    for col in ["last_contact", "lease_seconds", "holder_host"] {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('assignment') WHERE name = ?1",
+                [col],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "existing store must gain assignment.{col}");
+    }
+    let v: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key='schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(v, CURRENT_SCHEMA_VERSION);
+    // The pre-existing hold is unbreakable, because it never stated an expiry.
+    assert_eq!(hold_of(&db, "QP-1")["stale"], false);
+    qp(&db)
+        .args(["reclaim", "QP-1", "--reason", "r"])
+        .assert()
+        .failure()
+        .code(2);
 }

@@ -270,7 +270,10 @@ fn reclaim_releases_the_ref() {
         .assert()
         .success();
 
-    qp(&db).args(["reclaim", "QP-1"]).assert().success();
+    qp(&db)
+        .args(["reclaim", "QP-1", "--force"])
+        .assert()
+        .success();
     assert!(claim_refs(&authority).is_empty());
 }
 
@@ -727,7 +730,10 @@ fn replica(src: &Path, root: &Path, name: &str, authority: &str, agent: &str) ->
         .args(["remote", "set", "--authority", authority])
         .assert()
         .success();
-    qp(&db).args(["reclaim", "QP-1"]).assert().success();
+    qp(&db)
+        .args(["reclaim", "QP-1", "--force"])
+        .assert()
+        .success();
     qp(&db)
         .args(["assign", "QP-1", "--to", agent])
         .assert()

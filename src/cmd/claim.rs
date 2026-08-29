@@ -3,7 +3,7 @@
 #![doc = include_str!("../../docs/modules/claim.md")]
 
 use crate::outcome::{emit, Outcome};
-use crate::{claimref, db, id};
+use crate::{claimref, db, id, lease};
 use anyhow::Result;
 use clap::Args;
 use serde::Serialize;
@@ -13,6 +13,10 @@ pub struct ClaimArgs {
     pub task: String,
     #[arg(long = "as")]
     pub agent: String,
+    /// How long this hold may sit quiet before it reads as stale. A unit
+    /// suffix is required: 30s, 45m, 8h, 2d. Defaults to 8h.
+    #[arg(long = "for")]
+    pub ttl: Option<String>,
     #[arg(long)]
     pub json: bool,
 }
@@ -22,14 +26,25 @@ struct Claimed {
     display_id: String,
     agent_id: String,
     state: String,
+    expires_at: Option<String>,
 }
 impl Outcome for Claimed {
     fn human(&self) -> String {
-        format!("{} claimed by {}", self.display_id, self.agent_id)
+        match &self.expires_at {
+            Some(e) => format!(
+                "{} claimed by {} (stale if quiet past {})",
+                self.display_id, self.agent_id, e
+            ),
+            None => format!("{} claimed by {}", self.display_id, self.agent_id),
+        }
     }
 }
 
 pub fn run(db_path: &std::path::Path, a: ClaimArgs) -> Result<()> {
+    // Parsed before anything else moves: a lease length the operator got wrong
+    // must fail with nothing claimed, not leave a ticket held under a length
+    // nobody meant.
+    let ttl = lease::parse_ttl(a.ttl.as_deref().unwrap_or(lease::DEFAULT_TTL))?;
     let mut conn = db::open(db_path)?;
     let resolved = id::resolve_full(&conn, &a.task)?;
     let task_id = resolved.id;
@@ -39,11 +54,13 @@ pub fn run(db_path: &std::path::Path, a: ClaimArgs) -> Result<()> {
     let local = db::with_tx(&mut conn, |tx| {
         // Latest open assignment must be (a) for this agent (b) un-claimed.
         let Some(open) = db::current_assignment(tx, task_id)? else {
-            return Err(db::conflict(
-                "no_open_assignment",
+            return Err(db::no_open_assignment(
+                tx,
+                task_id,
+                &resolved.display_id,
+                Some(&a.agent),
                 format!("{} has no assignment", a.task),
-                Some(resolved.display_id.clone()),
-            ));
+            )?);
         };
         let aid = open.id;
         if open.claimed_at.is_some() {
@@ -82,6 +99,9 @@ pub fn run(db_path: &std::path::Path, a: ClaimArgs) -> Result<()> {
             "UPDATE assignment SET claimed_at = ? WHERE id = ?",
             rusqlite::params![crate::time::now_rfc3339(), aid],
         )?;
+        // The lease starts with the hold. Stamped before the event below, so
+        // the renewal that rides on `insert_event` has a lease to renew.
+        lease::take(tx, aid, ttl)?;
         // `from` is a literal: the guarded UPDATE above matched `assigned` only.
         db::insert_state_change(
             tx,
@@ -105,12 +125,14 @@ pub fn run(db_path: &std::path::Path, a: ClaimArgs) -> Result<()> {
         }
         return Err(e);
     }
+    let expires_at = lease::hold_of(&conn, task_id)?.and_then(|h| h.expires_at);
     emit(
         a.json,
         &Claimed {
             display_id: resolved.display_id,
             agent_id: a.agent,
             state: "running".to_string(),
+            expires_at,
         },
     )
 }

@@ -66,3 +66,11 @@ Nothing in the binary reads the tag back. `cmd::wave` classifies a task as
 blocked from unresolved dep edges alone (`store::unresolved_blockers_by_task`),
 which is why choosing a different tag cannot desync the wave view. The tag is
 purely a `qp list --tag` filter handle for whatever skill is driving.
+
+## A holder that was dispossessed
+
+Both refusal paths — the task no longer being in flight, and the open assignment
+belonging to somebody else — first ask whether this agent's own hold was closed
+by a `reclaim`, and say so by name if it was. A reclaimed ticket is by far the
+likeliest reason `block` finds the world rearranged under an agent's feet, and a
+state-shaped message there tells the agent nothing it can act on.
