@@ -6,6 +6,7 @@ The url is a row in the `meta` table:
 
 ```text
 meta(key='remote.ledger', value=<url>)
+meta(key='remote.server', value=<url>)
 ```
 
 `meta` already holds `project_uuid`, `schema_version` and `display_prefix`, so
@@ -40,10 +41,29 @@ handed it. It is scheme-blind on purpose.
 beside that one rather than loosening this one — the refusal has to be able to
 name the form the caller should have typed, and a single merged check cannot.
 
+`validate_server_url` is the second layer, added exactly that way: the same
+shallow check first, then `client::check_url`. It delegates rather than
+restating, so there is one opinion in the tree about when plaintext is
+acceptable — a url that validated here and was then refused at call time would
+be a diagnostic that lies. Each still refuses the other's form outright, and
+that is what makes a wrong-kind url a URL fault instead of a reachability one:
+an `s3://` url accepted into the front-door slot would be reported as an
+unreachable server, which is the confident wrong answer in a new costume.
+
 ## Reachability
 
-`probe` is the only function here that touches the network, and only `--check`
-calls it. It LISTs the ledger's own prefix: the cheapest question that
+`probe` and `probe_server` are the only functions here that touch the network,
+and only `--check` and `qp remote doctor` call them.
+
+`probe_server` is one `GET /healthz` and nothing else, because that is the only
+question a front door answers about itself. Its three outcomes are three
+different fixes: nothing answered, something answered that is not a quipu front
+door, or a front door answered and named what it opened at startup. The health
+endpoint refuses a project parameter by contract, so "does it serve X" is
+answered by comparing its list locally — which is also why `ServerReach::Alive`
+carries the list rather than a boolean.
+
+`probe` is the ledger's. It It LISTs the ledger's own prefix: the cheapest question that
 exercises credentials, trust, the bucket and the policy in one round trip, and
 one whose failure the object store *names*, so `Reach::Fault` can carry the
 diagnosis instead of flattening everything into "could not reach it".
