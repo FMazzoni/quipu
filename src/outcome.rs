@@ -75,7 +75,7 @@ mod tests {
     use crate::cmd::log::Logged;
     use crate::cmd::project::{ListOutcome, LookupOutcome, RegisterOutcome, UnregisterOutcome};
     use crate::cmd::reclaim::Reclaimed;
-    use crate::cmd::relation::{RelationAdded, RelationRemoved};
+    use crate::cmd::relation::{RelationAdded, RelationOutcome, RelationRemoved};
     use crate::cmd::remote::{RemoteCleared, RemoteSet, RemoteShow};
     use crate::cmd::sync::SyncOutcome;
     use crate::cmd::tag::Tagged;
@@ -118,6 +118,7 @@ mod tests {
         Reclaimed,
         RegisterOutcome,
         RelationAdded,
+        RelationOutcome,
         RelationRemoved,
         RemoteCleared,
         RemoteSet,

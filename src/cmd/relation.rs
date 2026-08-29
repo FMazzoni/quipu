@@ -2,25 +2,33 @@
 //!
 #![doc = include_str!("../../docs/modules/relation.md")]
 
-use crate::outcome::{emit, Outcome};
+use crate::outcome::Outcome;
 use crate::{db, id};
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RelationArgs {
     #[command(subcommand)]
     pub op: RelOp,
 }
 
-#[derive(Subcommand, Debug)]
+/// The chosen op, externally tagged so the body reads `{"op":{"add":{...}}}`.
+///
+/// Lower-cased to match what the caller types. `--json` is skipped on every
+/// variant for the same reason it is skipped on every other args struct: it is
+/// a property of the invoking terminal and never crosses the socket.
+#[derive(Subcommand, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase", deny_unknown_fields)]
 pub enum RelOp {
     Add {
         from: String,
         kind: String,
         to: String,
         #[arg(long)]
+        #[serde(skip)]
         json: bool,
     },
     Rm {
@@ -28,13 +36,26 @@ pub enum RelOp {
         kind: String,
         to: String,
         #[arg(long)]
+        #[serde(skip)]
         json: bool,
     },
     List {
         task: String,
         #[arg(long)]
+        #[serde(skip)]
         json: bool,
     },
+}
+
+impl crate::route::Served for RelationArgs {
+    const VERB: &'static str = "relation";
+    type Out = RelationOutcome;
+    fn wants_json(&self) -> bool {
+        self.json()
+    }
+    fn exec(db_path: &std::path::Path, a: Self) -> Result<Self::Out> {
+        exec(db_path, a)
+    }
 }
 
 impl RelationArgs {
@@ -96,15 +117,89 @@ impl Outcome for RelationRemoved {
     }
 }
 
-pub fn run(db_path: &std::path::Path, a: RelationArgs) -> Result<()> {
+/// One route, three ops — because a `Served` impl is per args-struct.
+///
+/// `relation` is a subcommand group, and the group is what the CLI dispatches
+/// on: `route::is_served` matches `Cmd::Relation(_)`, so the group is served
+/// whole or not at all. Serving only `add`/`rm` would leave `relation list`
+/// running against whatever store happens to be on the *client's* disk — which,
+/// for a caller pointed at a front door, is usually no store at all. That is
+/// the failure the wire contract keeps `remote`'s subtree whole to avoid,
+/// arrived at from the other side.
+///
+/// `untagged`, so each variant is on the wire as the bare object it already
+/// was. An externally-tagged enum would wrap every payload in `{"Added": ...}`
+/// and break every existing `--json` consumer for nothing. The three shapes are
+/// distinguishable by their required fields, which is what makes `untagged`
+/// safe here rather than merely convenient.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum RelationOutcome {
+    Added(RelationAdded),
+    Removed(RelationRemoved),
+    Listed(RelationListed),
+}
+
+/// Hand-written because `#[default]` only takes unit variants: the registry in
+/// `outcome.rs` needs a sample of every payload, and this one wraps a struct.
+#[cfg(test)]
+impl Default for RelationOutcome {
+    fn default() -> Self {
+        RelationOutcome::Added(RelationAdded::default())
+    }
+}
+
+impl Outcome for RelationOutcome {
+    fn human(&self) -> String {
+        match self {
+            RelationOutcome::Added(o) => o.human(),
+            RelationOutcome::Removed(o) => o.human(),
+            RelationOutcome::Listed(o) => o.human(),
+        }
+    }
+}
+
+/// Both directions of one task's relation edges.
+#[derive(Serialize, Deserialize, Default)]
+pub(crate) struct RelationListed {
+    outgoing: Vec<Outgoing>,
+    incoming: Vec<Incoming>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Outgoing {
+    to: String,
+    kind: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Incoming {
+    from: String,
+    kind: String,
+}
+
+impl RelationListed {
+    /// The arrows the CLI has always printed, as one block.
+    ///
+    /// Not an `impl Outcome`: the registry in `outcome.rs` is the set of
+    /// payloads that cross the wire on their own, and this one only ever
+    /// travels inside [`RelationOutcome`].
+    fn human(&self) -> String {
+        let mut lines = Vec::new();
+        for o in &self.outgoing {
+            lines.push(format!("→ {} {}", o.kind, o.to));
+        }
+        for i in &self.incoming {
+            lines.push(format!("← {} {}", i.kind, i.from));
+        }
+        lines.join("\n")
+    }
+}
+
+pub fn exec(db_path: &std::path::Path, a: RelationArgs) -> Result<RelationOutcome> {
     let mut conn = db::open(db_path)?;
     match a.op {
-        RelOp::Add {
-            from,
-            kind,
-            to,
-            json,
-        } => {
+        RelOp::Add { from, kind, to, .. } => {
             if kind.is_empty() {
                 return Err(db::invalid_input("relation kind required"));
             }
@@ -128,22 +223,14 @@ pub fn run(db_path: &std::path::Path, a: RelationArgs) -> Result<()> {
                     Ok(false)
                 }
             })?;
-            emit(
-                json,
-                &RelationAdded {
-                    from_display_id: f.display_id,
-                    to_display_id: t.display_id,
-                    kind,
-                    added,
-                },
-            )?;
+            Ok(RelationOutcome::Added(RelationAdded {
+                from_display_id: f.display_id,
+                to_display_id: t.display_id,
+                kind,
+                added,
+            }))
         }
-        RelOp::Rm {
-            from,
-            kind,
-            to,
-            json,
-        } => {
+        RelOp::Rm { from, kind, to, .. } => {
             let f = id::resolve_full(&conn, &from)?;
             let t = id::resolve_full(&conn, &to)?;
             let removed = db::with_tx(&mut conn, |tx| -> Result<bool> {
@@ -164,19 +251,16 @@ pub fn run(db_path: &std::path::Path, a: RelationArgs) -> Result<()> {
                     Ok(false)
                 }
             })?;
-            emit(
-                json,
-                &RelationRemoved {
-                    from_display_id: f.display_id,
-                    to_display_id: t.display_id,
-                    kind,
-                    removed,
-                },
-            )?;
+            Ok(RelationOutcome::Removed(RelationRemoved {
+                from_display_id: f.display_id,
+                to_display_id: t.display_id,
+                kind,
+                removed,
+            }))
         }
-        RelOp::List { task, json } => {
+        RelOp::List { task, .. } => {
             let task_id = id::resolve(&conn, &task)?;
-            let outgoing: Vec<serde_json::Value> = {
+            let outgoing: Vec<Outgoing> = {
                 let mut s = conn.prepare(
                     "SELECT t.display_id, r.kind FROM relation r
                        JOIN task t ON t.id = r.to_task_id
@@ -184,14 +268,15 @@ pub fn run(db_path: &std::path::Path, a: RelationArgs) -> Result<()> {
                 )?;
                 let x = s
                     .query_map([task_id], |r| {
-                        Ok(serde_json::json!({
-                            "to": r.get::<_, String>(0)?, "kind": r.get::<_, String>(1)?
-                        }))
+                        Ok(Outgoing {
+                            to: r.get(0)?,
+                            kind: r.get(1)?,
+                        })
                     })?
                     .collect::<Result<_, _>>()?;
                 x
             };
-            let incoming: Vec<serde_json::Value> = {
+            let incoming: Vec<Incoming> = {
                 let mut s = conn.prepare(
                     "SELECT t.display_id, r.kind FROM relation r
                        JOIN task t ON t.id = r.from_task_id
@@ -199,33 +284,18 @@ pub fn run(db_path: &std::path::Path, a: RelationArgs) -> Result<()> {
                 )?;
                 let x = s
                     .query_map([task_id], |r| {
-                        Ok(serde_json::json!({
-                            "from": r.get::<_, String>(0)?, "kind": r.get::<_, String>(1)?
-                        }))
+                        Ok(Incoming {
+                            from: r.get(0)?,
+                            kind: r.get(1)?,
+                        })
                     })?
                     .collect::<Result<_, _>>()?;
                 x
             };
-            let bundle = serde_json::json!({"outgoing": outgoing, "incoming": incoming});
-            if json {
-                println!("{}", serde_json::to_string(&bundle)?);
-            } else {
-                for o in &outgoing {
-                    println!(
-                        "→ {} {}",
-                        o["kind"].as_str().unwrap(),
-                        o["to"].as_str().unwrap()
-                    );
-                }
-                for i in &incoming {
-                    println!(
-                        "← {} {}",
-                        i["kind"].as_str().unwrap(),
-                        i["from"].as_str().unwrap()
-                    );
-                }
-            }
+            Ok(RelationOutcome::Listed(RelationListed {
+                outgoing,
+                incoming,
+            }))
         }
     }
-    Ok(())
 }
