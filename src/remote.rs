@@ -3,7 +3,8 @@
 #![doc = include_str!("../docs/modules/remote_config.md")]
 
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use std::path::Path;
 
 /// `meta` key holding the ledger sync url.
 pub const KEY_LEDGER: &str = "remote.ledger";
@@ -47,6 +48,42 @@ fn read_key(conn: &Connection, key: &str) -> Result<Option<String>> {
         .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
         .optional()?;
     Ok(v.filter(|s| !s.is_empty()))
+}
+
+/// The recorded front door, read without opening the store the ordinary way.
+///
+/// This is the third precedence tier behind `--server` and `QP_SERVER`, and it
+/// runs on every invocation of a served verb that named neither, so what it
+/// costs is the whole of what a recorded default costs. Hence the shape:
+/// a `stat`, a read-only `sqlite3_open`, one primary-key lookup on `meta`, and
+/// a close. It deliberately does **not** go through [`crate::db::open`], which
+/// runs the migration probes — a resolution step that migrated the store before
+/// deciding whether to talk to it at all would pay the expensive half of the
+/// thing it exists to avoid.
+///
+/// A path that is not there is `None` rather than an error: `resolve_path`
+/// answers "where would the store be" even on a machine that has none, and the
+/// answer to "is there a front door recorded there" is then no.
+///
+/// Every other failure propagates. Swallowing them would be the exact
+/// silent-wrong-store shape the attach check exists to prevent, from the
+/// opposite direction: an unreadable `meta` would resolve to "no front door",
+/// the command would then open the same file read-write and usually succeed,
+/// and a configured machine would answer from the local store while looking
+/// configured to `qp remote doctor`.
+pub fn recorded_server(db_path: &Path) -> Result<Option<String>> {
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    // Read-only, and deliberately not `OpenFlags::default()`: that carries
+    // `SQLITE_OPEN_URI`, under which a store path spelled like a URI would be
+    // reinterpreted as one. Resolution must address the same bytes on disk that
+    // `db::open` is about to.
+    let conn = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    read_key(&conn, KEY_SERVER)
 }
 
 /// Upserts one url. Config only — no network, no validation of the far end.

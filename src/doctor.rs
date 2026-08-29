@@ -1036,9 +1036,14 @@ fn server_unreachable_remedy(url: &str) -> String {
          (2) it is running on a different address or port than {url} names;\n\
          (3) this machine cannot reach that host at all — a network or firewall answer, \
          byte-identical to the other two from here.\n\
-         Nothing is broken in the store either way: clear the url with \
-         `qp remote clear --front-door` and every command keeps working against the file on this \
-         disk."
+         The store on this disk is intact either way, and reading it is still one command \
+         away — but clearing the url is not the first thing to reach for. Since the recorded \
+         url became the default front door, `qp remote clear --front-door` does not just \
+         restore a local read: it re-points every future command at this file, and a store \
+         that has been fronted is a store other machines have been writing to, so what it \
+         then answers is whatever was last synced here. That is a stale read that looks \
+         exactly like success. Fix the cause above first. Clear the url only when this store \
+         is deliberately going back to local-only, which is a decision and not a workaround."
     )
 }
 

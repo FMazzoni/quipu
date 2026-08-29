@@ -309,8 +309,11 @@ main.rs      clap subcommand enum → dispatch. Routing only.
 ```
 
 `route.rs`, `wire.rs` and `client.rs` are the front door and are inert without
-it: with no `--server` set, nothing in them runs, and `qp serve` is an optional
-process that no CLI path depends on. The server is an HTTP front door for stores
+one: unless a front door is named — `--server`, `QP_SERVER`, or the url the
+store itself records under `remote.server` — nothing in `wire.rs` or `client.rs`
+runs, and `qp serve` is an optional process that no CLI path depends on. A store
+that records nothing is the default and pays one read-only `meta` lookup to
+establish it. The server is an HTTP front door for stores
 that already exist — not a source of truth and not a lock manager. Serialisation
 comes from `BEGIN IMMEDIATE` inside SQLite and always has, which is why a
 concurrent `qp` in a terminal remains correct against a store that is being

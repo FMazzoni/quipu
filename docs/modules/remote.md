@@ -43,9 +43,51 @@ The collision is a mercy rather than an obstacle, because the two flags mean
 different things and the shared name would have hidden it. Global `--server`
 routes THIS invocation through a front door and is not remembered. `remote set
 --front-door` records the front door the store is reached through and sends
-nothing anywhere. Nothing reads the recorded url as a default for the global
-flag today — `qp remote doctor` is its first and only reader — and making it one
-is a change to every verb's dispatch, not to this command.
+nothing anywhere.
+
+*Retracted: "nothing reads the recorded url as a default for the global flag
+today".* That was true when this page was written and the sentence went on to
+say what it would take to change — "a change to every verb's dispatch, with
+precedence tiers to reason about". It was, and it has been made. The recorded
+url is now the third of four tiers in `resolve_server`: an explicit `--server`
+first, `QP_SERVER` second, this url third, and a local open last. The reason to
+make it is the reason this retraction is worth keeping: a setting that only a
+diagnostic reads is decorative on the one path that matters, so a machine could
+look configured to `qp remote doctor` while every command quietly answered from
+the store on its own disk — the silent-wrong-store failure the attach check
+exists to prevent, arriving from the opposite direction.
+
+**What this does not do, said plainly because a green `qp remote doctor` will
+otherwise be read as saying it does: it cannot configure a machine that has no
+store.** The url is a `meta` row, so reading it needs the store file, and the
+machine the front door exists for is the one without it. There, the channel is
+still `QP_SERVER` in the environment — plus `--project` when the front door
+holds more than one store — and that is a first-class, supported way to run a
+client, not a workaround. Tier 3 buys something narrower and still worth having:
+the machine that *does* hold the store stops being the one machine that reads it
+directly, so a coordinator and its agents are looking at one board rather than
+at a file and a socket.
+
+The registry is where a storeless machine's url would go — `registry.rs` is a
+real per-machine file with an entry per project, and a purely additive field
+there needs no version bump. It is left for its own slice: a registry entry and
+a store that disagree is a fourth precedence tier with its own answer, and
+`qp project register` and the doctor's sequence both grow a surface with it.
+
+What did **not** change is the sentence above it. The two flags still mean
+different things, still cannot share a name, and the global one still wins: a
+url typed on the command line is the override, and a store cannot outrank it.
+
+The consequence to be clear-eyed about: in a store with a front door recorded,
+`qp list` goes over the network where it used to read the file beside it. That
+is the intent — one board rather than N — and it means a server that is down
+turns a working local command into `unavailable`, exit 7. That is the right
+trade, because a stale read from a store the operator stopped meaning looks
+exactly like success and nothing downstream can tell. The way back is
+`qp remote clear --front-door`, and it works from a machine whose front door is
+unreachable *because* `remote` is unserved: resolution never consults the
+recorded url for a verb the front door does not answer, so `show`, `doctor` and
+`clear` are structurally incapable of needing the thing they diagnose.
 
 ## Local-only is the default and a first-class state
 

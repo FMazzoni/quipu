@@ -248,10 +248,14 @@ Two urls, unrelated to each other:
   machines you own need to reach it. It referees nothing: claims are settled
   locally, by one writer at a time, and never leave the machine.
 - **front door** — the `qp serve` process this store is reached through:
-  `https://<host>[:<port>]`, or `http://` to a loopback literal only. Recorded
-  here so `qp remote doctor` can diagnose it. It is spelled `--front-door`
-  because the global `--server` flag, which routes a single invocation through a
-  front door without remembering it, already owns that name.
+  `https://<host>[:<port>]`, or `http://` to a loopback literal only. Once
+  recorded, every served verb in this store goes through it with no flag: it is
+  the third of four tiers, behind an explicit `--server` and `QP_SERVER` and
+  ahead of opening the store locally. `qp remote doctor` diagnoses it, and
+  `qp remote clear --front-door` is the way back to a local read. It is spelled
+  `--front-door` because the global `--server` flag, which routes a single
+  invocation through a front door without remembering it, already owns that
+  name.
 
 A store may have both, either, or neither. Neither is local-only, which is the
 default and a fully supported state.
@@ -479,9 +483,15 @@ attribute a ticket without guessing.
 
 `qp serve` fronts stores that already exist with an HTTP listener, in the
 foreground, so that a machine which cannot reach the store file can still act on
-it. Four verbs are served today — `add`, `assign`, `claim`, `complete` — and the
-client sends them when `--server` (or `QP_SERVER`) is set; everything else runs
-locally exactly as before. A `--project` naming a store the server did not open
+it. The client sends a served verb through a front door when one is named, in
+this order: `--server` on the command line, then `QP_SERVER` in the environment,
+then the url this store recorded with `qp remote set --front-door`. With none of
+the three, and for every verb the front door does not answer, the store on this
+disk is opened exactly as before.
+
+**On a machine with no store, the channel is `QP_SERVER`** — the recorded url
+lives in the store, so there is nothing to read there. Add `--project` when the
+front door holds more than one store; one naming a store the server did not open
 at startup is `no_store`, exit 6.
 
 **The server is not the writer.** Serialisation comes from `BEGIN IMMEDIATE`
@@ -503,7 +513,10 @@ reach the port can act as any agent — which is no worse than anything that can
 write the file, and is exactly why the bind default is loopback and `http://` is
 refused for any host that is not a loopback literal. To reach it from elsewhere,
 put a reverse proxy in front that terminates TLS and speaks plaintext to
-loopback.
+loopback; that proxy is your authentication boundary, and one that asks for no
+credential has added encryption rather than authentication. Widening the bind is
+not the alternative — it publishes every served verb, unauthenticated, on every
+interface. `docs/process-contract.md` works the whole arrangement through.
 
 Startup is fail-fast: every project is resolved and opened before the listener
 binds, so a misconfiguration is a failed process with a message rather than one

@@ -32,6 +32,11 @@
 //! 7. **An empty queue is not a failure.** `take` chooses, and choosing nothing
 //!    is exit 0 with a null payload and a 200 on the status line. A poller that
 //!    read "no work" as "something broke" would retry forever.
+//! 7. **The reach path is refused where it must be.** A plaintext url to a host
+//!    that is not a loopback literal never opens a socket, and the message
+//!    names the remedy — a TLS terminator in front — because the move an
+//!    operator makes instead is to widen the bind, which publishes an
+//!    unauthenticated write endpoint.
 
 use assert_cmd::Command;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -1626,4 +1631,247 @@ fn stalled_request_bodies_do_not_wedge_the_front_door() {
         after.stderr
     );
     drop(stalled);
+}
+
+// ---------------------------------------------------------------------------
+// the recorded front door as a default
+// ---------------------------------------------------------------------------
+
+/// Runs `qp <args> --json` against `db` with no `QP_SERVER` in the environment.
+///
+/// Distinct from `local` in two ways that both matter here. Nothing on the
+/// command line or in the environment names a front door, so the store's own
+/// recorded url is the only thing that can route the call. And the cwd is the
+/// store's own project directory, so `warn_on_project_mismatch` has nothing to
+/// say — which is what lets these cases assert that stderr is *empty* rather
+/// than that it merely lacks one particular line. Run from the quipu checkout
+/// with a `QP_DB` elsewhere, every one of them would carry that unrelated
+/// warning and the assertion would be about nothing.
+fn unflagged(db: &Path, args: &[&str]) -> Run {
+    let dir = db.parent().and_then(Path::parent).expect("<dir>/.quipu/db");
+    run(
+        std::process::Command::new(qp_bin())
+            .current_dir(dir)
+            .env("QP_DB", db)
+            .env_remove("QP_SERVER"),
+        args,
+    )
+}
+
+/// Records `url` as this store's front door.
+fn record_front_door(db: &Path, url: &str) {
+    let r = local(db, &["remote", "set", "--front-door", url]);
+    assert_eq!(r.code, 0, "recording the front door failed: {}", r.stderr);
+}
+
+/// All four precedence tiers, each one beating the one below it.
+///
+/// Three front doors over one store, told apart by their access logs rather
+/// than by their answers: every one of them serves the same file, so the
+/// *output* is identical whichever answered and only the log says which did.
+/// That is the whole reason this test costs three processes.
+#[test]
+fn the_front_door_precedence_is_flag_then_env_then_store_then_local() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = store(tmp.path());
+    let flagged = Server::start_with(&db, &["--access-log"]);
+    let envd = Server::start_with(&db, &["--access-log"]);
+    let recorded = Server::start_with(&db, &["--access-log"]);
+    record_front_door(&db, &recorded.url);
+
+    // Tier 1: the flag beats the environment, which beats the store.
+    let r = run(
+        std::process::Command::new(qp_bin())
+            .env("QP_DB", &db)
+            .env("QP_SERVER", &envd.url)
+            .args(["--server", &flagged.url]),
+        &["list"],
+    );
+    assert_eq!(r.code, 0, "flagged list failed: {}", r.stderr);
+    assert_eq!(settled_requests_to(&flagged, "/v1/list"), 1);
+    assert_eq!(requests_to(&envd, "/v1/list"), 0, "the flag must win");
+    assert_eq!(requests_to(&recorded, "/v1/list"), 0, "the flag must win");
+
+    // Tier 2: the environment beats the store.
+    let r = run(
+        std::process::Command::new(qp_bin())
+            .env("QP_DB", &db)
+            .env("QP_SERVER", &envd.url),
+        &["list"],
+    );
+    assert_eq!(r.code, 0, "env list failed: {}", r.stderr);
+    assert_eq!(settled_requests_to(&envd, "/v1/list"), 1);
+    assert_eq!(
+        requests_to(&recorded, "/v1/list"),
+        0,
+        "QP_SERVER must beat the recorded url"
+    );
+
+    // Tier 3: the store's own recorded url, with nothing else naming one.
+    let r = unflagged(&db, &["list"]);
+    assert_eq!(r.code, 0, "unflagged list failed: {}", r.stderr);
+    assert_eq!(
+        settled_requests_to(&recorded, "/v1/list"),
+        1,
+        "a recorded front door must route a served verb with no flag at all"
+    );
+
+    // Tier 4: clear it, and the same command reads the file beside it again.
+    let cleared = unflagged(&db, &["remote", "clear", "--front-door"]);
+    assert_eq!(cleared.code, 0, "clear failed: {}", cleared.stderr);
+    let r = unflagged(&db, &["list"]);
+    assert_eq!(r.code, 0, "local list failed: {}", r.stderr);
+    assert_eq!(
+        settled_requests_to(&recorded, "/v1/list"),
+        1,
+        "`remote clear --front-door` must get you back to the local read"
+    );
+}
+
+/// A store that records nothing behaves exactly as it did before this existed.
+///
+/// The byte-identical half of the claim, not just the exit code: a store with
+/// no front door must not acquire a warning, a stderr line, or a different
+/// payload for the cost of a resolution step that finds nothing.
+#[test]
+fn a_store_with_no_recorded_front_door_is_unchanged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = read_fixture(tmp.path());
+    for args in [
+        ["list"].as_slice(),
+        ["status"].as_slice(),
+        ["show", "QP-2"].as_slice(),
+    ] {
+        let r = unflagged(&db, args);
+        assert_eq!(r.code, 0, "{args:?} failed: {}", r.stderr);
+        assert_eq!(r.stderr, "", "{args:?} must say nothing on stderr");
+        assert!(r.payload().is_object() || r.payload().is_array());
+    }
+}
+
+/// A verb the front door does not answer stays local, and does not complain.
+///
+/// The recorded url is read only for a served verb, so an unserved one never
+/// pays the lookup and never changes behaviour. `warn_unserved` keys on the
+/// explicit flag for exactly this reason: a configured store must not print
+/// "this ran against the local store" on every `qp remote show`, which is how a
+/// warning becomes something people filter out.
+#[test]
+fn an_unserved_verb_with_a_recorded_front_door_stays_local_and_silent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = store(tmp.path());
+    let srv = Server::start_with(&db, &["--access-log"]);
+    record_front_door(&db, &srv.url);
+    unflagged(&db, &["add", "one task"]);
+
+    let shown = unflagged(&db, &["remote", "show"]);
+    assert_eq!(shown.code, 0, "remote show failed: {}", shown.stderr);
+    assert_eq!(shown.payload()["server"], srv.url);
+    assert_eq!(shown.stderr, "", "an unserved verb must not warn");
+
+    let out = tmp.path().join("export");
+    let exported = unflagged(&db, &["export", "--out", out.to_str().unwrap()]);
+    assert_eq!(exported.code, 0, "export failed: {}", exported.stderr);
+    assert_eq!(exported.stderr, "", "an unserved verb must not warn");
+
+    // The served `add` above is the only thing this server should have seen.
+    assert_eq!(settled_requests_to(&srv, "/v1/"), 1);
+}
+
+/// A recorded front door that is down is exit 7, never a quiet local read.
+///
+/// This is the failure the whole slice is aimed at: with a default in place a
+/// command that used to read the file beside it now goes over a socket, and a
+/// server that is down must turn that into a loud transport failure rather than
+/// an answer from a store the operator stopped meaning. A stale local read that
+/// looks like it worked is strictly worse than an error, because nothing
+/// downstream can tell.
+#[test]
+fn a_recorded_front_door_that_is_down_is_a_transport_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = store(tmp.path());
+    let url = {
+        let srv = Server::start(&db);
+        srv.url.clone()
+    }; // dropped: killed, and its port is free again
+    record_front_door(&db, &url);
+    // Prove the store would have had an answer, so exit 7 is a refusal to give
+    // the wrong one rather than an empty store answering.
+    local(&db, &["add", "a task only the local store knows about"]);
+
+    let r = unflagged(&db, &["list"]);
+    assert_eq!(
+        r.code,
+        7,
+        "a dead front door is exit 7: {r:?}",
+        r = r.stderr
+    );
+    assert_eq!(r.kind().as_deref(), Some("unavailable"));
+    assert_eq!(
+        r.stdout.trim(),
+        "",
+        "nothing may be printed from the local store"
+    );
+}
+
+/// The diagnosis still runs when the thing it diagnoses is down.
+///
+/// `qp remote doctor` is the escape hatch, so it must be structurally incapable
+/// of needing the front door it is reporting on. It is unserved, so resolution
+/// never consults the recorded url for it; what it reports is exit 5 and a
+/// named fault, never exit 7.
+#[test]
+fn remote_doctor_still_diagnoses_a_front_door_that_is_down() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = store(tmp.path());
+    let url = {
+        let srv = Server::start(&db);
+        srv.url.clone()
+    };
+    record_front_door(&db, &url);
+
+    let r = unflagged(&db, &["remote", "doctor"]);
+    assert_eq!(
+        r.code, 5,
+        "doctor reports a fault with its own code, not exit 7: {}",
+        r.stderr
+    );
+    let body = r.payload().to_string();
+    assert!(
+        body.contains(&url),
+        "the diagnosis must name the url it probed: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// the reach path
+// ---------------------------------------------------------------------------
+
+/// The operator-facing refusal, with the remedy in it.
+///
+/// `client.rs` unit-tests the rule; what this covers is the path an operator
+/// actually walks — a plaintext url off loopback typed at a prompt, the way
+/// they type it, failing the way the process contract's reach-path section says
+/// it will. The message has to name the way forward, because the wrong move
+/// (widen the bind) is the one that looks like the fix.
+///
+/// `host.invalid` is RFC 2606 and cannot resolve, and the refusal happens in
+/// `check_url` before a socket is opened, so nothing here touches a network in
+/// either the passing or the failing case.
+#[test]
+fn a_plaintext_url_off_loopback_is_refused_and_names_the_remedy() {
+    let mut c = std::process::Command::new(qp_bin());
+    c.env("QP_SERVER", "http://host.invalid:8787")
+        .env("QP_DB", "/nonexistent/quipu/db.sqlite");
+    let r = run(&mut c, &["claim", "QP-1", "--as", "w-a"]);
+
+    assert_eq!(r.code, 1, "`invalid_input` is exit 1: {:?}", r.stderr);
+    assert_eq!(r.kind().as_deref(), Some("invalid_input"), "{:?}", r.stderr);
+    for phrase in ["https", "terminate", "TLS", "loopback"] {
+        assert!(
+            r.stderr.contains(phrase),
+            "the refusal must name the remedy; `{phrase}` missing from {:?}",
+            r.stderr
+        );
+    }
 }

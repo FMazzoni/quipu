@@ -550,14 +550,157 @@ cover one short transaction.
 Binding to `127.0.0.1` is not decoration: the wire contract's identity section
 says `--as` is unvalidated free text, so anything that can reach the port can
 act as any agent. A non-loopback bind is a deliberate act that needs
-authentication in front of it, and there is none yet.
+authentication in front of it, and there is none yet. The next section is that
+sentence worked all the way through, because "how does a second machine reach
+this" is the question the unit above otherwise leaves an operator to answer by
+guessing.
+
+## 8. The reach path
+
+The reason this process exists at all is several machines, each running agents,
+working different tickets in one project. That requires a second machine to
+reach the front door. **Exactly one arrangement makes it possible, nothing in
+the flags hints at it, and an operator meets it first as a refusal** — which is
+the failure this section is here to fix.
+
+**Decision: `qp` never carries a request over a plaintext link that leaves the
+machine. The listener stays on loopback and encryption is terminated by
+something in front of it. The supported arrangement is a TLS-terminating
+reverse proxy on the serving host, with remote clients pointed at an `https://`
+url.**
+
+Nothing new is built for this; the arrangement falls out of three facts that are
+already in the tree and are worth checking rather than taking on trust:
+
+- **The bind default is loopback.** `ServeArgs::bind` in `cmd/serve.rs` defaults
+  to `127.0.0.1:8787`, and its own doc comment gives the reason: `--as` is
+  unvalidated free text.
+- **The client refuses plaintext off loopback.** `client::check_url` rejects
+  `http://` to any host that is not a loopback literal, delegating to
+  `s3::is_loopback_literal` so there is one opinion in this codebase about when
+  plaintext is acceptable rather than two. The recorded front-door url goes
+  through the same gate — `remote::validate_server_url` calls `check_url` — so a
+  url that stores clean is a url that will be called.
+- **A name that merely resolves to loopback does not count.**
+  `is_loopback_literal` accepts `127.0.0.0/8`, `::1` and the literal `localhost`
+  and nothing else. A DNS answer is attacker-influenceable, so "points at
+  127.0.0.1 right now" is not a security property.
+
+Compose them and there is one shape left: the remote client's url is `https://`,
+so something in front of the process must answer TLS, and that something speaks
+plaintext to `127.0.0.1:8787`. The `qp serve` unit above does not change — the
+proxy is the part that holds the certificate and the external interface.
+
+**There is no override.** No flag and no environment variable turns the client's
+refusal off; `check_url` has no bypass, and the harness variable that lets `s3`
+talk plaintext to a loopback test endpoint cannot reach it. That is deliberate:
+the refusal is the only thing standing between an unauthenticated write endpoint
+and a network, so it must not have a switch.
+
+**An SSH forward is the same arrangement, not an exception to it.**
+`ssh -L 8787:127.0.0.1:8787 <serving-host>` leaves the client typing
+`http://127.0.0.1:8787`, which is a genuine loopback literal on the client's own
+machine, and leaves the bytes on the wire encrypted by ssh. The invariant holds
+exactly as written — plaintext only ever crosses loopback — and the
+authentication is ssh's. It is the ad-hoc answer for one operator at a keyboard;
+the reverse proxy is the answer for a deployment, because it is the one a
+supervisor can start and a fleet of agents can share.
+
+### Authentication: read this before you expose the port
+
+**The server authenticates nobody, and this is the moment to decide whether that
+is acceptable, rather than after the port is open.**
+
+The position, stated deliberately rather than left as an omission:
+
+- **The process has no notion of a caller.** No credential is read, no header is
+  inspected, no peer is identified. `cmd/serve.rs` reads exactly one thing off a
+  request that is not the body: the url. There is no token to configure and none
+  is planned in this document.
+- **Whatever fronts it is the authentication boundary.** The reverse proxy, the
+  ssh daemon, the network the port is on — one of those is deciding who gets to
+  the socket, and if none of them is, nothing is.
+- **A caller that reaches the port is trusted completely.** It may name any
+  agent on any ticket: claim as someone else, complete someone else's work,
+  reclaim a live lease. `--as` is a string the caller chose.
+
+**The line, and it is a sharp one.** This is acceptable exactly as long as
+everyone who can reach the front door is someone you would hand a writable copy
+of the store file to. The server grants no authority the file does not already
+grant — that is the honest version of "no worse than the file" — but it grants
+it *at a distance*, to whoever the network lets through, and the set of people
+who can open a TCP connection is not the set of people who can open a file on
+your disk. A single owner running agents on machines they own is on the safe
+side of that line. A shared host, a team, a network with a guest, a proxy that
+takes no credential: all on the other side, and crossing it is not a
+configuration change but a decision that this project has not built the
+mechanism for. **If you cannot name every principal that can reach the port,
+do not open it.**
+
+The consequence for the proxy is one sentence, and it is the one operators skip:
+**a TLS-terminating proxy that requires no credential has not added
+authentication.** It has added encryption, which stops the network reading
+traffic in flight, and it has satisfied `check_url`, which was never a claim
+about who the caller is. Terminating TLS and forwarding everything is a
+correctly-encrypted anonymous write endpoint.
+
+### The arrangement that must not ship
+
+`qp serve --bind 0.0.0.0:8787`, with remote clients on `http://<host>:8787`.
+
+Say it plainly because it is the *first* thing an operator reaches for, and they
+reach for it at exactly the wrong moment: the client has just refused their url,
+the refusal mentions the host, and changing the bind looks like the fix. It is
+not the fix and it is not even a fix — the refusal is client-side and keyed on
+the host in the url, so a wider bind does not make `http://<host>` acceptable.
+It only removes the second of the two guards while leaving the first one
+refusing.
+
+What that bind actually publishes is an unauthenticated write endpoint for every
+served verb, in the clear, on every interface. Every ticket in every project the
+process opened can be read, claimed, edited and completed by anything that can
+route a packet to it, under any agent name it likes, and the store's event log
+will faithfully record the agent name the attacker chose. There is no
+credential to guess, because there is no credential.
+
+So: if a client refused your url, the answer is a terminator in front of the
+process, never a wider bind. The bind stays on `127.0.0.1`.
+
+### The forward-compatible shape survived implementation
+
+The wire contract separated *asserted* identity from an *authenticated
+principal* and required that they never share a field, because that separation
+is the whole of what makes adding authentication additive later. It survived,
+and it is worth recording as checked rather than assumed:
+
+- **Asserted identity is a body field and only a body field.** `--as` is
+  `#[arg(long = "as")] pub agent: String` on the args struct, serialised into
+  the request body by `route::fetch` along with the rest of the arguments.
+- **The server never infers it.** `cmd/serve.rs` reads no request header at all
+  — the only `Header` in the file is the `Content-Type` it writes on the way
+  out — and consults no OS user, environment variable or peer address. There is
+  no code path by which `agent` arrives from anywhere but the explicit field,
+  which is precisely the rule the wire contract said a later slice would be
+  tempted to break.
+- **The header namespace is untouched and free.** Nothing reads one, so an
+  `Authorization` header can be added without changing the meaning of any
+  existing field, and an unauthenticated build simply has no principal to check.
+
+Adding authentication is therefore still the additive change it was designed to
+be: a credential on the request, a principal derived from it, and a policy
+relating that principal to the `agent` values it may assert. The body stays
+exactly as it is.
 
 ## What this contract does not settle
 
 - **The `serve` verb itself** — its flags, its listener, its HTTP layer. This
   document constrains that code; it does not write it.
-- **Authentication.** The wire contract's identity section owns it.
-- **TLS termination.** Also the wire contract; "terminate in a reverse proxy
-  that speaks plaintext to loopback" remains a legitimate answer.
+- **An authentication mechanism.** §8 settles the *position* — the process
+  authenticates nobody and whatever fronts it is the boundary — and the wire
+  contract's identity section settles the *shape* a credential would take when
+  one is built. Neither builds one, and this document does not propose one.
+- **How to configure a TLS terminator.** §8 fixes that there must be one and
+  what it must not omit; which proxy, which certificate authority and which
+  renewal mechanism are the operator's, exactly like the choice of supervisor.
 - **Backups.** The store is a SQLite file and the existing `export` / `sync`
   path is the answer; nothing about running a server changes it.
