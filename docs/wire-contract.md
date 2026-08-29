@@ -353,6 +353,18 @@ a read endpoint changes latency, not semantics.
 Neither should become a streaming endpoint under this contract. Server-sent
 events or long-polling wants an async runtime, and CLAUDE.md forbids one.
 
+**Implemented as: a third bucket in the routing table, and a refusal before the
+poll existed.** This section describes the destination correctly and understates
+what the interval between here and there cost. `wait` and `watch` are neither
+served nor local-only, so `route::is_served` — which gates the attach check, the
+recorded-url tier of `resolve_server`, and `warn_unserved` — answered `false`
+for them, and every one of those gates then treated an invocation pointed at a
+front door as an ordinary local one. The result was a measured silent wrong
+answer: `qp wait --tag wave:1 --empty` against a front door holding six open
+tickets exited 0 in seven milliseconds, having polled the store on the client's
+own disk. `route::is_client_poll` is the third bucket, and it is the thing this
+section's two bullet points needed and did not name.
+
 ## 4. Collateral state changes
 
 **Decision: any served verb whose transaction writes a `state_change` for a

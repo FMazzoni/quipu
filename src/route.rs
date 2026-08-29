@@ -174,6 +174,26 @@ served! {
     Wave => crate::cmd::wave::WaveArgs,
 }
 
+/// Whether this command reaches a front door by polling a served endpoint.
+///
+/// A third category, and the reason it exists: `wait` and `watch` are neither
+/// served nor local-only. They have no route of their own — the wire contract
+/// forbids a streaming endpoint, which is what a server-side barrier would
+/// need — but they are not answerable from the store on this disk either when
+/// the operator has named a front door. They reach it the way a client does,
+/// by polling `list` and `timeline`, so every gate in `real_main` that asks
+/// "does this invocation talk to a server" has to say yes for them: the attach
+/// check must not refuse a storeless client, `resolve_server` must consult the
+/// recorded url, and `warn_unserved` must not fire.
+///
+/// Keeping them out of [`ROUTES`] is deliberate and not an oversight. A row
+/// here would make the front door answer `/v1/wait`, and answering it means
+/// blocking a worker for the length of a barrier — which is the whole worker
+/// pool at four concurrent waits.
+pub(crate) fn is_client_poll(cmd: &crate::Cmd) -> bool {
+    matches!(cmd, crate::Cmd::Wait(_) | crate::Cmd::Watch(_))
+}
+
 /// The handler for a verb, or `None` if the front door does not answer it.
 pub(crate) fn lookup(verb: &str) -> Option<Handler> {
     ROUTES.iter().find(|r| r.verb == verb).map(|r| r.handler)

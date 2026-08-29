@@ -375,6 +375,55 @@ fn warn_unserved(json: bool) {
     }
 }
 
+/// Refuses a poll that would have answered from the wrong store. Exit 1.
+///
+/// **The bug this closes, stated as the orchestrator sees it.** `wait` and
+/// `watch` have no route, so with a front door resolved they polled the store
+/// on *this* disk — where a cohort the operator never filed is trivially empty.
+/// `qp wait --tag wave:1 --empty` returned 0 in seven milliseconds against a
+/// front door holding six open tickets, and an orchestrator branching on that
+/// exit code proceeds to the next phase with every one of them still open.
+/// Stdout is empty in both the true and the false case, so the only signal was
+/// prose on a stderr that orchestration scripts routinely discard.
+///
+/// Three things about the shape, each of which was a choice:
+///
+/// - **It refuses rather than warns.** `warn_unserved` is right for `export`
+///   and `sync`: those name a path on the caller's disk, so running locally is
+///   what the operator meant and the warning says which store answered. A
+///   barrier has no such reading — its whole output is an exit code, and an
+///   exit code cannot carry a caveat.
+/// - **It keys on the *resolved* front door, not on the explicit flag.** The
+///   recorded-url tier is exactly the case that produced no warning at all:
+///   `resolve_server` did not consult it for an unserved verb, so a configured
+///   store answered locally in complete silence. `is_client_poll` puts these
+///   two verbs on the served side of that gate, which is what makes a recorded
+///   url reach this refusal.
+/// - **It runs before the attach check**, so a storeless client and a client
+///   that holds a store get the same answer. The betrayed case is the second
+///   one — a storeless client already got `no_store` — and two different exit
+///   codes for one misconfiguration is a distinction nothing downstream wants.
+fn refuse_client_poll(cmd: &Cmd, base: &str) -> anyhow::Error {
+    let (verb, wrong) = match cmd {
+        Cmd::Wait(_) => (
+            "wait",
+            "the cohort you named is trivially empty there, so the barrier \
+             releases in milliseconds with every ticket still open",
+        ),
+        _ => (
+            "watch",
+            "its event log is a different log, so the tail is indistinguishable \
+             from a real one and is not the front door's",
+        ),
+    };
+    db::invalid_input(format!(
+        "`qp {verb}` is not served, and a front door is configured at `{base}`. \
+         Answering would mean polling the store on this disk instead, and {wrong}. \
+         Point at the store you mean: unset `--server`/`QP_SERVER`, or run \
+         `qp remote clear --front-door` if this store records one."
+    ))
+}
+
 /// The front door this invocation talks to, in four tiers.
 ///
 /// ```text
@@ -449,7 +498,7 @@ fn resolve_server(
     if explicit.is_some() {
         return Ok(explicit);
     }
-    if !route::is_served(cmd) {
+    if !route::is_served(cmd) && !route::is_client_poll(cmd) {
         return Ok(None);
     }
     remote::recorded_server(db_path)
@@ -475,7 +524,14 @@ fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
     // A client pointed at a front door has no store on this disk and must not
     // be refused for lacking one. `route::is_served` is generated from the same
     // list the dispatch arms below use, so the two cannot drift apart.
-    let remote = server.is_some() && route::is_served(&cli.cmd);
+    let remote = server.is_some() && (route::is_served(&cli.cmd) || route::is_client_poll(&cli.cmd));
+    // Before the attach check, so the refusal is the same answer whether or not
+    // this machine happens to hold a store. See `refuse_client_poll`.
+    if let Some(base) = server.as_deref() {
+        if route::is_client_poll(&cli.cmd) {
+            return Err(refuse_client_poll(&cli.cmd, base));
+        }
+    }
     if needs_store(&cli.cmd) && !remote {
         db::require_attached(&db_path, cli.db.is_some())?;
     }

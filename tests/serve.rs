@@ -1658,6 +1658,23 @@ fn unflagged(db: &Path, args: &[&str]) -> Run {
     )
 }
 
+/// `unflagged`, without the `--json` that `run` appends.
+///
+/// `wait` has no `--json` flag at all, so appending one is a *parse* error and
+/// the child dies on argv before it reaches any of the behaviour under test —
+/// exit 1 for the wrong reason, which is precisely the shape that makes a
+/// refusal test pass against a binary that never refuses anything.
+fn unflagged_prose(db: &Path, args: &[&str]) -> Run {
+    let dir = db.parent().and_then(Path::parent).expect("<dir>/.quipu/db");
+    run_prose(
+        std::process::Command::new(qp_bin())
+            .current_dir(dir)
+            .env("QP_DB", db)
+            .env_remove("QP_SERVER"),
+        args,
+    )
+}
+
 /// Records `url` as this store's front door.
 fn record_front_door(db: &Path, url: &str) {
     let r = local(db, &["remote", "set", "--front-door", url]);
@@ -1874,4 +1891,102 @@ fn a_plaintext_url_off_loopback_is_refused_and_names_the_remedy() {
             r.stderr
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// the client-side polls
+// ---------------------------------------------------------------------------
+
+/// `wait` and `watch` refuse a resolved front door rather than answer locally.
+///
+/// The live silent-wrong-answer this closes: with a front door in play these
+/// two polled the store on *this* disk, where a cohort the operator never filed
+/// is trivially empty, and `wait --empty` returned 0 in milliseconds against a
+/// server holding six open tickets. The only signal was prose on stderr, which
+/// orchestration scripts routinely discard.
+///
+/// **Stdout is the assertion that matters.** An orchestrator branches on the
+/// exit code and reads stdout; `wait` writes nothing on stdout in either the
+/// true or the false case, and `watch` writes a stream of events that looks
+/// exactly like a real tail. So each case here asserts stdout is empty as well
+/// as that the exit code is 1.
+///
+/// The decoy is the whole test. Both stores hold state, and the *local* one is
+/// arranged so that answering from it would look like success.
+#[test]
+fn a_resolved_front_door_makes_wait_and_watch_refuse() {
+    let tmp = tempfile::tempdir().unwrap();
+    let served = store(&tmp.path().join("served"));
+    let decoy = store(&tmp.path().join("decoy"));
+    let srv = Server::start(&served);
+
+    // The front door holds an open cohort; the decoy holds none of it, so a
+    // local answer is "drained" and a local tail is empty.
+    assert_eq!(remote(&srv, &["add", "slice one"]).code, 0);
+    assert_eq!(remote(&srv, &["tag", "QP-1", "--json", "add", "wave:1"]).code, 0);
+    local(&decoy, &["add", "something else entirely"]);
+
+    for (args, what) in [
+        (
+            ["wait", "--tag", "wave:1", "--empty", "--timeout-secs", "5"].as_slice(),
+            "wait",
+        ),
+        (["watch", "--max-ticks", "1"].as_slice(), "watch"),
+    ] {
+        // Tier 1/2: the front door named in the environment.
+        let mut c = std::process::Command::new(qp_bin());
+        c.env("QP_SERVER", &srv.url).env("QP_DB", &decoy);
+        let r = run_prose(&mut c, args);
+        assert!(
+            !r.stderr.contains("unexpected argument"),
+            "{what} died on argv, so nothing below tests anything: {}",
+            r.stderr
+        );
+        assert_eq!(r.code, 1, "{what} must refuse, exit 1: {r:?}", r = r.stderr);
+        assert_eq!(
+            r.stdout, "",
+            "{what} must write nothing on stdout; an orchestrator reads it"
+        );
+        assert!(
+            r.stderr.contains(&srv.url),
+            "the refusal must name the front door it would not have used: {}",
+            r.stderr
+        );
+
+        // Tier 3: the recorded url, which is the case that warned about
+        // nothing at all before this existed.
+        record_front_door(&decoy, &srv.url);
+        let r = unflagged_prose(&decoy, args);
+        assert_eq!(
+            r.code, 1,
+            "a *recorded* front door must refuse too: {r:?}",
+            r = r.stderr
+        );
+        assert_eq!(r.stdout, "", "{what} must write nothing on stdout");
+        let cleared = unflagged(&decoy, &["remote", "clear", "--front-door"]);
+        assert_eq!(cleared.code, 0, "clear failed: {}", cleared.stderr);
+    }
+}
+
+/// With no front door resolved, both polls behave exactly as they always did.
+///
+/// The other half of the refusal: it must key on a front door and on nothing
+/// else, or it turns every ordinary local barrier into an error.
+#[test]
+fn wait_and_watch_are_unchanged_with_no_front_door() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = store(tmp.path());
+    local(&db, &["add", "a task"]);
+
+    // An empty cohort drains immediately; the tag matches nothing.
+    let r = unflagged_prose(&db, &["wait", "--tag", "nothing:here", "--empty"]);
+    assert_eq!(r.code, 0, "a local wait must still work: {}", r.stderr);
+
+    let r = unflagged_prose(&db, &["watch", "--max-ticks", "1"]);
+    assert_eq!(r.code, 0, "a local watch must still work: {}", r.stderr);
+    assert!(
+        r.stdout.contains("state_change"),
+        "the local tail must still print the local events: {:?}",
+        r.stdout
+    );
 }
