@@ -78,9 +78,18 @@ pub struct ServeArgs {
 }
 
 /// One store this process serves, resolved and proven openable at startup.
+///
+/// `key` is the store's `project_key`, read once when the store is opened at
+/// startup, which is what makes the identity check a string compare rather than
+/// a query per request. `None` only for a store that has none — unreachable for
+/// a store this binary has opened, because `project::backfill` runs inside
+/// `db::migrate` — and still handled rather than unwrapped, because "the served
+/// store has no identity" has to be a refusal and never a panic in a process
+/// that is meant to run for weeks.
 struct Project {
     name: String,
     path: PathBuf,
+    key: Option<String>,
 }
 
 /// Starts the front door and does not return until it is told to stop.
@@ -95,13 +104,18 @@ pub fn run(db_path: &std::path::Path, a: ServeArgs, names: &[String]) -> Result<
     ignore_sigpipe();
     install_stop_handlers();
 
-    let projects = resolve(db_path, names)?;
+    let mut projects = resolve(db_path, names)?;
     // Everything the run needs is acquired before the first accept. A process
     // that binds and *then* discovers it cannot open a store looks healthy to a
-    // supervisor forever while answering `no_store` to every request.
-    for p in &projects {
-        db::open(&p.path).with_context(|| format!("opening project `{}`", p.name))?;
+    // supervisor forever while answering `no_store` to every request. The
+    // project key is read here, from the connection that proves the store
+    // openable, and never again: an identity that is fixed before the listener
+    // binds cannot drift, and the per-request check costs a string compare.
+    for p in &mut projects {
+        let conn = db::open(&p.path).with_context(|| format!("opening project `{}`", p.name))?;
+        p.key = crate::project::read(&conn)?;
     }
+    let projects = projects;
 
     let server = tiny_http::Server::http(&a.bind)
         .map_err(|e| db::invalid_input(format!("cannot listen on `{}`: {e}", a.bind)))?;
@@ -118,7 +132,11 @@ pub fn run(db_path: &std::path::Path, a: ServeArgs, names: &[String]) -> Result<
             "version": env!("CARGO_PKG_VERSION"),
             "bind": bound,
             "projects": projects.iter()
-                .map(|p| serde_json::json!({"name": p.name, "path": p.path.display().to_string()}))
+                .map(|p| serde_json::json!({
+                    "name": p.name,
+                    "path": p.path.display().to_string(),
+                    "project_key": p.key,
+                }))
                 .collect::<Vec<_>>(),
         }),
     );
@@ -175,22 +193,68 @@ impl State {
     /// A `--project` this process did not open can never appear at runtime,
     /// which is what makes `no_store` mean "this front door does not serve
     /// that project" rather than "something might be broken".
-    fn store(&self, name: Option<&str>) -> Result<&PathBuf> {
-        match name {
-            Some(n) => self
-                .projects
-                .iter()
-                .find(|p| p.name == n)
-                .map(|p| &p.path)
-                .ok_or_else(|| {
-                    db::no_store(format!("this server does not serve project `{n}`"), None)
-                }),
-            None if self.projects.len() == 1 => Ok(&self.projects[0].path),
-            None => Err(db::invalid_input(format!(
-                "this server serves {} projects; name one with `--project`",
-                self.projects.len()
-            ))),
-        }
+    fn store(&self, name: Option<&str>, asserted_key: Option<&str>) -> Result<&PathBuf> {
+        let p = match name {
+            Some(n) => self.projects.iter().find(|p| p.name == n).ok_or_else(|| {
+                db::no_store(format!("this server does not serve project `{n}`"), None)
+            })?,
+            None if self.projects.len() == 1 => &self.projects[0],
+            None => {
+                return Err(db::invalid_input(format!(
+                    "this server serves {} projects; name one with `--project`",
+                    self.projects.len()
+                )))
+            }
+        };
+        check_identity(p, asserted_key)?;
+        Ok(&p.path)
+    }
+}
+
+/// The served twin of `db::init`'s `project_key_mismatch`, at the socket.
+///
+/// A name got the caller to a store; this asks whether it is the store they
+/// meant. A project name is machine-local — a registry maps a name to a path
+/// per machine — so two hosts each serving their own `alpha` is the ordinary
+/// case, and a front door that publishes only a name cannot be told apart from
+/// an impostor by anything the caller can see.
+///
+/// It is `no_store`, exit 6, and deliberately neither `not_found` nor
+/// `conflict`: exit 2 means "look again, it may change", and this never
+/// changes. The store set is fixed before the listener binds, so no retry and
+/// no wait can make this front door start serving the caller's project — which
+/// is the same thing exit 6 already says for a project this process never
+/// opened at all. The local twin is a `conflict` because there it genuinely is
+/// a state conflict — `qp init` refusing to re-home a store — and here nothing
+/// is being changed by anyone.
+///
+/// A caller that asserted nothing is not checked. The guard belongs to a client
+/// that has a store of its own to be wrong about; see
+/// `main::asserted_project_key` for why a storeless one cannot participate.
+fn check_identity(p: &Project, asserted: Option<&str>) -> Result<()> {
+    let Some(want) = asserted else { return Ok(()) };
+    let name = &p.name;
+    match p.key.as_deref() {
+        Some(have) if have == want => Ok(()),
+        Some(have) => Err(db::no_store(
+            format!(
+                "this front door's `{name}` is a different project: the store it serves \
+                 belongs to project `{have}`, and the caller belongs to `{want}`. A project \
+                 name is machine-local, so two hosts can each serve a project named \
+                 `{name}` and they are not the same project. Point at the front door \
+                 that serves your project, or name this one explicitly with \
+                 `--project {name}` if you meant to address a project other than your own."
+            ),
+            None,
+        )),
+        None => Err(db::no_store(
+            format!(
+                "this front door's `{name}` has no project identity to compare against, so \
+                 it cannot be shown to be the `{name}` the caller means. Run `qp init` in \
+                 that store, on the machine that holds it."
+            ),
+            None,
+        )),
     }
 }
 
@@ -202,6 +266,7 @@ fn resolve(db_path: &std::path::Path, names: &[String]) -> Result<Vec<Project>> 
         return Ok(vec![Project {
             name,
             path: db_path.to_path_buf(),
+            key: None,
         }]);
     }
     let reg = registry::load()?;
@@ -220,6 +285,7 @@ fn resolve(db_path: &std::path::Path, names: &[String]) -> Result<Vec<Project>> 
         out.push(Project {
             name: entry.name.clone(),
             path: entry.path.clone(),
+            key: None,
         });
     }
     Ok(out)
@@ -345,6 +411,16 @@ fn health(state: &State) -> serde_json::Value {
         "bind": state.bound,
         "uptime_s": state.started.elapsed().as_secs(),
         "projects": state.projects.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
+        // Additive beside `projects` rather than replacing it: `projects` is
+        // what `remote::probe_server` reads to decide this is a quipu front
+        // door at all, and rewriting it into objects would make every existing
+        // consumer of this payload wrong at once. A name answers "is my project
+        // here"; only a key answers "is it MY project", which is why
+        // `qp remote doctor` compares the second — the first passes against an
+        // impostor.
+        "project_keys": state.projects.iter()
+            .filter_map(|p| p.key.clone().map(|k| (p.name.clone(), serde_json::json!(k))))
+            .collect::<serde_json::Map<_, _>>(),
     })
 }
 
@@ -370,7 +446,12 @@ fn answer(
             "`{path}` takes POST, not {method}"
         )));
     }
-    let store = state.store(project_param(query).as_deref())?.clone();
+    let store = state
+        .store(
+            query_param(query, "project").as_deref(),
+            query_param(query, "project_key").as_deref(),
+        )?
+        .clone();
     if buf.len() > MAX_BODY {
         return Err(db::invalid_input(format!(
             "request body exceeds {MAX_BODY} bytes"
@@ -498,10 +579,16 @@ fn log_request(
     }
 }
 
-fn project_param(query: &str) -> Option<String> {
+/// One addressing parameter out of the query string.
+///
+/// Addressing, never arguments: `project` says which store, `project_key` says
+/// which project that store had better be. Both stay out of the request body
+/// because every served args struct sets `deny_unknown_fields`, and because
+/// neither is a thing the verb does.
+fn query_param(query: &str, name: &str) -> Option<String> {
     query.split('&').find_map(|kv| {
         let (k, v) = kv.split_once('=')?;
-        (k == "project").then(|| percent_decode(v))
+        (k == name).then(|| percent_decode(v))
     })
 }
 
@@ -593,10 +680,16 @@ mod tests {
 
     #[test]
     fn the_project_query_parameter_is_decoded() {
-        assert_eq!(project_param("project=alpha").as_deref(), Some("alpha"));
-        assert_eq!(project_param("a=1&project=b%20c").as_deref(), Some("b c"));
-        assert_eq!(project_param(""), None);
-        assert_eq!(project_param("other=x"), None);
+        let q = |s, k| query_param(s, k);
+        assert_eq!(q("project=alpha", "project").as_deref(), Some("alpha"));
+        assert_eq!(q("a=1&project=b%20c", "project").as_deref(), Some("b c"));
+        assert_eq!(q("", "project"), None);
+        assert_eq!(q("other=x", "project"), None);
+        assert_eq!(
+            q("project=alpha&project_key=k1", "project_key").as_deref(),
+            Some("k1")
+        );
+        assert_eq!(q("project=alpha", "project_key"), None);
     }
 
     /// Naming a project this process did not open is `no_store`, not `not_found`.
@@ -610,15 +703,46 @@ mod tests {
             projects: vec![Project {
                 name: "a".into(),
                 path: PathBuf::from("/x"),
+                key: Some("key-a".into()),
             }],
             bound: "127.0.0.1:0".into(),
             started: Instant::now(),
             access_log: false,
         };
-        let e = state.store(Some("b")).unwrap_err();
+        let e = state.store(Some("b"), None).unwrap_err();
         let q = e.downcast_ref::<db::QuipuError>().expect("typed");
         assert_eq!(q.kind(), "no_store");
         assert_eq!(q.exit_code(), 6);
-        assert_eq!(state.store(None).unwrap(), &PathBuf::from("/x"));
+        assert_eq!(state.store(None, None).unwrap(), &PathBuf::from("/x"));
+    }
+
+    /// A name reaches a store; only the key says it is the right project.
+    ///
+    /// The same verdict as an unserved project — `no_store`, exit 6 — because
+    /// the answer is the same: this front door is not attached to the project
+    /// the caller means, and no retry can change that.
+    #[test]
+    fn a_name_that_matches_a_different_project_is_no_store() {
+        let state = State {
+            projects: vec![Project {
+                name: "alpha".into(),
+                path: PathBuf::from("/x"),
+                key: Some("key-mine".into()),
+            }],
+            bound: "127.0.0.1:0".into(),
+            started: Instant::now(),
+            access_log: false,
+        };
+        // The impostor: same name, different project.
+        let e = state.store(Some("alpha"), Some("key-theirs")).unwrap_err();
+        let q = e.downcast_ref::<db::QuipuError>().expect("typed");
+        assert_eq!(q.kind(), "no_store");
+        assert_eq!(q.exit_code(), 6);
+        // The same project by name, and a caller that asserts nothing.
+        assert!(state.store(Some("alpha"), Some("key-mine")).is_ok());
+        assert!(state.store(Some("alpha"), None).is_ok());
+        // The sole-store path is guarded too: naming nothing is not checking
+        // nothing, and a client with a recorded front door names nothing.
+        assert!(state.store(None, Some("key-theirs")).is_err());
     }
 }

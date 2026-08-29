@@ -246,10 +246,26 @@ pub fn run(db_path: &Path, r: &Remotes) -> Report {
         // The name this store answers to, read without opening the store the way
         // `db::open` does — a diagnostic must not migrate the thing it measures,
         // and `project_checks` above has already reported an unreadable one.
-        let name = rusqlite::Connection::open(db_path)
-            .ok()
-            .and_then(|c| crate::project::read_name(&c).ok().flatten());
-        server_checks(url, name.as_deref(), &mut Seq::new("server", &mut checks));
+        // Name AND key, both read without opening the store the way `db::open`
+        // does — a diagnostic must not migrate the thing it measures, and
+        // `project_checks` above has already reported an unreadable one. Read
+        // independently rather than through `project::peek`, whose
+        // all-or-nothing is right for asserting an identity and wrong here: a
+        // store with a name and no key must still be told whether it is
+        // reaching the right NAME, and peek would report it as having neither.
+        let conn = rusqlite::Connection::open(db_path).ok();
+        let name = conn
+            .as_ref()
+            .and_then(|c| crate::project::read_name(c).ok().flatten());
+        let key = conn
+            .as_ref()
+            .and_then(|c| crate::project::read(c).ok().flatten());
+        server_checks(
+            url,
+            name.as_deref(),
+            key.as_deref(),
+            &mut Seq::new("server", &mut checks),
+        );
     }
 
     let ok = !checks.iter().any(|c| c.status == Status::Fail);
@@ -883,15 +899,19 @@ fn unreachable_remedy(endpoint: &str) -> String {
 /// clock before the credential verdict: it is a property of the process rather
 /// than of the request, it never stops the sequence, and knowing the front door
 /// is a different build is context for everything reported after it.
-fn server_checks(url: &str, project: Option<&str>, s: &mut Seq) {
+fn server_checks(url: &str, project: Option<&str>, project_key: Option<&str>, s: &mut Seq) {
     if let Err(e) = crate::remote::validate_server_url(url) {
         s.fail("url", format!("{e:#}"), SERVER_URL_REMEDY);
         return skip_rest_of_server(s, "url");
     }
     s.pass("url", format!("front door at {url}"));
 
-    let (version, projects) = match crate::remote::probe_server(url) {
-        ServerReach::Alive { version, projects } => (version, projects),
+    let (version, projects, keys) = match crate::remote::probe_server(url) {
+        ServerReach::Alive {
+            version,
+            projects,
+            keys,
+        } => (version, projects, keys),
         ServerReach::Unreachable(detail) => {
             s.fail(
                 "reachable",
@@ -947,7 +967,54 @@ fn server_checks(url: &str, project: Option<&str>, s: &mut Seq) {
         return;
     };
     if projects.iter().any(|p| p == name) {
-        s.pass("serves", format!("the front door serves `{name}`"));
+        // The name got us here; only the key says it is the same PROJECT. A
+        // project name is machine-local, so a second host serving its own
+        // `alpha` passes a name comparison and then hands out that project's
+        // work at exit 0. This is the only place a `qp remote doctor` can catch
+        // that, and it costs nothing: the key came back inside the payload the
+        // reachability probe had already read.
+        match (project_key, keys.get(name)) {
+            (Some(mine), Some(theirs)) if mine == theirs => s.pass(
+                "serves",
+                format!("the front door serves `{name}`, and it is this project"),
+            ),
+            (Some(mine), Some(theirs)) => s.fail(
+                "serves",
+                format!(
+                    "the front door serves a project NAMED `{name}` and it is not this \
+                     one: it serves project `{theirs}`, this store belongs to `{mine}`"
+                ),
+                format!(
+                    "a project name is machine-local, so two hosts can each serve an \
+                     `{name}` that are different projects — and work taken from the wrong \
+                     one comes back as an ordinary success, which is why this is a fault \
+                     and not a note. This url points at another machine's store. Point it \
+                     at the front door that fronts THIS project with \
+                     `qp remote set --front-door <url>`, or restart the front door on the \
+                     machine that holds this store."
+                ),
+            ),
+            (_, None) => s.advice(
+                "serves",
+                format!(
+                    "the front door serves `{name}` and reported no project identity for \
+                     it, so this check could compare names only"
+                ),
+                "a name is machine-local and two hosts can each serve one that are \
+                 different projects. Restart the front door on a build that publishes \
+                 `project_keys` in its health payload to have this compared properly.",
+            ),
+            (None, Some(_)) => s.advice(
+                "serves",
+                format!(
+                    "the front door serves `{name}` and this store has no readable \
+                     project_key, so this check could compare names only"
+                ),
+                "run `qp init` in this store to stamp its project identity; until then \
+                 nothing here can tell this project from another machine's project of \
+                 the same name.",
+            ),
+        }
     } else {
         s.fail(
             "serves",
@@ -1198,6 +1265,7 @@ mod tests {
         server_checks(
             "s3://host.invalid/bucket",
             Some("example"),
+            Some("key-example"),
             &mut Seq::new("server", &mut checks),
         );
         assert_eq!(checks[0].name, "url");

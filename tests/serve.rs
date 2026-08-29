@@ -1528,6 +1528,188 @@ fn a_dependency_cycle_is_422_invariant() {
 }
 
 // ---------------------------------------------------------------------------
+// wire project identity
+// ---------------------------------------------------------------------------
+
+/// A store named `<name>` in its own directory, with one ticket in it.
+///
+/// Two of these with the same name is what a same-host test has to build by
+/// hand, because a machine's registry forbids it: the failure being reproduced
+/// is two MACHINES each holding their own `alpha`, and `qp init --name` is the
+/// only honest way to stand that up on one host with no network in play.
+fn named_store(dir: &Path, name: &str, title: &str) -> PathBuf {
+    let db = dir.join(".quipu").join("db.sqlite");
+    Command::cargo_bin("qp")
+        .unwrap()
+        .env("QP_DB", &db)
+        .args(["init", "--prefix", "QP", "--name", name])
+        .assert()
+        .success();
+    let r = local(&db, &["add", title]);
+    assert_eq!(r.code, 0, "seeding `{name}`: {}", r.stderr);
+    db
+}
+
+/// Runs `qp <args> --json` through a front door, from a machine that HAS a store.
+///
+/// The opposite of [`remote`], which points `QP_DB` at nothing. The whole guard
+/// under test is about a caller with a store of its own to be wrong about, so
+/// the local store has to be real and has to be the one being asserted.
+fn remote_from(db: &Path, srv: &Server, args: &[&str]) -> Run {
+    let mut c = std::process::Command::new(qp_bin());
+    c.env("QP_SERVER", &srv.url).env("QP_DB", db);
+    run(&mut c, args)
+}
+
+/// A second machine's `alpha` is not this machine's `alpha`, and the wire says so.
+///
+/// The failure this exists for: a project NAME is machine-local — a registry
+/// maps a name to a path per machine — so two hosts each serving their own
+/// `alpha` is the ordinary case, not an exotic one. Before the key crossed the
+/// socket, pointing a client at the wrong host's front door took work from a
+/// project the caller had never seen and reported exit 0. A same-host test can
+/// only reach that by minting the two stores directly, because one machine's
+/// registry refuses two projects of one name.
+///
+/// The positive controls are in the same test on purpose, and they are what
+/// make the refusal mean something: the identical request against the client's
+/// OWN front door succeeds, and the identical request that names the other
+/// project explicitly succeeds too. Without them a refusal proves only that
+/// something in the path is broken.
+#[test]
+fn a_front_door_serving_another_machines_project_of_the_same_name_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mine = named_store(&tmp.path().join("mine"), "alpha", "REAL alpha ticket");
+    let theirs = named_store(&tmp.path().join("theirs"), "alpha", "IMPOSTOR alpha ticket");
+    let my_door = Server::start(&mine);
+    let their_door = Server::start(&theirs);
+
+    // Both front doors answer to the same name, which is why the name alone
+    // could never have told them apart.
+    for srv in [&my_door, &their_door] {
+        let (status, body) = request(srv.port(), "GET /healthz HTTP/1.1", None);
+        assert_eq!(status, 200);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["projects"], serde_json::json!(["alpha"]));
+        assert!(
+            v["project_keys"]["alpha"].is_string(),
+            "the health payload must carry the identity, not just the name: {body}"
+        );
+    }
+    let key_of = |srv: &Server| {
+        let (_, body) = request(srv.port(), "GET /healthz HTTP/1.1", None);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        v["project_keys"]["alpha"].as_str().unwrap().to_string()
+    };
+    assert_ne!(
+        key_of(&my_door),
+        key_of(&their_door),
+        "two independently created stores must be two projects"
+    );
+
+    // The failure: same name, other project. Refused, and refused as `no_store`
+    // — exit 6, which a caller must never retry — rather than a conflict, which
+    // it would.
+    let wrong = remote_from(
+        &mine,
+        &their_door,
+        &["take", "--as", "w-a", "--project", "alpha"],
+    );
+    assert_eq!(
+        wrong.code, 6,
+        "taking from another machine's project must not succeed: {} {}",
+        wrong.stdout, wrong.stderr
+    );
+    assert_eq!(wrong.kind().as_deref(), Some("no_store"));
+    assert!(
+        wrong.stdout.trim().is_empty(),
+        "nothing may be handed back: {}",
+        wrong.stdout
+    );
+
+    // Control 1: the identical request against this store's OWN front door.
+    let right = remote_from(
+        &mine,
+        &my_door,
+        &["take", "--as", "w-a", "--project", "alpha"],
+    );
+    assert_eq!(right.code, 0, "{}", right.stderr);
+    assert_eq!(right.payload()["taken"]["title"], "REAL alpha ticket");
+
+    // Control 2: naming a project this store is not says out loud that the
+    // caller is addressing something other than its own, so nothing is
+    // asserted and the request goes through. This is the escape hatch the
+    // refusal message points at, and it also proves the request itself was
+    // well-formed all along.
+    let named = remote_from(&mine, &their_door, &["list", "--project", "beta"]);
+    assert_eq!(
+        named.code, 6,
+        "a name that front door does not serve is still no_store"
+    );
+    let theirs_by_name = named_store(&tmp.path().join("other"), "beta", "a beta ticket");
+    let beta_door = Server::start(&theirs_by_name);
+    let crossed = remote_from(
+        &mine,
+        &beta_door,
+        &["take", "--as", "w-a", "--project", "beta"],
+    );
+    assert_eq!(
+        crossed.code, 0,
+        "naming another project explicitly is the escape hatch: {}",
+        crossed.stderr
+    );
+    assert_eq!(crossed.payload()["taken"]["title"], "a beta ticket");
+
+    // And the client with NO store asserts nothing, so the guard cannot apply
+    // to it. Stated as a test because "the guard silently does not apply" is
+    // the shape of failure worth pinning rather than rediscovering.
+    let storeless = remote(&their_door, &["list", "--project", "alpha"]);
+    assert_eq!(
+        storeless.code, 0,
+        "a storeless client has no identity to assert: {}",
+        storeless.stderr
+    );
+}
+
+/// `qp remote doctor` compares the key, because the name passes against an impostor.
+#[test]
+fn the_doctor_serves_check_compares_the_project_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mine = named_store(&tmp.path().join("mine"), "alpha", "REAL alpha ticket");
+    let theirs = named_store(&tmp.path().join("theirs"), "alpha", "IMPOSTOR alpha ticket");
+    let their_door = Server::start(&theirs);
+    let my_door = Server::start(&mine);
+
+    let serves = |db: &Path| -> (String, String) {
+        let r = local(db, &["remote", "doctor"]);
+        let v = r.payload();
+        let c = v["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["target"] == "server" && c["name"] == "serves")
+            .unwrap_or_else(|| panic!("no serves check: {}", r.stdout))
+            .clone();
+        (
+            c["status"].as_str().unwrap().to_string(),
+            c["detail"].as_str().unwrap().to_string(),
+        )
+    };
+
+    record_front_door(&mine, &their_door.url);
+    let (status, detail) = serves(&mine);
+    assert_eq!(status, "fail", "the impostor must fail `serves`: {detail}");
+    assert!(
+        detail.contains("NAMED `alpha`"),
+        "the detail must say the NAME matched and the project did not: {detail}"
+    );
+
+    record_front_door(&mine, &my_door.url);
+    let (status, detail) = serves(&mine);
+    assert_eq!(status, "pass", "the real front door must pass: {detail}");
+}
+
+// ---------------------------------------------------------------------------
 // stalled clients
 // ---------------------------------------------------------------------------
 

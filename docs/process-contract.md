@@ -372,8 +372,17 @@ useless.
 ### What it does
 
 Answers from state captured at startup: the version, uptime, the bind address,
-and the names of the projects this process opened. All of that is in memory
-because §2 put it there.
+the names of the projects this process opened, and — as `project_keys` — the
+`project_key` of each. All of that is in memory because §2 put it there.
+
+*`project_keys` was added after the first verbs shipped.* A project name is
+machine-local, so two hosts can each serve an `alpha` and they are different
+projects; a payload carrying only names cannot tell an operator, or
+`qp remote doctor`, which of the two answered. It is additive beside `projects`
+rather than a rewrite of it, because `remote::probe_server` reads that list to
+decide the answering process is a quipu front door at all. It changes nothing
+about what this endpoint may do: the keys were read at startup, so no store is
+opened, queried or locked to answer.
 
 **It returns 200 or nothing.** There is no unhealthy response body. If the
 process cannot answer, the connection fails and *that* is the signal — which
