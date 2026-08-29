@@ -1770,7 +1770,6 @@ fn stalled_request_bodies_do_not_wedge_the_front_door() {
             s
         })
         .collect();
-    let stalls_opened = std::time::Instant::now();
     // Every worker has dequeued one by now; none of them can ever finish.
     std::thread::sleep(std::time::Duration::from_millis(500));
 
