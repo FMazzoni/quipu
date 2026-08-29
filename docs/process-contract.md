@@ -260,6 +260,76 @@ supervisor that restarts it forever converts a legible error into a hot loop
 that fills a log with the same line. A burst limit turns it into a failed unit
 that an operator can see. A clean `SIGTERM` exit 0 must not restart at all.
 
+### There is no offline mode, and reads fail closed too
+
+**Decision: with a front door configured and unreachable, every served verb
+fails — reads exactly like writes — with the `unavailable` kind and exit 7.
+Nothing is served from a cache, nothing is queued for replay, and the store on
+the client's disk is not a cache and must never become one.**
+
+This is checked behaviour rather than a proposal. A client pointed at a dead
+listener answers identically for `list`, `show`, `take` and `claim`:
+
+```text
+$ QP_SERVER=http://127.0.0.1:8801 qp list --json
+{"error":{"endpoint":"http://127.0.0.1:8801/v1/list","kind":"unavailable",
+          "message":"... : io: Connection refused"}}
+$ echo $?
+7
+```
+
+The read half is the half that gets argued about, so the argument is recorded
+here rather than left to be re-had.
+
+**The trap, stated first, because it is the reason for the whole position.**
+Queuing writes for later replay rebuilds every mechanism the server design
+exists to delete: two writers, divergence, conflict detection, and an ordering
+rule for merges. `BEGIN IMMEDIATE` on one file is the arbitration, and a queue
+is a second writer that has not been told so yet. Whatever else is decided,
+it must not be that. A read cache is the same failure arriving politely: the
+moment a stale row is good enough to answer from, it is a second source of
+truth, and the next question is which one wins.
+
+**A stale board is worse than a loud failure, specifically for an
+orchestrator.** The consumer of a read here is not a human skimming; it is a
+coordinator deciding what to dispatch. A cached `ready` cohort answers the one
+question a dispatcher asks — *what is free* — with a snapshot of what was free,
+and the dispatcher acts on it by assigning work that another machine already
+holds. The refusal is recoverable in one line; the double dispatch is a wave
+whose event log is honest about what happened and useless for working out why.
+An error a caller cannot ignore beats an answer a caller cannot date.
+
+**The local store is not the cache, and this is where divergence would sneak
+back in.** It is the obvious candidate — a real SQLite file, the same schema,
+sitting right there — and it is the worst one, because reading it and writing
+it are one flag apart. There is no `--offline`, no fallback tier under the
+recorded url, and `resolve_server`'s local tier fires only when *no* front door
+was named at all. A machine with both a store and a front door is a machine
+whose commands go over the wire; the file beside it is not consulted, not
+compared, and not refreshed.
+
+**What an agent mid-wave does is already written down and does not change.**
+Exit 7 is *unknown outcome*, not *did not happen*: read before writing, and the
+timeline is exact evidence because `insert_event` runs inside the mutation's
+transaction. §4 has the sequence. A server that is down does not orphan a
+claim — the claim is a row, not a session — and the lease keeps running on
+wall-clock, so a long outage is the existing crashed-agent case and `qp reclaim`
+is the existing recovery.
+
+**The one path out is not a cache and is deliberately unserved.**
+`qp remote clear --front-door` detaches the store, after which its commands read
+the file beside them again. It works while the front door is down precisely
+because `remote` is local-only: resolution never consults a recorded url for a
+verb the front door does not answer. That is a deliberate act with an event
+behind it, which is the difference between choosing to work from a local store
+and being silently handed one.
+
+**What this rules out, so a later slice does not read the silence as room.** No
+response cache in `client.rs`. No write-ahead queue anywhere. No `--offline`,
+`--stale-ok` or `--cache-ttl` flag. No fallback from a configured front door to
+the local store on transport failure. Each of these looks like an availability
+improvement and each converts a single source of truth into two.
+
 ## 5. Logging
 
 **Decision: one JSON object per line, on stderr, for events that never reached
