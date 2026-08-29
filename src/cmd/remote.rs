@@ -41,6 +41,12 @@ pub enum RemoteOp {
         #[arg(long)]
         json: bool,
     },
+    /// Diagnose what is configured and name the cause of any failure
+    Doctor {
+        /// Emit JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Detach — the deliberate route back to local-only operation
     Clear {
         /// Clear only the authority.
@@ -66,10 +72,14 @@ impl RemoteArgs {
         match &self.op {
             RemoteOp::Set { json, .. }
             | RemoteOp::Show { json, .. }
+            | RemoteOp::Doctor { json }
             | RemoteOp::Clear { json, .. } => *json,
         }
     }
 }
+
+/// Exit code when `doctor` finds a fault. Documented in `docs/architecture.md`.
+const EXIT_FAULT: i32 = 5;
 
 /// Reachability as it appears in output: absent unless `--check` asked for it.
 #[derive(Serialize)]
@@ -237,6 +247,21 @@ pub fn run(db_path: &std::path::Path, a: RemoteArgs) -> Result<()> {
                     checked,
                 },
             )
+        }
+        RemoteOp::Doctor { json } => {
+            let report = crate::doctor::run(db_path, &remote::load(&conn)?);
+            let failed = report.failed();
+            emit(json, &report)?;
+            // The diagnosis is the output, not the error: the command did what
+            // it was asked whatever it found, so the report goes to stdout in
+            // the requested format rather than through the error envelope. The
+            // exit code is what a setup script branches on, and it gets a code
+            // of its own — reusing the retryable-conflict code would make a
+            // skill that retries on it loop forever against a broken remote.
+            if failed {
+                std::process::exit(EXIT_FAULT);
+            }
+            Ok(())
         }
         RemoteOp::Clear {
             authority,

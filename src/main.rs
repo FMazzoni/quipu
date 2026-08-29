@@ -5,6 +5,7 @@
 mod claimref;
 mod cmd;
 mod db;
+mod doctor;
 mod id;
 mod merge;
 mod outcome;

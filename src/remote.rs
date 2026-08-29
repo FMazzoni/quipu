@@ -125,7 +125,7 @@ fn short_hash(s: &str) -> String {
 ///
 /// `http(s)://`, `git://` and bare filesystem paths never spawn ssh, so
 /// injecting a `GIT_SSH_COMMAND` for them buys nothing.
-fn is_ssh_url(url: &str) -> bool {
+pub fn is_ssh_url(url: &str) -> bool {
     if url.starts_with("ssh://") {
         return true;
     }

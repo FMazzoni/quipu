@@ -363,8 +363,28 @@ impl Client {
         resp: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
         key: &str,
     ) -> Result<(u16, Vec<u8>), Fault> {
+        let (status, bytes, _) = self.read_dated(resp, key)?;
+        Ok((status, bytes))
+    }
+
+    /// `read`, keeping the server's `Date` header instead of discarding it.
+    ///
+    /// The header is read off the response whatever its status, because the
+    /// diagnosis that needs it is exactly the one where the request FAILED: a
+    /// clock 20 minutes out is refused with a signature error, and the `Date`
+    /// on that refusal is the only evidence the clock — not the key — is wrong.
+    fn read_dated(
+        &self,
+        resp: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+        key: &str,
+    ) -> Result<(u16, Vec<u8>, Option<String>), Fault> {
         let mut resp = resp.map_err(|e| self.transport_fault(e))?;
         let status = resp.status().as_u16();
+        let date = resp
+            .headers()
+            .get("date")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
         let bytes = resp
             .body_mut()
             .with_config()
@@ -374,7 +394,7 @@ impl Client {
                 key: key.to_string(),
                 detail: e.to_string(),
             })?;
-        Ok((status, bytes))
+        Ok((status, bytes, date))
     }
 
     /// Sorts a `ureq` failure into the cause a person can act on.
@@ -676,6 +696,78 @@ impl Client {
         out.sort();
         out.dedup();
         Ok(out)
+    }
+}
+
+/// Which part of the bucket a diagnostic LIST addresses.
+///
+/// The two are not interchangeable, and the difference is a diagnosis: a key
+/// scoped to one prefix is denied at the root while listing its own prefix
+/// perfectly well, which is precisely how "the bucket is missing" and "the key
+/// is not scoped to this prefix" are told apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// The prefix the ledger url names — what every real ledger request uses.
+    Prefix,
+    /// The bucket root, ignoring the url's prefix. Diagnosis only.
+    Root,
+}
+
+/// One diagnostic LIST: the outcome, plus the server's clock if it sent one.
+///
+/// The two travel together because they come from one response and one of them
+/// explains the other.
+pub struct Answer {
+    /// The raw `Date` header. `None` when the server sent none or an unusable
+    /// one — which leaves the clock UNCHECKED, never "skewed".
+    pub server_date: Option<String>,
+    pub result: Result<(), Fault>,
+}
+
+impl Client {
+    /// A one-key LIST, for diagnosis rather than for reading the ledger.
+    ///
+    /// `max-keys=1` because nothing here wants the contents: the question is
+    /// whether the request is signed, trusted, authorised and answered, and the
+    /// first key settles all four. A transport failure is returned in `result`
+    /// like any other, so a caller can tell "never got an answer" from "was
+    /// answered no" without a second code path.
+    pub fn probe(&self, scope: Scope) -> Answer {
+        let prefix = match scope {
+            Scope::Prefix => self.root.clone(),
+            Scope::Root => String::new(),
+        };
+        let mut action = ListObjectsV2::new(&self.bucket, Some(&self.creds));
+        if !prefix.is_empty() {
+            action.with_prefix(prefix.clone());
+        }
+        action.with_max_keys(1);
+        let url = action.sign_with_time(SIGNATURE_TTL, &now());
+        match self.read_dated(self.agent.get(url.as_str()).call(), &prefix) {
+            Err(e) => Answer {
+                server_date: None,
+                result: Err(e),
+            },
+            Ok((status, body, date)) => Answer {
+                server_date: date,
+                result: self.check(status, &body, &prefix),
+            },
+        }
+    }
+
+    /// The bucket this client is pointed at, for a diagnosis that must name it.
+    pub fn bucket_name(&self) -> &str {
+        self.bucket.name()
+    }
+
+    /// The key prefix from the url, normalised — empty when the url named none.
+    pub fn prefix(&self) -> &str {
+        &self.root
+    }
+
+    /// The endpoint url, scheme included, as requests are actually addressed.
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
     }
 }
 

@@ -203,6 +203,7 @@ as it always has: no network, no daemon, no external service.
     qp remote set --authority ssh://host.example/srv/authority.git
     qp remote set --ledger    s3://minio.host.example/quipu-ledger
     qp remote show
+    qp remote doctor
     qp remote clear
 
 Two independent urls, either one omittable:
@@ -231,6 +232,31 @@ probe reports the object store's own diagnosis rather than a flat "unreachable":
 absent credentials, rejected credentials, a missing bucket, a prefix outside your
 policy, a TLS trust failure and a skewed clock all want different fixes.
 `qp remote show` is likewise local unless you pass `--check`.
+
+### When it does not work
+
+`--check` answers "is it there". **`qp remote doctor` answers "why is it not"**,
+which is the question that actually costs time. It runs a sequence of checks
+against whatever is configured — object storage and the claim authority both —
+stopping at the first failure, and it NAMES the cause instead of leaving you to
+reverse-engineer an error that points somewhere else.
+
+That is the whole point. A repository that is present and complete is refused by
+git's dubious-ownership check and reported to the client as missing, so you go
+looking for a repository that was there all along, and `chmod` does nothing. A
+clock a quarter of an hour out makes an object store refuse a key that was never
+wrong, and the error says nothing about time. A host that moved onto a private
+network stops answering on its old address with a refusal identical to the
+service being down. A key scoped to a prefix that cannot list looks exactly like
+a bucket that does not exist, and the two fixes are opposite.
+
+So each result says what was checked, what happened, and — on failure — what to
+actually do. Where a check genuinely cannot separate two causes it names both
+rather than guessing. It is the only command here that writes to a remote: it
+creates and deletes a probe ref on the authority, because a claim is a ref
+creation and a read-only probe proves nothing about whether one will ever work.
+`--json` gives the same report with a stable name per check. Exit 0 when nothing
+failed, 5 when something did, so it can gate a setup script.
 
 **`qp remote clear` is the escape hatch, not a convenience.** A configured but
 unreachable authority makes a claim fail rather than fall back, precisely
