@@ -19,6 +19,13 @@
 //! statements. `concurrent_cancels_produce_exactly_one_winner` races one of
 //! those commands, and `with_tx_uses_immediate_transactions` pins the property
 //! the whole arrangement rests on.
+//!
+//! `take` is the odd one out and the reason this file matters most. Its racers
+//! do not name a task — the statement chooses one — so there is no single row
+//! for a guard to serialise them on, and "exactly one winner" is the wrong
+//! assertion: every racer succeeds, and what must hold is that no ticket is
+//! handed to two of them. Its losers exit 0 with a null payload, so they are
+//! tallied out of stdout rather than out of the exit code.
 
 use assert_cmd::Command;
 use std::path::{Path, PathBuf};
@@ -44,6 +51,7 @@ fn qp_bin() -> PathBuf {
 struct RaceResult {
     code: i32,
     error_code: Option<String>,
+    stdout: String,
 }
 
 /// Start every child before waiting on any of them, then collect.
@@ -73,6 +81,7 @@ fn race_n(db: &Path, args: &[&str], racers: usize) -> Vec<RaceResult> {
             RaceResult {
                 code: out.status.code().unwrap(),
                 error_code: error_code(&out.stderr),
+                stdout: String::from_utf8(out.stdout).unwrap(),
             }
         })
         .collect()
@@ -262,6 +271,103 @@ fn with_tx_uses_immediate_transactions() {
          abandon, reclaim and block are only safe while the write lock is held \
          before the SELECT. Body was:\n{body}"
     );
+}
+
+/// Every racer's `taken.display_id`, and how many came back empty.
+///
+/// `take` reports no-work as exit 0 with `taken: null`, so the tally has to read
+/// stdout; a non-zero exit here would be a real failure, not a lost race.
+fn take_tally(results: &[RaceResult]) -> (Vec<String>, usize) {
+    let mut took = Vec::new();
+    let mut empty = 0;
+    for r in results {
+        assert_eq!(
+            r.code, 0,
+            "every `take` racer must exit 0; stdout: {}",
+            r.stdout
+        );
+        assert_eq!(
+            r.error_code, None,
+            "a `take` racer must not emit an error line"
+        );
+        let v: serde_json::Value = serde_json::from_str(r.stdout.trim())
+            .unwrap_or_else(|e| panic!("take stdout is not JSON ({e}): {:?}", r.stdout));
+        match v["taken"].as_object() {
+            None => empty += 1,
+            Some(t) => took.push(t["display_id"].as_str().unwrap().to_string()),
+        }
+    }
+    (took, empty)
+}
+
+/// One ready ticket, N takers: one takes it, the rest report no work.
+///
+/// This is the property the command exists for. The old sequence — `qp list`
+/// then `qp assign` — cannot produce it: the losers of the `assign` fail, and
+/// nothing re-lists on their behalf.
+#[test]
+fn concurrent_takes_hand_one_ticket_to_one_taker() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+
+    for round in 1..=ROUNDS {
+        let task = format!("QP-{round}");
+        qp(&db).args(["add", "race"]).assert().success();
+
+        let results = race(&db, &["take", "--as", "w"]);
+        let (took, empty) = take_tally(&results);
+        assert_eq!(
+            took,
+            vec![task.clone()],
+            "exactly one racer may take {task}"
+        );
+        assert_eq!(empty, RACERS - 1);
+
+        assert_eq!(
+            state_change_count(&db, &task, "assigned"),
+            1,
+            "exactly one assignment may land on {task}"
+        );
+    }
+}
+
+/// K ready tickets, N > K takers: every ticket taken exactly once.
+///
+/// The single-ticket case can pass by accident if the racers happen to
+/// serialise; with several tickets in flight a taker that read the queue before
+/// taking would hand the same id to two racers and the duplicate check fires.
+#[test]
+fn concurrent_takes_never_hand_the_same_ticket_twice() {
+    const READY: usize = 3; // < RACERS, so some racers must come back empty
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    for i in 1..=READY {
+        qp(&db)
+            .args(["add", &format!("slice {i}")])
+            .assert()
+            .success();
+    }
+
+    let results = race(&db, &["take", "--as", "w"]);
+    let (mut took, empty) = take_tally(&results);
+    took.sort();
+
+    let expected: Vec<String> = (1..=READY).map(|i| format!("QP-{i}")).collect();
+    assert_eq!(
+        took, expected,
+        "every ready ticket taken exactly once, none twice"
+    );
+    assert_eq!(empty, RACERS - READY, "the rest must report no work");
+
+    for t in &expected {
+        assert_eq!(
+            state_change_count(&db, t, "assigned"),
+            1,
+            "exactly one assignment may land on {t}"
+        );
+    }
 }
 
 /// Machines that all decide one dead hold is theirs to break produce one winner.

@@ -25,18 +25,47 @@ correctness bug rather than a duplication smell.
 
 ## Error taxonomy
 
-`QuipuError` has five variants, split by *what a caller should do next*:
+`QuipuError` has six variants, split by *what a caller should do next*:
 `conflict` (lost a race — may retry), `not_owner` (never retry), `not_found`,
-`invariant` (structural, e.g. a cycle), and `invalid_input`. The variant drives
-the exit code, which is what an orchestrating skill branches on. The `code`
-string inside `conflict` and `invariant` is a finer label for logs, and grows
-additively — a new failure reason does not require a new exit code.
+`invariant` (structural, e.g. a cycle), `invalid_input`, and `no_store`. The
+variant drives the exit code, which is what an orchestrating skill branches on.
+The `code` string inside `conflict` and `invariant` is a finer label for logs,
+and grows additively — a new failure reason does not require a new exit code.
 
-The `--json` envelope carries a sixth `kind` the enum does not: `internal`, which
-`main.rs` emits for any error that does not downcast to a `QuipuError`, with exit
-1. Five variants, six kinds. Read the list from `QuipuError::kind` plus that
-fallback, not from the variant list alone; `README.md`'s envelope table is the
-full six.
+The `--json` envelope carries a seventh `kind` the enum does not: `internal`,
+which `main.rs` emits for any error that does not downcast to a `QuipuError`,
+with exit 1. Six variants, seven kinds. Read the list from `QuipuError::kind`
+plus that fallback, not from the variant list alone; `README.md`'s envelope
+table is the full seven.
+
+## Resolution is not creation
+
+`resolve_path` answers "where *would* the store be" — a question with an answer
+even on a machine that has none. Whether that path may be *created* is a
+separate decision, and only `qp init` gets to take it: `open` calls
+`require_store` first, and `main.rs` calls `require_attached` ahead of dispatch
+for every subcommand but `init` (and `install-skills`, which opens no store).
+
+The two were the same act until this split, and the cost was that `qp` could not
+distinguish an empty project from a misconfigured machine. `qp list --json` in a
+directory with no store printed `[]` and exited 0, having quietly created
+`./.quipu/db.sqlite` on the way; the next `qp add` filed a real ticket into it.
+An agent handed the wrong working directory answered its own first instruction
+with "no such task" and exit 2 — the code documented as *retry may succeed* —
+so the failure read as a bad ticket id. `no_store` (exit 6) is the fix: it names
+the directory, says what to run, and creates nothing.
+
+`require_store` under `open` is a backstop rather than the primary check. The
+primary check lives in `main.rs` because that is where the cwd-versus-`--db`
+distinction is still known, and so the message can name the directory the
+operator was actually standing in; the one under `open` exists so a new command
+module cannot reintroduce create-on-demand by opening a path nobody made.
+
+The exception that proves the rule is `--db`/`QP_DB` pointing at a file that is
+not there. It fails the same way rather than creating: an explicit path is a
+*claim about where the store is*, and honouring it by conjuring an empty one is
+precisely the cross-machine silent failure this exists to prevent. `qp init`
+with the same path is the way to mean "create it".
 
 ## Migration on open
 

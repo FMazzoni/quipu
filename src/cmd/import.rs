@@ -1635,7 +1635,9 @@ impl<'a> Replay<'a> {
     /// rowids, so it goes through the canonical map like everything else.
     fn target(&mut self, ev: &LedgerEvent, payload: &Value, key: &str) -> Option<i64> {
         let raw = payload.get(key).and_then(Value::as_str);
-        let Some(rowid) = raw.and_then(|s| id::parse(s).ok()) else {
+        // The origin store's prefix, not this one's — parsed for its rowid and
+        // deliberately not checked against the local prefix.
+        let Some(rowid) = raw.and_then(|s| id::parse(s).ok()).map(|r| r.rowid) else {
             self.anomaly(format!(
                 "event {}/{}: kind `{}` has no readable `{key}` display id (found {raw:?})",
                 ev.origin_uuid, ev.origin_id, ev.kind

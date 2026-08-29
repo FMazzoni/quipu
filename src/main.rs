@@ -11,6 +11,7 @@ mod lease;
 mod merge;
 mod outcome;
 mod project;
+mod registry;
 mod remote;
 mod s3;
 mod store;
@@ -57,6 +58,8 @@ enum Cmd {
     Assign(cmd::assign::AssignArgs),
     /// Claim an assigned task as the running agent
     Claim(cmd::claim::ClaimArgs),
+    /// Atomically take the next ready task (select + assign in one statement)
+    Take(cmd::take::TakeArgs),
     /// Complete a running task (records decisions/artifacts)
     Complete(cmd::complete::CompleteArgs),
     /// Mark an assigned/running task blocked with a reason (→ pending)
@@ -75,6 +78,8 @@ enum Cmd {
     Relation(cmd::relation::RelationArgs),
     /// Attach this store to a claim authority / ledger, or detach to local-only
     Remote(cmd::remote::RemoteArgs),
+    /// Name this store and manage the machine-local name → store registry
+    Project(cmd::project::ProjectArgs),
     /// Render the task DAG
     Tree(cmd::tree::TreeArgs),
     /// Show the event timeline (per-task or global)
@@ -140,6 +145,7 @@ fn wants_json(cmd: &Cmd) -> bool {
         Cmd::Add(a) => a.json,
         Cmd::Assign(a) => a.json,
         Cmd::Claim(a) => a.json,
+        Cmd::Take(a) => a.json,
         Cmd::Complete(a) => a.json,
         Cmd::Block(a) => a.json,
         Cmd::Cancel(a) => a.json,
@@ -158,6 +164,7 @@ fn wants_json(cmd: &Cmd) -> bool {
         Cmd::Ledger(a) => a.json,
         Cmd::Relation(a) => a.json(),
         Cmd::Remote(a) => a.json(),
+        Cmd::Project(a) => a.json(),
         Cmd::Tree(a) => a.json,
         Cmd::Timeline(a) => a.json,
         Cmd::Wave(a) => a.json,
@@ -171,6 +178,31 @@ fn wants_json(cmd: &Cmd) -> bool {
         // (4 = empty cohort), not its output.
         Cmd::Wait(_) | Cmd::InstallSkills(_) => false,
     }
+}
+
+/// Whether this subcommand needs a store to already exist.
+///
+/// `init` is the only command allowed to create one. `install-skills` writes
+/// files on disk and never opens a store at all, so requiring one would break
+/// the bootstrap step that runs *before* a project exists.
+///
+/// The registry readers are the third case and the least obvious: `qp project
+/// list`, `lookup` and `unregister` answer from the registry file alone and are
+/// the commands you reach for *because* you do not know which store you are
+/// near — gating them on being attached to one would make the tool that
+/// diagnoses a lost project unusable from anywhere a project is lost. Only
+/// `register` reads the store, because only it needs the name and uuid to file.
+fn needs_store(cmd: &Cmd) -> bool {
+    !matches!(
+        cmd,
+        Cmd::Init(_)
+            | Cmd::InstallSkills(_)
+            | Cmd::Project(cmd::project::ProjectArgs {
+                op: cmd::project::ProjectOp::List { .. }
+                    | cmd::project::ProjectOp::Lookup { .. }
+                    | cmd::project::ProjectOp::Unregister { .. },
+            })
+    )
 }
 
 /// Restores the default disposition for `SIGPIPE`.
@@ -290,10 +322,21 @@ fn main() {
 ///
 /// Errors are returned rather than printed: `main` is the single place that
 /// maps a `QuipuError` to an exit code and an output format, so no command
-/// module needs to know either. Path resolution and the project-mismatch
-/// warning happen once here, ahead of the match, rather than in each arm.
+/// module needs to know either. Path resolution, the attach check and the
+/// project-mismatch warning happen once here, ahead of the match, rather than
+/// in each arm.
+///
+/// Resolving a store path and creating one are separate acts. `resolve_path`
+/// answers "where would the store be" and cannot fail; `require_attached` then
+/// refuses every command but `init` when nothing is there. Before that split a
+/// misconfigured machine got a silent private store and exit 0 — `qp list`
+/// printed `[]`, `qp add` filed into a project nobody meant to make, and only
+/// `qp show` complained, as a not-found that read like a bad ticket id.
 fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
     let db_path = db::resolve_path(cli.db.clone())?;
+    if needs_store(&cli.cmd) {
+        db::require_attached(&db_path, cli.db.is_some())?;
+    }
     // `json` is threaded in so the warning matches the stream's format: under
     // --json stderr is JSON Lines, so a prose warning here would make the
     // error envelope on the following line unparseable. See QP-120.
@@ -303,6 +346,7 @@ fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
         Cmd::Add(a) => cmd::add::run(&db_path, a),
         Cmd::Assign(a) => cmd::assign::run(&db_path, a),
         Cmd::Claim(a) => cmd::claim::run(&db_path, a),
+        Cmd::Take(a) => cmd::take::run(&db_path, a),
         Cmd::Complete(a) => cmd::complete::run(&db_path, a),
         Cmd::Block(a) => cmd::block::run(&db_path, a),
         Cmd::Cancel(a) => cmd::cancel::run(&db_path, a),
@@ -312,6 +356,7 @@ fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
         Cmd::Tag(a) => cmd::tag::run(&db_path, a),
         Cmd::Relation(a) => cmd::relation::run(&db_path, a),
         Cmd::Remote(a) => cmd::remote::run(&db_path, a),
+        Cmd::Project(a) => cmd::project::run(&db_path, a),
         Cmd::Timeline(a) => cmd::timeline::run(&db_path, a),
         Cmd::Decisions(a) => cmd::decisions::run(&db_path, a),
         Cmd::Tree(a) => cmd::tree::run(&db_path, a),

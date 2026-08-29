@@ -425,6 +425,7 @@ fn help_lists_core_commands() {
         "edit",
         "report",
         "show",
+        "take",
     ] {
         assert!(out.contains(cmd), "help missing `{cmd}`:\n{out}");
     }
@@ -7389,6 +7390,380 @@ fn report_since_rejects_unrepresentable_offset_shifts() {
             .assert()
             .success();
     }
+}
+
+// --- display-id prefix scoping --------------------------------------------
+//
+// The prefix is part of the identifier: a reference carrying some other
+// store's prefix names nothing here, and must fail rather than land on the
+// row that happens to sit at that rowid.
+
+#[test]
+fn matching_prefix_resolves_and_echoes_canonical_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db)
+        .args(["init", "--prefix", "ACME"])
+        .assert()
+        .success();
+    qp(&db).args(["add", "a"]).assert().success(); // ACME-1
+
+    let out = qp(&db)
+        .args(["show", "acme-001", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(v["display_id"], "ACME-1");
+}
+
+#[test]
+fn foreign_prefix_is_invalid_input_naming_both_prefixes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db)
+        .args(["init", "--prefix", "ACME"])
+        .assert()
+        .success();
+    qp(&db).args(["add", "a"]).assert().success(); // ACME-1
+
+    let out = qp(&db).args(["show", "QP-1"]).assert().code(1);
+    let s = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(s.contains("QP"), "should name the supplied prefix: {s}");
+    assert!(s.contains("ACME"), "should name the store's prefix: {s}");
+
+    // A prefix no store has ever used is the same error, not a resolution.
+    let out = qp(&db).args(["show", "ZZZZ-1", "--json"]).assert().code(1);
+    let err = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    let last = err.lines().rfind(|l| !l.is_empty()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(last).unwrap();
+    assert_eq!(v["error"]["kind"], "invalid_input");
+}
+
+#[test]
+fn foreign_prefix_does_not_mutate_the_row_at_that_rowid() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db)
+        .args(["init", "--prefix", "ACME"])
+        .assert()
+        .success();
+    qp(&db).args(["add", "a"]).assert().success(); // ACME-1
+
+    qp(&db).args(["tag", "QP-1", "add", "x"]).assert().code(1);
+    qp(&db).args(["tag", "ZZZZ-1", "add", "y"]).assert().code(1);
+    qp(&db)
+        .args(["cancel", "QP-1", "--reason", "wrong store"])
+        .assert()
+        .code(1);
+
+    let out = qp(&db)
+        .args(["show", "ACME-1", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(
+        v["tags"],
+        serde_json::json!([]),
+        "a foreign-prefixed tag must not land: {v}"
+    );
+    assert_eq!(v["state"], "ready", "state must be untouched: {v}");
+}
+
+#[test]
+fn bare_integer_is_still_not_a_task_reference() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "a"]).assert().success(); // QP-1
+
+    let out = qp(&db).args(["show", "1"]).assert().code(1);
+    let s = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(s.contains("invalid id"), "{s}");
+}
+
+/// `take` picks the oldest ready task and leaves it exactly where `assign` would.
+///
+/// "Same state as `assign`" is asserted by continuing the state machine from
+/// here: a task that `take` moved must be claimable by the agent it named, which
+/// is only true if both the `task.state` row and the `assignment` row landed.
+#[test]
+fn take_assigns_oldest_ready_task() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "first"]).assert().success();
+    qp(&db).args(["add", "second"]).assert().success();
+
+    qp(&db)
+        .args(["take", "--as", "w1", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""display_id":"QP-1""#))
+        .stdout(contains(r#""state":"assigned""#));
+
+    qp(&db)
+        .args(["show", "QP-1", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""state":"assigned""#));
+    // The assignment row landed too, or this cannot succeed.
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "w1"])
+        .assert()
+        .success();
+
+    // The next take gets the next-oldest, never the one already taken.
+    qp(&db)
+        .args(["take", "--as", "w2", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""display_id":"QP-2""#));
+}
+
+#[test]
+fn take_respects_the_tag_filter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "untagged"]).assert().success();
+    qp(&db)
+        .args(["add", "tagged", "--tag", "kind:slice"])
+        .assert()
+        .success();
+
+    // QP-1 is older, so only the filter can explain picking QP-2.
+    qp(&db)
+        .args(["take", "--as", "w1", "--tag", "kind:*", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""display_id":"QP-2""#));
+    // Filter that matches nothing ready: no work, and QP-1 is untouched.
+    qp(&db)
+        .args(["take", "--as", "w1", "--tag", "kind:*", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""taken":null"#));
+    qp(&db)
+        .args(["show", "QP-1", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""state":"ready""#));
+}
+
+/// A task with an unresolved dependency is never taken, however the store got
+/// into that shape.
+///
+/// Two arrangements, because they fail differently: a plain `pending` dependent
+/// is excluded by the `state = 'ready'` guard alone, while a task frozen by a
+/// blocker on the wave that contains it is excluded only by the `db::FROZEN`
+/// clause the candidate subquery repeats.
+#[test]
+fn take_never_takes_a_task_with_unresolved_deps() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "prereq"]).assert().success();
+    qp(&db)
+        .args(["add", "dependent", "--depends-on", "QP-1"])
+        .assert()
+        .success();
+
+    // Only the prereq is takeable.
+    qp(&db)
+        .args(["take", "--as", "w1", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""display_id":"QP-1""#));
+    qp(&db)
+        .args(["take", "--as", "w2", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""taken":null"#));
+    qp(&db)
+        .args(["show", "QP-2", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""state":"pending""#));
+
+    // Resolving the prereq makes the dependent takeable, and not before.
+    qp(&db)
+        .args(["claim", "QP-1", "--as", "w1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["complete", "QP-1", "--as", "w1"])
+        .assert()
+        .success();
+    qp(&db)
+        .args(["take", "--as", "w2", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""display_id":"QP-2""#));
+}
+
+/// An empty queue is exit 0 with an explicit null, not an error.
+///
+/// The exit code is the load-bearing half: a poller retries on 2, so a drained
+/// queue answering 2 would hot-loop, and under `set -e` any non-zero code aborts
+/// the loop that polls for work. See `docs/modules/take.md`.
+#[test]
+fn take_on_an_empty_queue_exits_zero_and_mutates_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("db.sqlite");
+    qp(&db).arg("init").assert().success();
+    qp(&db).args(["add", "done already"]).assert().success();
+    qp(&db)
+        .args(["cancel", "QP-1", "--reason", "r"])
+        .assert()
+        .success();
+
+    let before = qp(&db).args(["timeline", "--json"]).assert().success();
+    let before = String::from_utf8(before.get_output().stdout.clone()).unwrap();
+
+    qp(&db)
+        .args(["take", "--as", "w1", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(r#""taken":null"#));
+    qp(&db)
+        .args(["take", "--as", "w1"])
+        .assert()
+        .success()
+        .stdout(contains("nothing to take"));
+
+    let after = qp(&db).args(["timeline", "--json"]).assert().success();
+    let after = String::from_utf8(after.get_output().stdout.clone()).unwrap();
+    assert_eq!(before, after, "a no-work take must write no events");
+}
+
+/// A command in a directory with no store must fail loudly and create nothing.
+///
+/// This used to be the quietest bug in the tool. `qp list --json` here printed
+/// `[]` and exited 0 — after creating `./.quipu/db.sqlite` on the way — so a
+/// misconfigured machine looked exactly like an empty project, and the next
+/// `qp add` filed a real ticket into a store nobody meant to make. The
+/// `.quipu` assertion is the load-bearing half: an exit code alone would still
+/// pass if resolution kept creating on the side.
+#[test]
+fn command_without_a_store_fails_with_no_store_and_creates_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    for args in [
+        vec!["list", "--json"],
+        vec!["add", "ghost"],
+        vec!["show", "QP-1"],
+        vec!["status"],
+    ] {
+        qp_bare()
+            .current_dir(tmp.path())
+            .args(&args)
+            .assert()
+            .failure()
+            .code(6)
+            .stderr(contains("no quipu store in"))
+            .stderr(contains("qp init"));
+    }
+
+    assert!(
+        !tmp.path().join(".quipu").exists(),
+        "a failing command must not have created a store"
+    );
+}
+
+/// The `--json` envelope for the same condition: a consumer branches on `kind`,
+/// not on the prose, and `path` names the store that was looked for.
+#[test]
+fn no_store_renders_a_json_envelope_with_kind_and_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let assert = qp_bare()
+        .current_dir(tmp.path())
+        .args(["list", "--json"])
+        .assert()
+        .failure()
+        .code(6);
+    let body = json_stderr(&assert);
+    assert_eq!(body["error"]["kind"], "no_store");
+    assert!(body["error"]["path"].is_string());
+    assert!(!tmp.path().join(".quipu").exists());
+}
+
+/// `qp init` is the one command that may create a store, and still does.
+#[test]
+fn init_is_the_only_command_that_creates_a_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    qp_bare()
+        .current_dir(tmp.path())
+        .arg("init")
+        .assert()
+        .success();
+    assert!(tmp.path().join(".quipu").join("db.sqlite").exists());
+    qp_bare()
+        .current_dir(tmp.path())
+        .args(["add", "now-there-is-somewhere-to-put-this"])
+        .assert()
+        .success();
+}
+
+/// Regression guard on the git-common-dir fallback, which the attach check must
+/// not break: a worktree is a *sibling* of the main repo, so the ancestor walk
+/// never reaches the repo's `.quipu/`. If `require_attached` ran against the
+/// cwd rather than the resolved path, every agent working in a worktree would
+/// be told there is no store while it is sitting right there.
+#[test]
+fn worktree_without_its_own_store_still_reaches_the_main_repo_store() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main = tmp.path().join("repo-main");
+    git_repo(&main);
+    let main_db = main.join(".quipu").join("db.sqlite");
+    qp(&main_db).arg("init").assert().success();
+
+    let wt = tmp.path().join("repo-wt");
+    git_worktree(&main, &wt, "wt-branch");
+
+    qp_bare()
+        .current_dir(&wt)
+        .args(["add", "filed-from-a-worktree-with-no-store"])
+        .assert()
+        .success();
+
+    assert_eq!(task_count(&main_db), 1);
+    assert!(
+        !wt.join(".quipu").exists(),
+        "the worktree must not have grown a store of its own"
+    );
+}
+
+/// An explicit `--db`/`QP_DB` at a path with no store fails the same way.
+///
+/// Deliberately not exempted. An explicit path is a *claim about where the
+/// store is*; honouring a wrong one by conjuring an empty store is precisely
+/// the silent cross-machine failure the error exists to prevent. `qp init`
+/// with that path is how you say "create it".
+#[test]
+fn explicit_db_at_a_missing_path_fails_rather_than_creating() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("nowhere").join("db.sqlite");
+
+    qp(&db)
+        .args(["list", "--json"])
+        .assert()
+        .failure()
+        .code(6)
+        .stderr(contains("no quipu store at"));
+    assert!(!db.exists());
+    assert!(!tmp.path().join("nowhere").exists());
+
+    qp_bare()
+        .current_dir(tmp.path())
+        .args(["--db", db.to_str().unwrap(), "add", "ghost"])
+        .assert()
+        .failure()
+        .code(6);
+    assert!(!db.exists());
+
+    // ...and `init` with the same path is how you actually mean it.
+    qp(&db).arg("init").assert().success();
+    assert!(db.exists());
 }
 
 // ---------------------------------------------------------------------------

@@ -50,6 +50,14 @@ one project holds two stores that independently minted the same rowid, the id is
 suffixed with the head of the origin store's uuid; the full origin pair is always
 in the JSON.
 
+An id from this view is a label, not a handle. It is only resolvable in the
+store that minted it: every other store rejects a foreign prefix outright
+(`id::resolve_full`), and a store sharing the prefix resolves the number
+against its own rows, which is a different ticket. A consumer that flattens
+`projects[].tasks[]` and feeds a `display_id` back to a local command is
+addressing whatever sits at that rowid here. Route by `origin_uuid` +
+`origin_task_id`.
+
 ## Reuse, not a second implementation
 
 Downloading is `sync::materialise`, the same LIST-then-GET the exchange uses, into

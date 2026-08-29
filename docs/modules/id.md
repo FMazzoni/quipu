@@ -1,26 +1,41 @@
+The prefix is part of the identifier, not decoration: it is the only
+redundancy an id string carries against being applied to the wrong store, so
+`parse` surfaces it and `resolve_full` refuses one that is not this store's.
+Dropping that check does not fail loudly — it resolves to a real, valid,
+*different* row, and every mutating command then changes that row instead.
+
 This module owns the `<PREFIX>-<rowid>` display id (JIRA-style: `QP-1`,
 `ACME-42`) and the translation in both directions. The prefix is per-store,
 2–5 uppercase letters, fixed at the first `qp init` and ignored by later ones;
 `QP` is the default.
 
-## Rowid is the identity, display id is a label
+## Rowid is the identity, the prefix scopes it to a store
 
 `display_id` is a `NOT NULL UNIQUE` column on `task`, but nothing resolves
-through it. `parse` extracts the digits and `resolve_full` looks the row up by
-`WHERE id = ?` — the integer rowid. The prefix a caller types is validated for
-shape and then discarded.
+through the whole string. `parse` splits a reference into its prefix and its
+digits, and `resolve_full` looks the row up by `WHERE id = ?` — the integer
+rowid — after checking the prefix against this store's `meta.display_prefix`.
 
-That is deliberate, and it is what makes the CLI forgiving in a way a string
-match could not be. `QP-1`, `qp-001`, `  qp-1  ` and `ACME-1` all reach the
-same row, because none of the differences between them survive `parse`
+Everything that is *not* identity is still forgiven, which is what keeps the
+CLI usable: `QP-1`, `qp-001` and `  qp-1  ` all reach the same row, because
+case, zero-padding and whitespace do not survive `parse`
 (`resolve_handles_whitespace_and_lowercase`, `resolve_handles_zero_padding`).
-An agent that reconstructs an id from a log line, a shell variable, or its own
-memory of the prefix gets the right task or a clean `not_found`, never a
-silently different one. `parse` also still accepts the legacy `T<DIGITS>` form.
+The legacy `T<DIGITS>` form parses with no prefix at all and is therefore
+unchecked; it predates per-store prefixes and has nothing to compare against.
 
-The cost is that a prefix typo is not caught. `ACME-1` against a `QP` store
-resolves to `QP-1` rather than erroring. Cross-store id confusion is guarded
-elsewhere — see the project-uuid mismatch warning in `db.rs` — not here.
+The prefix itself is identity, and skipping the comparison was a silent data
+hazard rather than a convenience. Rowids are dense and start at 1 in every
+store, so a given number names a real row nearly everywhere; an id carrying
+some other store's prefix used to resolve, be echoed back under *this* store's
+prefix, and — for `tag`, `claim`, `complete` and every other mutating command —
+change the wrong ticket with no error. The prefix is the only redundancy an id
+string carries, so it is checked: a mismatch is `invalid_input` (exit 1) naming
+both prefixes (`resolve_rejects_foreign_prefix`).
+
+This is necessary, not sufficient. Prefixes are not unique across stores, so
+two projects can share one and a matching prefix still does not prove the id
+came from here. Cross-store provenance is guarded elsewhere — see the
+project-uuid mismatch warning in `db.rs`.
 
 ## `resolve` and `resolve_full`
 

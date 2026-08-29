@@ -592,6 +592,14 @@ impl Store {
     fn qp(&self) -> Command {
         let mut c = Command::cargo_bin("qp").unwrap();
         c.env("QP_DB", &self.db);
+        // The doctor reads the project registry, so it must read THIS test's
+        // and never the developer's: a duplicate or dangling entry in a real
+        // one is a fault, and it would fail these tests for a reason that has
+        // nothing to do with remotes.
+        c.env(
+            "QUIPU_REGISTRY",
+            self.db.parent().unwrap().join("registry.json"),
+        );
         for k in [
             "AWS_ACCESS_KEY_ID",
             "AWS_SECRET_ACCESS_KEY",

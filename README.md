@@ -54,6 +54,13 @@ Raw `cargo install --path .` works too; the `justfile` is just a shortcut layer.
     qp status
     qp watch
 
+Where several machines pull their own work rather than a coordinator handing it
+out, `qp take` replaces the `list`-then-`assign` pair with one atomic step —
+selection and assignment happen in a single statement, so two machines cannot
+choose the same ticket:
+
+    qp take --as alice --tag wave:1     # → assigned, or `taken: null` if the queue is drained
+
 ## Structure: what blocks what, what is part of what
 
 Both are `dep` edges and both make the depender wait, but they say different
@@ -129,11 +136,20 @@ reading any other field:
 | `not_found` | `task` | referenced entity/edge doesn't exist |
 | `invariant` | `code` | structural violation, e.g. a dependency cycle — replan |
 | `invalid_input` | — | bad CLI input |
+| `no_store` | `path` | no store here — not attached to a project; don't retry |
 | `internal` | — | uncategorized failure; treat as a bug |
 
-The first five are the `QuipuError` variants in `src/db.rs`; `internal` is not a
+The first six are the `QuipuError` variants in `src/db.rs`; `internal` is not a
 variant but the fallback `main.rs` emits for any error that does not downcast to
-one, so a consumer matching on `kind` must handle all six.
+one, so a consumer matching on `kind` must handle all seven.
+
+Exit codes: `0` success, `1` `invalid_input`/`internal`, `2` the store refused
+(`conflict`, `not_owner`, `not_found`, `invariant` — retrying may succeed), `3`
+`wait` timed out, `4` `wait --cohort-done` matched an empty cohort, `5`
+`remote doctor` found a fault, `6` `no_store`. Only `2` is worth retrying;
+`6` never is. Every command but `qp init` refuses to create a store, so a
+machine pointed at nothing fails loudly instead of quietly acquiring an empty
+private project.
 
 `code` (on `conflict` and `invariant` only) is a stable string for precise skill
 authoring (e.g. `already_claimed`, `not_ready`, `state_changed_under_us`) and

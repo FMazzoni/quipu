@@ -160,6 +160,16 @@ impl<'a> Seq<'a> {
         self.push(name, Status::Note, detail.into(), None);
     }
 
+    /// Records something to do about a state that is not a fault.
+    ///
+    /// A `Note` normally carries no remedy, because there is nothing to fix.
+    /// This is the case in between: not being registered is neither broken nor
+    /// finished — the store works, and nothing can reach it by name — so it
+    /// must not fail the run, and it must still say what to type.
+    fn advice(&mut self, name: &'static str, detail: impl Into<String>, remedy: impl Into<String>) {
+        self.push(name, Status::Note, detail.into(), Some(remedy.into()));
+    }
+
     /// Records a failure and the remedy that must accompany one.
     ///
     /// Stopping the sequence is the CALLER's job — every caller returns right
@@ -204,6 +214,13 @@ pub fn run(db_path: &Path, r: &Remotes) -> Report {
         }
     }
 
+    // Unconditional, unlike everything below: naming and the registry are what
+    // a caller uses to reach this store at all, and they are wrong in exactly
+    // the same way whether or not a remote is attached.
+    let reg = crate::registry::load();
+    registry_checks(&reg, &mut Seq::new("registry", &mut checks));
+    project_checks(db_path, &reg, &mut Seq::new("project", &mut checks));
+
     if let Some(url) = &r.ledger {
         ledger_checks(url, &mut Seq::new("ledger", &mut checks));
     }
@@ -218,6 +235,204 @@ pub fn run(db_path: &Path, r: &Remotes) -> Report {
         local_only: r.local_only(),
         ok,
         checks,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// naming and the registry
+// ---------------------------------------------------------------------------
+
+/// The registry file itself: readable, versioned, and internally consistent.
+///
+/// Separate from the `project` sequence below because the faults are separate.
+/// A duplicate somewhere else in the file says nothing about whether THIS store
+/// is named correctly, and folding them into one stop-at-first-failure sequence
+/// would hide the one behind the other.
+fn registry_checks(reg: &anyhow::Result<crate::registry::Registry>, s: &mut Seq) {
+    let reg = match reg {
+        Ok(r) => r,
+        Err(e) => {
+            s.fail(
+                "file",
+                format!("{e:#}"),
+                format!(
+                    "The registry is the only map from a project name to a store, so quipu \
+                     refuses to read one it does not understand rather than resolve a name \
+                     to the wrong file. Fix the file, or move it aside and re-run \
+                     `qp project register` in each store. `{}` points somewhere else entirely.",
+                    crate::registry::ENV_REGISTRY
+                ),
+            );
+            s.skip("unique");
+            s.skip("dangling");
+            return;
+        }
+    };
+    let dups = reg.duplicates();
+    if dups.is_empty() {
+        s.pass(
+            "unique",
+            format!(
+                "{} project(s) registered in {}, no name claimed twice",
+                reg.entries.len(),
+                reg.path.display()
+            ),
+        );
+    } else {
+        let listed: Vec<String> = dups
+            .iter()
+            .map(|(name, paths)| {
+                let ps: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+                format!("{name}: {}", ps.join(", "))
+            })
+            .collect();
+        s.fail(
+            "unique",
+            format!(
+                "a name is claimed by more than one store — {}",
+                listed.join("; ")
+            ),
+            "A lookup on that name resolves to whichever entry comes first, which is not a \
+             decision anybody made. Drop the wrong one with `qp project unregister <NAME>`, \
+             then give the store that lost its entry a distinct name at \
+             `qp init --name <NAME>` and re-register it.",
+        );
+        s.skip("dangling");
+        return;
+    }
+    let dangling = reg.dangling();
+    if dangling.is_empty() {
+        s.pass(
+            "dangling",
+            "every registered store is still where the registry says",
+        );
+    } else {
+        let listed: Vec<String> = dangling
+            .iter()
+            .map(|e| format!("{} -> {}", e.name, e.path.display()))
+            .collect();
+        s.fail(
+            "dangling",
+            format!(
+                "registry entries point at stores that are gone — {}",
+                listed.join("; ")
+            ),
+            "The store moved or was deleted, and an index cannot notice on its own. Re-run \
+             `qp project register` from the store's new location, or drop the entry with \
+             `qp project unregister <NAME>`.",
+        );
+    }
+}
+
+/// This store's own name, and whether the registry agrees about it.
+fn project_checks(db_path: &Path, reg: &anyhow::Result<crate::registry::Registry>, s: &mut Seq) {
+    let conn = match rusqlite::Connection::open(db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            s.fail(
+                "name",
+                format!("cannot open the store at {}: {e}", db_path.display()),
+                "Run `qp init` here, or point `--db` / `QP_DB` at the store you meant.",
+            );
+            s.skip("name_form");
+            s.skip("registered");
+            s.skip("entry_path");
+            return;
+        }
+    };
+    let name = match crate::project::read_name(&conn) {
+        Ok(Some(n)) => n,
+        _ => {
+            s.fail(
+                "name",
+                format!("the store at {} has no project_name", db_path.display()),
+                "Every store carries the name it answers to, so the name survives a move and \
+                 cannot drift from the data it names. Run any qp command to have one derived, \
+                 or `qp init --name <NAME>` to choose it.",
+            );
+            s.skip("name_form");
+            s.skip("registered");
+            s.skip("entry_path");
+            return;
+        }
+    };
+    let derived = crate::project::name_origin(&conn).ok().flatten().as_deref()
+        == Some(crate::project::ORIGIN_DERIVED);
+    if derived {
+        s.note(
+            "name",
+            format!(
+                "`{name}` was derived when this store was migrated, not chosen. It works; \
+                 `qp init --name <NAME>` replaces it with something a person would type."
+            ),
+        );
+    } else {
+        s.pass("name", format!("named `{name}`"));
+    }
+
+    if let Err(e) = crate::project::validate_name(&name) {
+        s.fail(
+            "name_form",
+            format!("{e:#}"),
+            "A name is a shell argument and a lookup key, so a spelling that quotes or \
+             normalises two ways is two projects. Set a well-formed one with \
+             `qp init --name <NAME>`.",
+        );
+        s.skip("registered");
+        s.skip("entry_path");
+        return;
+    }
+    s.pass(
+        "name_form",
+        format!("`{name}` is a well-formed project name"),
+    );
+
+    let Ok(reg) = reg else {
+        s.skip("registered");
+        s.skip("entry_path");
+        return;
+    };
+    let Some(entry) = reg.lookup(&name) else {
+        // Deliberately not a fault. Every store starts unregistered, and one
+        // that never is still works for everything that finds its store by
+        // walking up from the cwd — which today is every command. Failing the
+        // run here would make `qp remote doctor` exit non-zero on a perfectly
+        // healthy store, and a check that fires on the normal case is one
+        // people learn to ignore.
+        s.advice(
+            "registered",
+            format!("`{name}` is not in {}", reg.path.display()),
+            "Nothing can reach this store by NAME until it is indexed — registration is an \
+             explicit act, never a side effect. Run `qp project register` here.",
+        );
+        s.skip("entry_path");
+        return;
+    };
+    s.pass("registered", format!("`{name}` is registered"));
+
+    let same = match (entry.path.canonicalize(), db_path.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        // An entry pointing at a file that is gone is the registry's own
+        // `dangling` fault, already reported; here it simply is not this store.
+        _ => entry.path == db_path,
+    };
+    if same {
+        s.pass(
+            "entry_path",
+            format!("the entry for `{name}` points back at this store"),
+        );
+    } else {
+        s.fail(
+            "entry_path",
+            format!(
+                "`{name}` resolves to {}, which is not this store ({})",
+                entry.path.display(),
+                db_path.display()
+            ),
+            "Two stores are disagreeing about one name, so a lookup reaches the other one's \
+             tickets. Give this store a distinct name with `qp init --name <NAME>` and \
+             re-register, or `qp project unregister` the stale entry.",
+        );
     }
 }
 
@@ -1089,6 +1304,53 @@ fn repository_remedy(transport: Transport, named: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A registry with nothing in it, at a path nothing will be written to.
+    fn empty_registry(dir: &std::path::Path) -> anyhow::Result<crate::registry::Registry> {
+        Ok(crate::registry::Registry {
+            path: dir.join("registry.json"),
+            entries: Vec::new(),
+        })
+    }
+
+    /// The `name` failure branch, which no CLI path can reach.
+    ///
+    /// Every open heals a missing name, so the branch is held back here by
+    /// giving the store a `meta` table with no `project_uuid` — the one shape
+    /// the backfill declines to name.
+    #[test]
+    fn a_store_with_no_name_is_a_named_fault_and_stops_the_sequence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("db.sqlite");
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .unwrap();
+        let reg = empty_registry(tmp.path());
+        let mut checks = Vec::new();
+        project_checks(&db, &reg, &mut Seq::new("project", &mut checks));
+        assert_eq!(checks[0].name, "name");
+        assert_eq!(checks[0].status, Status::Fail);
+        assert!(checks[0].remedy.as_ref().unwrap().contains("--name"));
+        assert!(
+            checks[1..].iter().all(|c| c.status == Status::Skipped),
+            "a store with no name makes every later check meaningless"
+        );
+    }
+
+    /// An unreadable registry must not be reported as an empty one.
+    #[test]
+    fn an_unreadable_registry_fails_and_skips_the_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("registry.json");
+        std::fs::write(&p, "{not json").unwrap();
+        let reg = crate::registry::load_from(&p);
+        let mut checks = Vec::new();
+        registry_checks(&reg, &mut Seq::new("registry", &mut checks));
+        assert_eq!(checks[0].name, "file");
+        assert_eq!(checks[0].status, Status::Fail);
+        assert!(checks[1..].iter().all(|c| c.status == Status::Skipped));
+    }
 
     /// The classifier's inputs are git's real sentences, pasted verbatim.
     ///
