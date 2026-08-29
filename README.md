@@ -476,10 +476,14 @@ attribute a ticket without guessing.
 ## Serving a store over HTTP
 
     qp serve --bind 127.0.0.1:8787                   # the store this directory resolves to
+
+    qp project register                              # once per store, in its own directory
     qp serve --bind 127.0.0.1:8787 --project alpha --project beta
 
     qp --server http://127.0.0.1:8787 add "wire it up"
     qp --server http://127.0.0.1:8787 --project alpha claim QP-7 --as w-a
+
+    QP_SERVER=http://127.0.0.1:8787 QP_PROJECT=alpha qp take --as w-a
 
 `qp serve` fronts stores that already exist with an HTTP listener, in the
 foreground, so that a machine which cannot reach the store file can still act on
@@ -489,10 +493,30 @@ then the url this store recorded with `qp remote set --front-door`. With none of
 the three, and for every verb the front door does not answer, the store on this
 disk is opened exactly as before.
 
-**On a machine with no store, the channel is `QP_SERVER`** — the recorded url
-lives in the store, so there is nothing to read there. Add `--project` when the
-front door holds more than one store; one naming a store the server did not open
-at startup is `no_store`, exit 6.
+**What the front door answers is a rule, not a list.** Everything that acts on a
+*board* is served — every state transition, every query over it, every log and
+tag — so the whole working loop, `take` and `list` and `report` included, runs
+over the wire. What stays local is what acts on *this machine*: `qp init`
+creates a store file here, `export` / `import` / `sync` / `ledger` name
+directories and credentials here, `project` and `remote` describe this machine's
+own configuration, and `wait` / `watch` poll a file on this disk. The set is
+declared once in `src/route.rs` and asserted whole by a test, which is where to
+look rather than at a count written down somewhere it can go stale.
+
+**`--project` on `qp serve` resolves through the machine-local registry, so each
+store has to be registered first.** Run `qp project register` once inside each
+store's directory; it records that store's name (the one `qp init` gave it)
+against its path. A name with no entry is `no_store`, exit 6, before the listener
+binds — so the two-project line above does not run until both are registered. The
+plain `qp serve --bind ...` form needs no registry at all: with no `--project` it
+serves the store the current directory resolves to.
+
+**On a machine with no store, the channel is two environment variables** —
+`QP_SERVER` and, when the front door holds more than one store, `QP_PROJECT`.
+The recorded url lives in a store, so there is nothing to read on a machine that
+has none, and a bare `--server` against a multi-store front door is refused
+rather than guessed at. Naming a store the server did not open at startup is
+`no_store`, exit 6.
 
 **The server is not the writer.** Serialisation comes from `BEGIN IMMEDIATE`
 inside SQLite and always has, so a `qp` running in a terminal against the same
