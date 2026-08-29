@@ -2,7 +2,7 @@
 //!
 #![doc = include_str!("../docs/modules/doctor.md")]
 
-use crate::remote::Remotes;
+use crate::remote::{Remotes, ServerReach};
 use crate::s3::{self, Fault, Scope};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -58,7 +58,7 @@ impl Status {
 /// a slower error message, so every `Fail` carries one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Check {
-    /// Which sequence this belongs to: `config`, `registry`, `project` or `ledger`.
+    /// Which sequence this belongs to: `config`, `registry`, `project`, `ledger` or `server`.
     pub target: String,
     /// Stable machine name for the check, for a script that branches on one.
     pub name: String,
@@ -74,6 +74,9 @@ pub struct Check {
 #[cfg_attr(test, derive(Default))]
 pub struct Report {
     pub ledger: Option<String>,
+    /// The front door this store is reached through, when one is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
     pub local_only: bool,
     /// False when any check failed — the same condition as the non-zero exit.
     pub ok: bool,
@@ -95,6 +98,7 @@ impl crate::outcome::Outcome for Report {
                 current = c.target.as_str();
                 let url = match c.target.as_str() {
                     "ledger" => self.ledger.as_deref(),
+                    "server" => self.server.as_deref(),
                     _ => None,
                 };
                 out.push(match url {
@@ -177,12 +181,19 @@ impl<'a> Seq<'a> {
         self.push(name, Status::Fail, detail.into(), Some(remedy.into()));
     }
 
-    /// Marks a check that was never run because an earlier one failed.
+    /// Marks a check that was never run because an earlier one did not pass.
+    ///
+    /// "Did not pass" and not "failed": a `Note` stops a sequence too, and the
+    /// `registered` advice is a note on the ordinary unregistered store — so
+    /// the older wording claimed a failure that had not happened on nearly
+    /// every run of the command whose whole job is to be believed.
     fn skip(&mut self, name: &'static str) {
         self.push(
             name,
             Status::Skipped,
-            "not run: an earlier check failed, so this one could not mean anything".to_string(),
+            "not run: an earlier check in this sequence did not pass, so this one could not \
+             mean anything"
+                .to_string(),
             None,
         );
     }
@@ -193,16 +204,30 @@ pub fn run(db_path: &Path, r: &Remotes) -> Report {
     let mut checks: Vec<Check> = Vec::new();
 
     {
+        // Four combinations, and only one of them is "nothing configured". A
+        // store may have a ledger, a front door, both, or neither, and each of
+        // the other three is a healthy shape — so this check names what IS set
+        // rather than asking one yes/no question about the ledger.
         let mut s = Seq::new("config", &mut checks);
-        match r.ledger.is_some() {
-            false => s.note(
+        match (r.ledger.is_some(), r.server.is_some()) {
+            (false, false) => s.note(
                 "configured",
-                "local-only: no ledger. Nothing to check, and nothing wrong — attach one \
-                 with `qp remote set --ledger`.",
+                "local-only: no ledger and no server. Nothing to check, and nothing wrong \
+                 — attach one with `qp remote set --ledger` or `--front-door`.",
             ),
-            true => s.pass(
+            (true, false) => s.pass(
                 "configured",
                 "ledger set: the event log syncs, claims are arbitrated locally",
+            ),
+            (false, true) => s.pass(
+                "configured",
+                "server set: served verbs go through the front door, and this store syncs \
+                 with nobody",
+            ),
+            (true, true) => s.pass(
+                "configured",
+                "ledger and server both set: the event log syncs, and served verbs go \
+                 through the front door",
             ),
         }
     }
@@ -217,10 +242,20 @@ pub fn run(db_path: &Path, r: &Remotes) -> Report {
     if let Some(url) = &r.ledger {
         ledger_checks(url, &mut Seq::new("ledger", &mut checks));
     }
+    if let Some(url) = &r.server {
+        // The name this store answers to, read without opening the store the way
+        // `db::open` does — a diagnostic must not migrate the thing it measures,
+        // and `project_checks` above has already reported an unreadable one.
+        let name = rusqlite::Connection::open(db_path)
+            .ok()
+            .and_then(|c| crate::project::read_name(&c).ok().flatten());
+        server_checks(url, name.as_deref(), &mut Seq::new("server", &mut checks));
+    }
 
     let ok = !checks.iter().any(|c| c.status == Status::Fail);
     Report {
         ledger: r.ledger.clone(),
+        server: r.server.clone(),
         local_only: r.local_only(),
         ok,
         checks,
@@ -838,6 +873,175 @@ fn unreachable_remedy(endpoint: &str) -> String {
     )
 }
 
+// ---------------------------------------------------------------------------
+// the front door
+// ---------------------------------------------------------------------------
+
+/// The server sequence, in the order a failure makes the rest meaningless.
+///
+/// `version` sits BEFORE `serves` for the same reason the ledger checks the
+/// clock before the credential verdict: it is a property of the process rather
+/// than of the request, it never stops the sequence, and knowing the front door
+/// is a different build is context for everything reported after it.
+fn server_checks(url: &str, project: Option<&str>, s: &mut Seq) {
+    if let Err(e) = crate::remote::validate_server_url(url) {
+        s.fail("url", format!("{e:#}"), SERVER_URL_REMEDY);
+        return skip_rest_of_server(s, "url");
+    }
+    s.pass("url", format!("front door at {url}"));
+
+    let (version, projects) = match crate::remote::probe_server(url) {
+        ServerReach::Alive { version, projects } => (version, projects),
+        ServerReach::Unreachable(detail) => {
+            s.fail(
+                "reachable",
+                format!("nothing answered at {url}: {detail}"),
+                server_unreachable_remedy(url),
+            );
+            return skip_rest_of_server(s, "reachable");
+        }
+        // Deliberately the same check as "nothing answered", with a different
+        // detail and a different remedy. The question `reachable` asks is "is a
+        // quipu front door there", and the answer is no both ways; what differs
+        // is what to do next, and that is what the remedy carries.
+        ServerReach::NotQuipu(detail) => {
+            s.fail(
+                "reachable",
+                format!(
+                    "something is listening at {url} and it is not a quipu front door: {detail}"
+                ),
+                format!(
+                    "the port is taken by another service, or the url points at a proxy that \
+                     is not routed to `qp serve`. `{}` on a quipu front door answers a JSON \
+                     object naming its version and the projects it opened at startup. Check \
+                     what holds that port before restarting anything.",
+                    crate::wire::HEALTH_PATH
+                ),
+            );
+            return skip_rest_of_server(s, "reachable");
+        }
+    };
+    s.pass(
+        "reachable",
+        format!(
+            "the front door answered {}; it serves {}",
+            crate::wire::HEALTH_PATH,
+            list_or_none(&projects)
+        ),
+    );
+
+    version_check(version.as_deref(), s);
+
+    let Some(name) = project else {
+        // Not a fault of the server's, and not silence either: the `project`
+        // sequence has already failed on the unreadable name, and repeating it
+        // here as a server fault would name the wrong thing to fix.
+        s.note(
+            "serves",
+            format!(
+                "not checked: this store has no readable project name, so there is nothing \
+                 to look for in the server's list ({}). The `project` sequence reports why.",
+                list_or_none(&projects)
+            ),
+        );
+        return;
+    };
+    if projects.iter().any(|p| p == name) {
+        s.pass("serves", format!("the front door serves `{name}`"));
+    } else {
+        s.fail(
+            "serves",
+            format!(
+                "the front door is running and does not serve `{name}` — it serves {}",
+                list_or_none(&projects)
+            ),
+            format!(
+                "this is NOT unreachable and retrying cannot help: the store set is fixed \
+                 before the listener binds and no request can add to it. On the machine that \
+                 holds `{name}`, register it (`qp project register`) and restart the front \
+                 door naming it (`qp serve --project {name} ...`). Or point this store at the \
+                 front door that does serve it with `qp remote set --front-door <url>`."
+            ),
+        );
+    }
+}
+
+/// Compares this client's version with the front door's, and refuses to fail on it.
+///
+/// The judgement here is that a version difference is EVIDENCE and not a
+/// verdict. What has to match for a request to work is the served verb table,
+/// the error taxonomy and the payload shapes — and the crate version is neither
+/// necessary nor sufficient for that: two builds of the same version from
+/// different commits can differ in all three, and two adjacent versions
+/// normally differ in none. So a mismatch is a `Note` with advice. A check that
+/// refused to work on a version difference would fire on the ordinary case of
+/// an operator upgrading their client before restarting the front door, and a
+/// check that fires on the ordinary case is one people learn to ignore.
+fn version_check(server: Option<&str>, s: &mut Seq) {
+    let mine = env!("CARGO_PKG_VERSION");
+    match server {
+        Some(v) if v == mine => s.pass(
+            "version",
+            format!(
+                "client and front door both report {mine} (equal versions are not proof of \
+                 an equal verb table — two builds of one version can differ)"
+            ),
+        ),
+        Some(v) => s.advice(
+            "version",
+            format!("this client is {mine}, the front door is {v}"),
+            "not a fault on its own: the compatibility unit is the served verb table, the \
+             error taxonomy and the payload shapes, not the version string. Restart the \
+             front door on the same binary as this client if a verb it should serve comes \
+             back `not_found`, or if a payload field this client expects is missing.",
+        ),
+        None => s.note(
+            "version",
+            "the front door reported no version, so client and server could not be compared",
+        ),
+    }
+}
+
+/// Names every server check that will not run, once one has failed.
+fn skip_rest_of_server(s: &mut Seq, after: &str) {
+    let all = ["url", "reachable", "version", "serves"];
+    let from = all.iter().position(|n| *n == after).map_or(0, |i| i + 1);
+    for name in &all[from..] {
+        s.skip(name);
+    }
+}
+
+fn list_or_none(projects: &[String]) -> String {
+    match projects.is_empty() {
+        true => "no projects at all".to_string(),
+        false => projects
+            .iter()
+            .map(|p| format!("`{p}`"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
+const SERVER_URL_REMEDY: &str = "the server url is `https://<host>[:<port>]`, or `http://` to \
+     a loopback literal only — plaintext off loopback is refused, and an `s3://` url is the \
+     LEDGER's form, not a front door's. Re-set it with `qp remote set --front-door <url>`.";
+
+/// The three causes of silence at a front door, named because one probe cannot separate them.
+fn server_unreachable_remedy(url: &str) -> String {
+    format!(
+        "THREE causes look identical here and this probe cannot separate them:\n\
+         (1) no front door is running — `qp serve` is never started implicitly and nothing \
+         in quipu depends on one, so a url that was set is not a process that exists. Start \
+         it on the machine that holds the store: `qp serve --bind <addr>`;\n\
+         (2) it is running on a different address or port than {url} names;\n\
+         (3) this machine cannot reach that host at all — a network or firewall answer, \
+         byte-identical to the other two from here.\n\
+         Nothing is broken in the store either way: clear the url with \
+         `qp remote clear --front-door` and every command keeps working against the file on this \
+         disk."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -946,6 +1150,60 @@ mod tests {
         assert!(matches!(clock_verdict(None, &Ok(())), Clock::Unknown));
     }
 
+    /// A version difference is advice, never a fault.
+    ///
+    /// The assertion that matters is the status: a `Fail` here would exit 5 on
+    /// the ordinary case of a client upgraded ahead of the front door it talks
+    /// to, and the fault taxonomy would then be crying wolf on every run.
+    #[test]
+    fn a_version_difference_is_advice_and_never_a_failure() {
+        let mut checks = Vec::new();
+        version_check(
+            Some("0.0.1-not-this-build"),
+            &mut Seq::new("server", &mut checks),
+        );
+        assert_eq!(checks[0].status, Status::Note);
+        assert!(
+            checks[0].remedy.is_some(),
+            "advice without advice is a shrug"
+        );
+
+        let mut same = Vec::new();
+        version_check(
+            Some(env!("CARGO_PKG_VERSION")),
+            &mut Seq::new("server", &mut same),
+        );
+        assert_eq!(same[0].status, Status::Pass);
+
+        let mut none = Vec::new();
+        version_check(None, &mut Seq::new("server", &mut none));
+        assert_eq!(none[0].status, Status::Note);
+        assert!(none[0].remedy.is_none());
+    }
+
+    /// A url of the wrong KIND is a url fault, not a reachability fault.
+    ///
+    /// The whole slice exists because an `s3://` url used to be diagnosed by
+    /// machinery that had no business looking at it. The inverse must not
+    /// happen either: a front door check handed a ledger url must say so and
+    /// probe nothing.
+    #[test]
+    fn a_ledger_url_in_the_server_slot_fails_at_the_url_and_probes_nothing() {
+        let mut checks = Vec::new();
+        server_checks(
+            "s3://host.invalid/bucket",
+            Some("example"),
+            &mut Seq::new("server", &mut checks),
+        );
+        assert_eq!(checks[0].name, "url");
+        assert_eq!(checks[0].status, Status::Fail);
+        assert!(checks[0].remedy.as_ref().unwrap().contains("LEDGER"));
+        assert!(
+            checks[1..].iter().all(|c| c.status == Status::Skipped),
+            "nothing may be probed after the url is the wrong kind"
+        );
+    }
+
     /// A report with checks in it, which the empty `Default` sample cannot reach.
     ///
     /// `remedy` carries `skip_serializing_if` and `Status` is an enum whose wire
@@ -954,6 +1212,7 @@ mod tests {
     fn a_populated_report_round_trips() {
         crate::outcome::round_trip::assert_round_trips(&Report {
             ledger: Some("s3://example/ledger".to_string()),
+            server: Some("https://qp.example.com".to_string()),
             local_only: false,
             ok: false,
             checks: vec![
