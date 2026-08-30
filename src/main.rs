@@ -227,6 +227,20 @@ fn wants_json(cmd: &Cmd) -> bool {
 /// near — gating them on being attached to one would make the tool that
 /// diagnoses a lost project unusable from anywhere a project is lost. Only
 /// `register` reads the store, because only it needs the name and uuid to file.
+/// The one unserved verb whose subject is a url rather than a store.
+///
+/// Split out rather than folded into `needs_store` because the exemption is
+/// conditional on a front door having been named, and `needs_store` answers a
+/// question about the verb alone.
+fn is_remote_doctor(cmd: &Cmd) -> bool {
+    matches!(
+        cmd,
+        Cmd::Remote(cmd::remote::RemoteArgs {
+            op: cmd::remote::RemoteOp::Doctor { .. },
+        })
+    )
+}
+
 fn needs_store(cmd: &Cmd) -> bool {
     !matches!(
         cmd,
@@ -519,7 +533,14 @@ fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
     // list the dispatch arms below use, so the two cannot drift apart.
     let remote =
         server.is_some() && (route::is_served(&cli.cmd) || route::is_client_poll(&cli.cmd));
-    if needs_store(&cli.cmd) && !remote {
+    // `qp remote doctor` with a front door named is the one unserved command
+    // that runs with no store: what it diagnoses is a URL, and on the machine
+    // the front door exists for there is no store to hold one. Scoped to
+    // "a front door was named" deliberately — with neither a store nor a url
+    // there is nothing to diagnose, and `require_attached`'s cwd-aware message
+    // is already the right answer.
+    let url_doctor = server.is_some() && is_remote_doctor(&cli.cmd);
+    if needs_store(&cli.cmd) && !remote && !url_doctor {
         db::require_attached(&db_path, cli.db.is_some())?;
     }
     // `json` is threaded in so the warning matches the stream's format: under
@@ -544,7 +565,7 @@ fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
     // correct configuration is one people learn to filter out, and then it is
     // not there on the day it is true. The condition to keep is: the operator
     // named a front door for THIS invocation and it was not used.
-    if cli.server.is_some() && !remote && needs_store(&cli.cmd) {
+    if cli.server.is_some() && !remote && !url_doctor && needs_store(&cli.cmd) {
         warn_unserved(json);
     }
     if cli.project.len() > 1 && !matches!(cli.cmd, Cmd::Serve(_)) {
@@ -575,7 +596,7 @@ fn real_main(cli: Cli, json: bool) -> anyhow::Result<()> {
         Cmd::Log(a) => route::dispatch::<cmd::log::LogArgs>(&ctx, a),
         Cmd::Tag(a) => route::dispatch::<cmd::tag::TagArgs>(&ctx, a),
         Cmd::Relation(a) => route::dispatch::<cmd::relation::RelationArgs>(&ctx, a),
-        Cmd::Remote(a) => cmd::remote::run(&db_path, a),
+        Cmd::Remote(a) => cmd::remote::run(&ctx, a),
         Cmd::Project(a) => cmd::project::run(&db_path, a),
         Cmd::Timeline(a) => route::dispatch::<cmd::timeline::TimelineArgs>(&ctx, a),
         Cmd::Decisions(a) => route::dispatch::<cmd::decisions::DecisionsArgs>(&ctx, a),

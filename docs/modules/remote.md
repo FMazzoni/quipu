@@ -89,6 +89,19 @@ unreachable *because* `remote` is unserved: resolution never consults the
 recorded url for a verb the front door does not answer, so `show`, `doctor` and
 `clear` are structurally incapable of needing the thing they diagnose.
 
+### `doctor` is the one op here that reads the global `--server`
+
+`set`, `show` and `clear` act on the store in front of them and ignore it.
+`doctor` does not, because what it diagnoses is a url and the machine that most
+needs it has no store to record one — see `docs/modules/doctor.md`. That does
+not weaken the sentence above it: reading a url is not sending a verb to it, so
+`doctor` is still structurally incapable of needing the front door it reports
+on, and it is still the escape hatch from one that is down.
+
+It is also the one command in this group that runs with no store on this disk,
+and only when a front door was named for the invocation. `set`, `show` and
+`clear` all write or read `meta` rows, so they need the file and say so.
+
 ## Local-only is the default and a first-class state
 
 With no url set, quipu does exactly what it always did — no network, no daemon,

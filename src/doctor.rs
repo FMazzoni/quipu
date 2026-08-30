@@ -74,9 +74,13 @@ pub struct Check {
 #[cfg_attr(test, derive(Default))]
 pub struct Report {
     pub ledger: Option<String>,
-    /// The front door this store is reached through, when one is configured.
+    /// The front door that was diagnosed: the one named for this invocation,
+    /// or failing that the one this store records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<String>,
+    /// True when a store is here and neither url is set. False for a storeless
+    /// client, which is not local-only but its opposite — everything it does
+    /// crosses the wire.
     pub local_only: bool,
     /// False when any check failed — the same condition as the non-zero exit.
     pub ok: bool,
@@ -197,82 +201,229 @@ impl<'a> Seq<'a> {
             None,
         );
     }
+
+    /// Marks a check that has nothing to look at here, which is not a fault.
+    ///
+    /// Distinct from `skip` in the only way that matters to a reader: `skip`
+    /// says an earlier check did not pass, and saying that on a storeless
+    /// client would report the intended configuration as damage. Both land on
+    /// `Status::Skipped` so a script that already branches on the status keeps
+    /// working; the detail is what tells the two apart.
+    fn not_applicable(&mut self, name: &'static str, detail: impl Into<String>) {
+        self.push(
+            name,
+            Status::Skipped,
+            format!("not applicable here: {}", detail.into()),
+            None,
+        );
+    }
 }
 
-/// Runs every check for whatever is configured. The only entry point.
-pub fn run(db_path: &Path, r: &Remotes) -> Report {
+/// What one run diagnoses: a url, and whatever local side there is to check.
+///
+/// The struct exists because the answer to "what is being diagnosed" stopped
+/// being "this store's recorded url" the moment the command had to run on a
+/// machine with no store. That machine — a binary and two environment
+/// variables — is the one most likely to be misconfigured and was the one
+/// this command could not run on at all.
+pub struct Subject<'a> {
+    /// Where a store would be. Read for the project sequence when one is there.
+    pub db_path: &'a Path,
+    /// `None` when there is no store on this disk.
+    ///
+    /// A storeless client is a first-class arrangement, exactly as local-only
+    /// is, and it is reported as healthy. A diagnostic that calls the intended
+    /// configuration broken is worse than no diagnostic.
+    pub remotes: Option<&'a Remotes>,
+    /// The front door named for THIS invocation, by `--server` or `QP_SERVER`.
+    ///
+    /// It outranks the store's recorded url because that is the order
+    /// `resolve_server` already dispatches every served verb by, and a
+    /// diagnostic that probed a different url from the one the commands use
+    /// would be answering a question nobody asked.
+    pub named_server: Option<&'a str>,
+    /// The project named by `--project` or `QP_PROJECT`. The only name a
+    /// storeless client has.
+    pub named_project: Option<&'a str>,
+}
+
+/// Which project the `serves` check looks for, and why there may not be one.
+enum Wanted {
+    /// The name this client works on — a store's own, or one from the
+    /// environment — and the project identity behind it, when there is one.
+    ///
+    /// `key` is `None` in two different situations and the check tells them
+    /// apart: a store that has never been stamped, which `qp init` fixes, and a
+    /// storeless client, which cannot have one at all because the key is a
+    /// `meta` row and there is no `meta` here.
+    Named { name: String, key: Option<String> },
+    /// There is a store and its name could not be read; `project_checks` says why.
+    Unreadable,
+    /// A storeless client that named no project. Not a fault on its own: an
+    /// unnamed request selects the front door's only store, so this is only
+    /// wrong when it holds more than one.
+    Unnamed,
+}
+
+/// Runs every check that applies to `subject`. The only entry point.
+pub fn run(subject: &Subject) -> Report {
+    let db_path = subject.db_path;
     let mut checks: Vec<Check> = Vec::new();
+    let ledger = subject.remotes.and_then(|r| r.ledger.clone());
+    // The precedence is `resolve_server`'s, not a second opinion about it.
+    let server = subject
+        .named_server
+        .map(str::to_string)
+        .or_else(|| subject.remotes.and_then(|r| r.server.clone()));
 
     {
-        // Four combinations, and only one of them is "nothing configured". A
-        // store may have a ledger, a front door, both, or neither, and each of
-        // the other three is a healthy shape — so this check names what IS set
-        // rather than asking one yes/no question about the ledger.
         let mut s = Seq::new("config", &mut checks);
-        match (r.ledger.is_some(), r.server.is_some()) {
-            (false, false) => s.note(
-                "configured",
-                "local-only: no ledger and no server. Nothing to check, and nothing wrong \
-                 — attach one with `qp remote set --ledger` or `--front-door`.",
-            ),
-            (true, false) => s.pass(
-                "configured",
-                "ledger set: the event log syncs, claims are arbitrated locally",
-            ),
-            (false, true) => s.pass(
-                "configured",
-                "server set: served verbs go through the front door, and this store syncs \
-                 with nobody",
-            ),
-            (true, true) => s.pass(
-                "configured",
-                "ledger and server both set: the event log syncs, and served verbs go \
-                 through the front door",
-            ),
+        match subject.remotes {
+            // No store on this disk. Healthy when there is a front door to
+            // work through, and nothing to work against at all when there is
+            // not — which the CLI answers with its own cwd-aware message
+            // before ever reaching here, so this branch is pinned by a unit
+            // test rather than an end-to-end one.
+            None => match &server {
+                Some(url) => s.pass(
+                    "configured",
+                    format!(
+                        "no store on this disk, and nothing here needs one: this client works \
+                         through the front door at {url}. A storeless client is a supported \
+                         arrangement, exactly as local-only is."
+                    ),
+                ),
+                None => s.fail(
+                    "configured",
+                    "no store on this disk and no front door named, so there is nothing to \
+                     work against and nothing to diagnose",
+                    "Run `qp init` here to start a store, or name the front door this machine \
+                     works through: `export QP_SERVER=<url>`, plus `QP_PROJECT=<name>` when \
+                     it serves more than one store.",
+                ),
+            },
+            // Four combinations, and only one of them is "nothing configured". A
+            // store may have a ledger, a front door, both, or neither, and each of
+            // the other three is a healthy shape — so this check names what IS set
+            // rather than asking one yes/no question about the ledger.
+            Some(r) => match (r.ledger.is_some(), r.server.is_some()) {
+                (false, false) => s.note(
+                    "configured",
+                    "local-only: no ledger and no server. Nothing to check, and nothing wrong \
+                     — attach one with `qp remote set --ledger` or `--front-door`.",
+                ),
+                (true, false) => s.pass(
+                    "configured",
+                    "ledger set: the event log syncs, claims are arbitrated locally",
+                ),
+                (false, true) => s.pass(
+                    "configured",
+                    "server set: served verbs go through the front door, and this store syncs \
+                     with nobody",
+                ),
+                (true, true) => s.pass(
+                    "configured",
+                    "ledger and server both set: the event log syncs, and served verbs go \
+                     through the front door",
+                ),
+            },
+        }
+        // The url being diagnosed is not the one the store records. Worth
+        // saying and not worth failing over: naming a front door on the
+        // command line is how an operator points a client somewhere else, and
+        // the diagnosis follows the url the commands would actually use.
+        if let (Some(named), Some(r)) = (subject.named_server, subject.remotes) {
+            if r.server.as_deref() != Some(named) {
+                s.note(
+                    "front_door",
+                    match &r.server {
+                        Some(recorded) => format!(
+                            "diagnosing {named}, named by --server/QP_SERVER, and not the \
+                             {recorded} this store records — the named one wins for every \
+                             served verb, so it is the one worth diagnosing"
+                        ),
+                        None => format!(
+                            "diagnosing {named}, named by --server/QP_SERVER; this store \
+                             records no front door of its own"
+                        ),
+                    },
+                );
+            }
         }
     }
 
     // Unconditional, unlike everything below: naming and the registry are what
     // a caller uses to reach this store at all, and they are wrong in exactly
-    // the same way whether or not a remote is attached.
+    // the same way whether or not a remote is attached. The registry is a
+    // machine-local file rather than a store's, so it is checked on a storeless
+    // client too — a name claimed twice there is a fault wherever the stores are.
     let reg = crate::registry::load();
     registry_checks(&reg, &mut Seq::new("registry", &mut checks));
-    project_checks(db_path, &reg, &mut Seq::new("project", &mut checks));
+    let wanted = match subject.remotes {
+        Some(_) => {
+            project_checks(db_path, &reg, &mut Seq::new("project", &mut checks));
+            // Name AND key, both read without opening the store the way
+            // `db::open` does — a diagnostic must not migrate the thing it
+            // measures, and `project_checks` above has already reported an
+            // unreadable one. Read independently rather than through
+            // `project::peek`, whose all-or-nothing is right for asserting an
+            // identity and wrong here: a store with a name and no key must
+            // still be told whether it is reaching the right NAME, and peek
+            // would report it as having neither.
+            let conn = rusqlite::Connection::open(db_path).ok();
+            let name = conn
+                .as_ref()
+                .and_then(|c| crate::project::read_name(c).ok().flatten());
+            let key = conn
+                .as_ref()
+                .and_then(|c| crate::project::read(c).ok().flatten());
+            match name {
+                Some(name) => Wanted::Named { name, key },
+                None => Wanted::Unreadable,
+            }
+        }
+        None => {
+            storeless_project_checks(subject.named_project, &mut Seq::new("project", &mut checks));
+            match subject.named_project {
+                // No key, and never one: the key is a `meta` row and this
+                // machine has no store to hold it. A real state rather than an
+                // omission, and what `serves` says about it below.
+                Some(name) => Wanted::Named {
+                    name: name.to_string(),
+                    key: None,
+                },
+                None => Wanted::Unnamed,
+            }
+        }
+    };
 
-    if let Some(url) = &r.ledger {
+    if let Some(url) = &ledger {
         ledger_checks(url, &mut Seq::new("ledger", &mut checks));
+    } else if subject.remotes.is_none() {
+        // Said rather than silently absent: the ledger url is a row in a
+        // store's `meta` table, so a client with no store has none to check
+        // and none to be missing.
+        Seq::new("ledger", &mut checks).not_applicable(
+            "url",
+            "the ledger url is a row in a store's `meta` table, and there is no store on \
+             this disk. A storeless client syncs nothing; the machine that holds the store \
+             is where a ledger is configured and diagnosed.",
+        );
     }
-    if let Some(url) = &r.server {
-        // The name this store answers to, read without opening the store the way
-        // `db::open` does — a diagnostic must not migrate the thing it measures,
-        // and `project_checks` above has already reported an unreadable one.
-        // Name AND key, both read without opening the store the way `db::open`
-        // does — a diagnostic must not migrate the thing it measures, and
-        // `project_checks` above has already reported an unreadable one. Read
-        // independently rather than through `project::peek`, whose
-        // all-or-nothing is right for asserting an identity and wrong here: a
-        // store with a name and no key must still be told whether it is
-        // reaching the right NAME, and peek would report it as having neither.
-        let conn = rusqlite::Connection::open(db_path).ok();
-        let name = conn
-            .as_ref()
-            .and_then(|c| crate::project::read_name(c).ok().flatten());
-        let key = conn
-            .as_ref()
-            .and_then(|c| crate::project::read(c).ok().flatten());
+    if let Some(url) = &server {
         server_checks(
             url,
-            name.as_deref(),
-            key.as_deref(),
+            &wanted,
+            subject.remotes.is_none(),
             &mut Seq::new("server", &mut checks),
         );
     }
 
     let ok = !checks.iter().any(|c| c.status == Status::Fail);
     Report {
-        ledger: r.ledger.clone(),
-        server: r.server.clone(),
-        local_only: r.local_only(),
+        ledger,
+        server,
+        local_only: subject.remotes.is_some_and(|r| r.local_only()),
         ok,
         checks,
     }
@@ -362,6 +513,68 @@ fn registry_checks(reg: &anyhow::Result<crate::registry::Registry>, s: &mut Seq)
              `qp project unregister <NAME>`.",
         );
     }
+}
+
+/// The `project` sequence for a client with no store on this disk.
+///
+/// Every check in `project_checks` asks about a file that is not here, and
+/// `skip` would report that as "an earlier check did not pass" — which is the
+/// intended configuration described as damage. So each says what it is instead,
+/// and the run stays green.
+///
+/// One thing IS checkable without a store, and it is the one that bites: the
+/// project name from the environment is a shell argument and the front door's
+/// lookup key, so a malformed one is a fault wherever the store lives.
+fn storeless_project_checks(named: Option<&str>, s: &mut Seq) {
+    let Some(name) = named else {
+        s.note(
+            "name",
+            "no store on this disk and no project named. That is only workable when the \
+             front door serves exactly one store, which an unnamed request then selects; \
+             the `serves` check below reports whether it does.",
+        );
+        s.not_applicable("name_form", "there is no name to check the spelling of");
+        s.not_applicable(
+            "registered",
+            "the registry maps a name to a store ON THIS MACHINE, and there is no store here",
+        );
+        s.not_applicable("entry_path", "there is no registry entry to point anywhere");
+        return;
+    };
+    s.note(
+        "name",
+        format!(
+            "no store on this disk; this client works on `{name}`, named by \
+             --project/QP_PROJECT. The store itself lives on the machine the front door \
+             runs on."
+        ),
+    );
+    if let Err(e) = crate::project::validate_name(name) {
+        s.fail(
+            "name_form",
+            format!("{e:#}"),
+            "A name is a shell argument and the front door's lookup key, so a spelling that \
+             quotes or normalises two ways names two projects — and no request carrying it \
+             can select the store you meant. Set `QP_PROJECT` (or `--project`) to the name \
+             the front door reports.",
+        );
+        s.skip("registered");
+        s.skip("entry_path");
+        return;
+    }
+    s.pass(
+        "name_form",
+        format!("`{name}` is a well-formed project name"),
+    );
+    s.not_applicable(
+        "registered",
+        "the registry maps a name to a store ON THIS MACHINE. The front door resolves \
+         `--project` in its own registry, on the machine that holds the store.",
+    );
+    s.not_applicable(
+        "entry_path",
+        "there is no local registry entry to point anywhere",
+    );
 }
 
 /// This store's own name, and whether the registry agrees about it.
@@ -899,7 +1112,7 @@ fn unreachable_remedy(endpoint: &str) -> String {
 /// clock before the credential verdict: it is a property of the process rather
 /// than of the request, it never stops the sequence, and knowing the front door
 /// is a different build is context for everything reported after it.
-fn server_checks(url: &str, project: Option<&str>, project_key: Option<&str>, s: &mut Seq) {
+fn server_checks(url: &str, wanted: &Wanted, storeless: bool, s: &mut Seq) {
     if let Err(e) = crate::remote::validate_server_url(url) {
         s.fail("url", format!("{e:#}"), SERVER_URL_REMEDY);
         return skip_rest_of_server(s, "url");
@@ -916,7 +1129,7 @@ fn server_checks(url: &str, project: Option<&str>, project_key: Option<&str>, s:
             s.fail(
                 "reachable",
                 format!("nothing answered at {url}: {detail}"),
-                server_unreachable_remedy(url),
+                server_unreachable_remedy(url, storeless),
             );
             return skip_rest_of_server(s, "reachable");
         }
@@ -952,19 +1165,51 @@ fn server_checks(url: &str, project: Option<&str>, project_key: Option<&str>, s:
 
     version_check(version.as_deref(), s);
 
-    let Some(name) = project else {
+    let (name, project_key) = match wanted {
+        Wanted::Named { name, key } => (name.as_str(), key.as_deref()),
         // Not a fault of the server's, and not silence either: the `project`
         // sequence has already failed on the unreadable name, and repeating it
         // here as a server fault would name the wrong thing to fix.
-        s.note(
-            "serves",
-            format!(
-                "not checked: this store has no readable project name, so there is nothing \
-                 to look for in the server's list ({}). The `project` sequence reports why.",
-                list_or_none(&projects)
-            ),
-        );
-        return;
+        Wanted::Unreadable => {
+            s.note(
+                "serves",
+                format!(
+                    "not checked: this store has no readable project name, so there is nothing \
+                     to look for in the server's list ({}). The `project` sequence reports why.",
+                    list_or_none(&projects)
+                ),
+            );
+            return;
+        }
+        // A storeless client that named no project. One store behind the front
+        // door needs no name — an unnamed request selects it — so this is a
+        // pass, and it is a fault only when there is a choice to be made and
+        // nothing to make it with.
+        Wanted::Unnamed => {
+            if projects.len() == 1 {
+                s.pass(
+                    "serves",
+                    format!(
+                        "no project named, and none is needed: the front door serves exactly \
+                         {}, which an unnamed request selects",
+                        list_or_none(&projects)
+                    ),
+                );
+            } else {
+                s.fail(
+                    "serves",
+                    format!(
+                        "no project named, and the front door serves {} — every request has \
+                         to select one store and this client cannot",
+                        list_or_none(&projects)
+                    ),
+                    "This client has no store of its own to take a name from, so the name \
+                     has to come from the environment: `export QP_PROJECT=<name>`, or pass \
+                     `--project <name>` per invocation. Use one of the names above.",
+                );
+            }
+            return;
+        }
     };
     if projects.iter().any(|p| p == name) {
         // The name got us here; only the key says it is the same PROJECT. A
@@ -1003,6 +1248,22 @@ fn server_checks(url: &str, project: Option<&str>, project_key: Option<&str>, s:
                 "a name is machine-local and two hosts can each serve one that are \
                  different projects. Restart the front door on a build that publishes \
                  `project_keys` in its health payload to have this compared properly.",
+            ),
+            // Two different reasons this client brought no key, and they want
+            // different words. A store that was never stamped can be, and the
+            // advice says how. A storeless client cannot: the key is a `meta`
+            // row and there is no `meta` here, so it is a plain note with no
+            // remedy — an unfollowable one on every healthy run is how a check
+            // teaches people to ignore it.
+            (None, Some(_)) if storeless => s.note(
+                "serves",
+                format!(
+                    "the front door serves `{name}`, and this client has no store and so no \
+                     project identity of its own to compare it against — the name is all \
+                     there is to go on here. That is what a storeless client is, not \
+                     something to fix; the machine that holds the store is where the two \
+                     identities can be compared."
+                ),
             ),
             (None, Some(_)) => s.advice(
                 "serves",
@@ -1094,7 +1355,32 @@ const SERVER_URL_REMEDY: &str = "the server url is `https://<host>[:<port>]`, or
      LEDGER's form, not a front door's. Re-set it with `qp remote set --front-door <url>`.";
 
 /// The three causes of silence at a front door, named because one probe cannot separate them.
-fn server_unreachable_remedy(url: &str) -> String {
+///
+/// The tail differs by whether there is a store on this disk, and it has to:
+/// the advice about clearing the recorded url names a command that needs a
+/// store to run and a local read to fall back to, and a storeless client has
+/// neither. Telling one to `qp remote clear --front-door` would send an
+/// operator to a second `no_store` error while the real fault is still there.
+fn server_unreachable_remedy(url: &str, storeless: bool) -> String {
+    let tail = match storeless {
+        true => "There is no store on this disk, so there is nothing to fall back to and \
+                 nothing to clear: the url is the whole of this machine's configuration. \
+                 Check that it names the front door you meant, and that the process is up \
+                 on the machine that holds the store — from there, `qp remote doctor` with \
+                 no url named diagnoses the store's own side."
+            .to_string(),
+        false => "The store on this disk is intact either way, and reading it is still one \
+                  command away — but clearing the url is not the first thing to reach for. \
+                  Since the recorded url became the default front door, `qp remote clear \
+                  --front-door` does not just restore a local read: it re-points every \
+                  future command at this file, and a store that has been fronted is a store \
+                  other machines have been writing to, so what it then answers is whatever \
+                  was last synced here. That is a stale read that looks exactly like \
+                  success. Fix the cause above first. Clear the url only when this store is \
+                  deliberately going back to local-only, which is a decision and not a \
+                  workaround."
+            .to_string(),
+    };
     format!(
         "THREE causes look identical here and this probe cannot separate them:\n\
          (1) no front door is running — `qp serve` is never started implicitly and nothing \
@@ -1103,14 +1389,7 @@ fn server_unreachable_remedy(url: &str) -> String {
          (2) it is running on a different address or port than {url} names;\n\
          (3) this machine cannot reach that host at all — a network or firewall answer, \
          byte-identical to the other two from here.\n\
-         The store on this disk is intact either way, and reading it is still one command \
-         away — but clearing the url is not the first thing to reach for. Since the recorded \
-         url became the default front door, `qp remote clear --front-door` does not just \
-         restore a local read: it re-points every future command at this file, and a store \
-         that has been fronted is a store other machines have been writing to, so what it \
-         then answers is whatever was last synced here. That is a stale read that looks \
-         exactly like success. Fix the cause above first. Clear the url only when this store \
-         is deliberately going back to local-only, which is a decision and not a workaround."
+         {tail}"
     )
 }
 
@@ -1124,6 +1403,34 @@ mod tests {
             path: dir.join("registry.json"),
             entries: Vec::new(),
         })
+    }
+
+    /// A `Subject` with nothing in it at all: no store, and no url named.
+    ///
+    /// No CLI path reaches this — `main.rs` keeps the attach check for
+    /// `remote doctor` unless a front door was named, because with neither a
+    /// store nor a url there is nothing to diagnose and `require_attached`'s
+    /// cwd-aware message is the better answer. The branch is here because this
+    /// module answers for any subject it is handed, and pinning it by a unit
+    /// test is what keeps that true if the gate above ever moves.
+    #[test]
+    fn nothing_at_all_is_a_named_fault_rather_than_a_clean_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = run(&Subject {
+            db_path: &tmp.path().join("db.sqlite"),
+            remotes: None,
+            named_server: None,
+            named_project: None,
+        });
+        assert!(report.failed());
+        let c = report
+            .checks
+            .iter()
+            .find(|c| c.target == "config")
+            .expect("a config check");
+        assert_eq!(c.status, Status::Fail);
+        assert!(c.remedy.as_ref().unwrap().contains("QP_SERVER"));
+        assert!(c.remedy.as_ref().unwrap().contains("qp init"));
     }
 
     /// The `name` failure branch, which no CLI path can reach.
@@ -1264,8 +1571,11 @@ mod tests {
         let mut checks = Vec::new();
         server_checks(
             "s3://host.invalid/bucket",
-            Some("example"),
-            Some("key-example"),
+            &Wanted::Named {
+                name: "example".to_string(),
+                key: Some("key-example".to_string()),
+            },
+            false,
             &mut Seq::new("server", &mut checks),
         );
         assert_eq!(checks[0].name, "url");

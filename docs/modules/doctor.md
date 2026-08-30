@@ -157,6 +157,102 @@ whoever changes that contract — not to a slice adding a diagnostic. Until then
 `not_found` on a verb the client believes is served is the honest signal, and it
 arrives at the moment it matters rather than on a doctor run.
 
+## Diagnosing a url, on a machine that has no store
+
+The command that says "you are misconfigured" could not run on the machine most
+likely to be misconfigured. A worker holding the binary, `QP_SERVER` and
+`QP_PROJECT` and nothing else — the deployment the front door exists for — got
+`no quipu store in … or any parent` and exit 6. It could list the board and take
+work; it could not diagnose itself.
+
+**The obvious fix is exempting `remote` from the attach check, and it does not
+work.** `db::open` calls `require_store` as a backstop, so the exemption moves
+the same exit 6 one function down and replaces a cwd-aware message with one
+naming an internal path. That was reproduced before this was designed.
+
+**And the exemption is the wrong shape anyway**, which is the part worth
+keeping: on a storeless machine there is no recorded url to diagnose. What that
+machine wants diagnosed is the url in its environment. So this is a doctor that
+diagnoses **a url**, not a doctor that diagnoses a store and happens to reach a
+url — which is what `Subject` names.
+
+### The surface is the flag that was already there
+
+No new flag. The global `--server` (and `QP_SERVER` behind it) already names a
+front door for one invocation, and `--project` / `QP_PROJECT` already names the
+project. `qp remote doctor` diagnoses those, and the precedence is
+`resolve_server`'s own — the url named for this invocation first, the store's
+recorded url after it — rather than a second order invented here. A machine that
+has both gets the one its other commands would actually use, and the
+disagreement is reported as a `config` note rather than a fault: naming a front
+door on the command line is how an operator points a client somewhere else.
+
+`qp remote doctor` inside a project directory is unchanged, and that is a
+constraint rather than a hope: the store-side sequences are the same checks in
+the same order, and the twenty-five tests on them run untouched.
+
+### What runs with no store, and what cannot
+
+| sequence | storeless |
+| --- | --- |
+| `config` | runs — a storeless client with a front door is a **`Pass`** |
+| `registry` | runs — the registry is a machine-local file, not a store's |
+| `project` | runs in a storeless form: `name` is a note, `name_form` is really checked, `registered` and `entry_path` are not applicable |
+| `ledger` | not applicable — the ledger url is a row in a store's `meta` |
+| `server` | runs, and is the whole point — with the identity half of `serves` reduced to a name comparison, because there is no key here to compare |
+
+**Not-applicable is not a skip, and the difference is the whole of what makes
+this readable.** `Seq::skip` says an earlier check in this sequence did not
+pass; saying that about a machine that was deliberately built without a store
+would report the intended configuration as damage. `Seq::not_applicable` says
+there is nothing here to look at. Both land on `Status::Skipped`, so a script
+that branches on the status keeps working, and the detail is what tells them
+apart.
+
+The one store-side check that survives the loss of the store is `name_form`,
+because the project name is not really a store's property here: it is a shell
+argument and the front door's lookup key, and a spelling that normalises two
+ways selects nothing on either machine.
+
+### No local store reads as healthy
+
+A storeless client is first-class, exactly as local-only is, and the report says
+so in the `config` check rather than merely declining to complain. The reason to
+be deliberate about it: a diagnostic that calls the intended configuration
+broken is worse than no diagnostic — people stop running it, and then it is not
+there on the day something is genuinely wrong.
+
+The one storeless state that IS a fault is having neither a store nor a url:
+nothing to work against and nothing to diagnose. The CLI answers that with
+`require_attached`'s cwd-aware message before this module is reached — the
+exemption is scoped to "a front door was named" for exactly that reason — so
+the branch here is pinned by a unit test rather than an end-to-end one.
+
+### What a storeless client changes in the front-door sequence
+
+Two things, both of them in what the checks may assume:
+
+- **`serves` has no store to take a name from.** It takes it from
+  `--project` / `QP_PROJECT` instead, and the comparison is otherwise
+  identical. Naming *no* project is not a fault on its own: an unnamed request
+  selects a front door's only store, so it passes when the process serves one
+  and fails when it serves several — which is a real misconfiguration and
+  precisely the one that otherwise shows up as an empty board.
+- **It has no project key either, and cannot ever have one.** The key is a
+  `meta` row, so `Wanted::Named` carries `key: None` here as a real state
+  rather than an omission, and the identity half of `serves` degrades to a
+  name comparison. That is reported as a plain **note with no remedy**, and the
+  distinction from the store-side `(None, Some(_))` branch is the point: a
+  store that was never stamped can be, and its advice says `qp init`; a
+  storeless client cannot, so advice there would be an unfollowable remedy on
+  every healthy run — which is how a check teaches people to ignore it. The
+  machine that holds the store is where the two identities can be compared.
+- **The unreachable remedy's tail differs.** The store-side version explains
+  why `qp remote clear --front-door` is not the first thing to reach for; on a
+  storeless client that command needs a store it does not have, so following it
+  produces a second `no_store` on top of the fault. There, the url in the
+  environment is the whole configuration, and the tail says so.
+
 ## Naming and registry checks
 
 Two sequences run unconditionally, before anything that needs a remote: naming
