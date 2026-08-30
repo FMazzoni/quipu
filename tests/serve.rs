@@ -800,6 +800,31 @@ fn sigpipe_is_ignored(_pid: u32) -> bool {
     true
 }
 
+/// Waits until `child` has reached `main` and restored `SIGPIPE` to `SIG_DFL`.
+///
+/// Returns whether it got there. The wait is on the observable state rather
+/// than on a duration because the interesting window — fork done, exec not yet
+/// — reports the *parent's* mask, and this test binary is a Rust program whose
+/// runtime ignores `SIGPIPE`. Sleeping past that window is a bet on machine
+/// load; waiting for the state it is looking for is not, and still fails if the
+/// disposition never changes.
+#[cfg(target_os = "linux")]
+fn wait_for_sigpipe_default(child: &std::process::Child) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        // `comm` proves the exec happened; before it does, the mask is ours.
+        let execed = std::fs::read_to_string(format!("/proc/{}/comm", child.id()))
+            .is_ok_and(|c| c.trim() == "qp");
+        if execed && !sigpipe_is_ignored(child.id()) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// The CLI's own disposition is untouched, which is the other half of the fix.
 ///
 /// `qp list | head -1` must keep dying like a Unix filter rather than panicking
@@ -811,20 +836,36 @@ fn sigpipe_is_ignored(_pid: u32) -> bool {
 fn the_cli_keeps_sigpipe_at_its_default_disposition() {
     let tmp = tempfile::tempdir().unwrap();
     let db = store(tmp.path());
-    // `wait` blocks on a poll loop, which is a live CLI process to inspect.
+    // `watch` tails the event log on a poll loop and never exits on its own,
+    // which is what makes it a live CLI process to inspect.
+    //
+    // It used to be `wait --tag nothing --timeout 10`, and that spelling is a
+    // USAGE ERROR — the flag is `--timeout-secs`. So the child died on argv
+    // before reaching `main`, and the assertion below read the signal mask of a
+    // zombie, which is zeroes. The test passed for every build, including ones
+    // where the behaviour it names was absent. Verified by breaking `main` on
+    // purpose: it still passed.
     let mut child = std::process::Command::new(qp_bin())
         .env("QP_DB", &db)
-        .args(["wait", "--tag", "nothing", "--timeout", "10"])
+        .args(["watch"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    let ignored = sigpipe_is_ignored(child.id());
+    // Poll for the disposition rather than sleeping at it. Between `spawn` and
+    // the child reaching `main`, `/proc/<pid>/status` still shows the mask this
+    // test binary forked with — and Rust's runtime sets SIGPIPE to SIG_IGN
+    // before `main`, so a read that lands in that window reports "ignored" and
+    // fails a test about code that has not run yet. A fixed sleep makes that a
+    // question of how loaded the machine is.
+    //
+    // Polling for the expected state cannot pass vacuously: if the CLI ever
+    // started ignoring SIGPIPE, the bit would stay set and this times out.
+    let cleared = wait_for_sigpipe_default(&child);
     let _ = child.kill();
     let _ = child.wait();
     assert!(
-        !ignored,
+        cleared,
         "a CLI invocation must keep SIGPIPE at SIG_DFL; the serve path narrows \
          it, and `main` must not"
     );
