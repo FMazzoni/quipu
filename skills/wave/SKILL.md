@@ -46,31 +46,35 @@ workers use, so one board is one board rather than a file and a socket.
 Precedence, when more than one is set: `--server` on the command line, then
 `QP_SERVER`, then the url the store recorded, then the store on this disk.
 
-### What is not served, and it matters here
+### `wait` and `watch` are served, and the barrier works
 
-`qp wait` and `qp watch` **are not served.** Both are poll loops and both still
-open the store on the caller's own disk; with `--server` set they print
-`warning: --server is set but this verb is not served yet` and answer from that
-local file anyway. On a worker with no store that is exit 6; on a coordinator
-that also has a local store it is worse, because it answers — from the wrong
-board, quietly, while every other command goes over the wire.
+*Corrected. An earlier version of this file said both were unserved and told you
+not to use `wait --cohort-done` as a barrier behind a front door. That was true
+when it was written and is not true now.*
 
-So **do not use `qp wait --cohort-done` as a wave barrier when the board is
-behind a front door.** Poll a served read instead; `wave` and `list` are both
-served:
+Both are **client-side polls of served reads**: `wait` polls the list endpoint
+with its filters applied server-side, so a poll transfers the cohort and not the
+store, and `watch` polls the timeline with an exclusive lower bound on the event
+id, so a caught-up tail gets nothing. One code path runs local and served, which
+is what stops the two answers drifting apart.
 
+So `qp wait --tag wave:$WAVE --cohort-done` is the barrier, front door or not.
+
+Two things to know rather than discover. A transport failure ends the wait
+immediately rather than being retried — a barrier that absorbed `unavailable`
+and kept polling would eventually report "the deadline passed" about a front
+door it never reached. And the poll backs off when the cohort is quiet, so a
+drain after a long silence is noticed up to a few seconds late; pass
+`--max-interval-ms` equal to `--interval-ms` if a wave needs the tighter loop.
 ```bash
 # Barrier: block until the tagged cohort has no non-terminal tasks left.
-until [ "$(qp list --tag wave:$WAVE --state ready --json | jq 'length')" = 0 ] \
-   && [ "$(qp list --tag wave:$WAVE --state assigned --json | jq 'length')" = 0 ] \
-   && [ "$(qp list --tag wave:$WAVE --state running --json | jq 'length')" = 0 ]; do
-  sleep 2
-done
+qp wait --tag wave:$WAVE --cohort-done --interval-ms 1000 --timeout-secs 600
 ```
 
-Against a purely local store `qp wait --tag wave:$WAVE --cohort-done` is still
-the shorter and better barrier, and its exit 4 on an empty cohort still catches
-a typo'd tag that the loop above would read as instant success. Use it there.
+Its exit codes are the point, so branch on them rather than on output: 0 the
+cohort drained, 3 the deadline passed, 4 the cohort was empty to begin with —
+which is how a typo'd tag is caught rather than read as instant success — and 7
+the front door could not be reached, which is not "the wave finished".
 
 `init`, `install-skills`, `project`, `remote`, `export`, `import`, `sync` and
 `ledger` are local-only too, for reasons that are about *whose* disk or *whose*
