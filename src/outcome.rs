@@ -118,6 +118,45 @@ mod tests {
             fn every_payload_round_trips() {
                 $( assert_round_trips(&<$t as Default>::default()); )+
             }
+
+            /// No payload may be reconstructed from a body that carries nothing.
+            ///
+            /// The property a misrouted front door breaks. `src/client.rs`
+            /// accepts any 2xx whose body is valid JSON, so `serde` is the only
+            /// thing standing between a service answering `200 {}` on every
+            /// path and a client that renders it. For a derived struct that is
+            /// enough — a missing required field is a deserialisation error —
+            /// but the eight read views are `#[serde(transparent)]` over
+            /// `serde_json::Value` and accepted anything, and each of them
+            /// renders a mismatch as *empty*: an empty table, all zeros, a
+            /// fabricated blank ticket, every one at exit 0.
+            ///
+            /// Asserting it over the whole registry rather than per view is
+            /// what makes it survive the next payload: a new view added without
+            /// a shape check fails here, in a test named after the property,
+            /// rather than silently rendering a stranger's answer.
+            #[test]
+            fn no_payload_accepts_an_empty_body() {
+                // `[]` is deliberately not in this list. Four views *are* an
+                // array, and an empty one is a real answer they must keep
+                // accepting — "no events since that id" is exactly what a
+                // caught-up `watch` poll gets. `{}` is the shape the reported
+                // failure actually took, and it is refused by every row here.
+                for body in ["{}", "null", "\"x\"", "0"] {
+                    let v: serde_json::Value = serde_json::from_str(body).unwrap();
+                    $(
+                        assert!(
+                            serde_json::from_value::<$t>(v.clone()).is_err(),
+                            "{} accepts `{}` — a front door answering that on \
+                             every path would render as an empty view at exit 0. \
+                             A `#[serde(transparent)]` view over `Value` needs a \
+                             `deserialize_with` shape check; see `wire::expect_array`.",
+                            stringify!($t),
+                            body
+                        );
+                    )+
+                }
+            }
         };
     }
 

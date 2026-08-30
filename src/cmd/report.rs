@@ -64,8 +64,54 @@ impl crate::route::Served for ReportArgs {
 /// emits JSON".
 #[derive(Serialize, Deserialize)]
 #[serde(transparent)]
-#[cfg_attr(test, derive(Default))]
-pub(crate) struct ReportView(Value);
+pub(crate) struct ReportView(#[serde(deserialize_with = "body_is_a_report")] Value);
+
+/// Refuses a response body that is not one of `report`'s three payloads.
+///
+/// The one view whose shape depends on its own arguments: `--ticket` renders a
+/// ticket detail object, `--all-tickets` an array of them, and the default a
+/// board. So the check is a disjunction rather than a single shape — which is
+/// still strictly better than the nothing that was there, because `200 {}` and
+/// `200 null` are refused by all three arms. Making it exact would mean
+/// threading the caller's flags into a `deserialize_with`, and the flags are
+/// `#[serde(skip)]` precisely so they never reach the wire.
+///
+/// See `wire::expect_array` for what this is defending against.
+fn body_is_a_report<'de, D>(d: D) -> std::result::Result<Value, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let v = Value::deserialize(d)?;
+    if v.is_array() {
+        return Ok(v);
+    }
+    for shape in [BOARD_KEYS, TICKET_KEYS] {
+        if crate::wire::expect_object(v.clone(), shape).is_ok() {
+            return Ok(v);
+        }
+    }
+    Err(D::Error::custom(format!(
+        "expected `report`'s board object (with {}), a ticket detail (with {}), \
+         or an array of ticket details; this is not a response this client \
+         understands, and rendering it would show a blank board rather than fail",
+        BOARD_KEYS.join(", "),
+        TICKET_KEYS.join(", ")
+    )))
+}
+
+/// The keys `collect_json` always writes.
+const BOARD_KEYS: &[&str] = &["tasks", "events", "deps"];
+/// The keys `ticket_detail_json` always writes.
+const TICKET_KEYS: &[&str] = &["display_id", "state", "events"];
+
+/// A minimal valid sample; see `list.rs` for why this is not derived.
+#[cfg(test)]
+impl Default for ReportView {
+    fn default() -> Self {
+        ReportView(serde_json::json!({"tasks": [], "events": [], "deps": []}))
+    }
+}
 
 impl Outcome for ReportView {
     fn human(&self) -> String {

@@ -685,6 +685,34 @@ authentication is ssh's. It is the ad-hoc answer for one operator at a keyboard;
 the reverse proxy is the answer for a deployment, because it is the one a
 supervisor can start and a fleet of agents can share.
 
+### A proxy at a subpath is supported, and must strip the prefix
+
+The proxy above is usually mounted at the root of a name, but the ordinary thing
+an operator does is mount it at a path — `https://ops.example.com/qp` alongside
+whatever else that host serves. That works, and it works without `qp` knowing:
+`client::check_url` preserves the path it was given and the caller appends
+`/v1/<verb>`, so `--server https://ops.example.com/qp` issues
+`POST https://ops.example.com/qp/v1/list`.
+
+**The one thing the proxy must do is strip its own mount point before
+forwarding.** `qp serve` routes on `/v1/<verb>` and on `/healthz` and on nothing
+else; it has no notion of a base path and is not given one, because a process
+that had to be told where it was mounted would be a second place the deployment
+is configured and a second place it can disagree with itself. In nginx terms the
+`proxy_pass` needs its trailing slash; the arrangement is the same one any
+path-mounted service needs.
+
+**A prefix that reaches the process unstripped is `invalid_input`, 400, exit 1,
+and this is a change.** It used to be `not_found` — 404, exit 2 — and exit 2 is,
+by the README's own table, "wrong state / lost race, retry may succeed", which
+the wire contract explicitly encourages retrying on. A skill following the
+documentation therefore looped forever against a base url that could never work.
+Run the wire contract's own decision procedure and 400 is the only row left: a
+different request *body* could not have helped, and "does the thing addressed
+exist" is a question about a store entity rather than about a path. The message
+names the remedy, because the remedy is in the proxy and not in the command that
+failed.
+
 ### Authentication: read this before you expose the port
 
 **The server authenticates nobody, and this is the moment to decide whether that

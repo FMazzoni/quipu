@@ -45,3 +45,22 @@ additively, so there is no closed table to intern against. `intern` leaks it.
 It is bounded by construction — a client process issues one request and exits —
 and the alternative, widening `code` to `Cow<'static, str>`, rewrites every
 error site in the tree to reclaim a byte that `exit` already reclaims.
+
+## Naming the responder, and naming the shape
+
+Two checks that answer different questions and fail at different times, both
+here because both are the client's half of "is this answer quipu's".
+
+`VERSION_HEADER` is the coarse one: `qp serve` writes it on every response, and
+`client.rs` refuses a 2xx without it. It catches a service that is not a quipu
+front door at all — a misrouted proxy, a health-check stub, the wrong port —
+before any body is looked at.
+
+`expect_array` and `expect_object` are the fine one: each transparent read view
+runs one of them in a `deserialize_with`, so a body of the wrong shape is a
+deserialisation failure rather than a view that renders empty. It catches a
+version skew between two real quipu processes, which the header cannot.
+
+Neither re-types a payload. The value stays a `serde_json::Value` and the bytes
+on the wire are byte-for-byte what `--json` already printed, which is the
+property the read side was built to protect.

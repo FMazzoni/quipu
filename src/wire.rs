@@ -16,6 +16,90 @@ pub const API_PREFIX: &str = "/v1/";
 /// never collide with it.
 pub const HEALTH_PATH: &str = "/healthz";
 
+/// Names the process that wrote a response, on every one this server writes.
+///
+/// The one signal a client can check without knowing anything about the verb it
+/// asked for. See [`expect_object`] for the failure it closes and why a payload
+/// check alone is not enough.
+pub const VERSION_HEADER: &str = "X-Quipu-Version";
+
+/// Refuses a response body that is not the array a view renders.
+///
+/// **The bug this half closes.** `src/client.rs` accepts any 2xx whose body is
+/// valid JSON of any shape, and the eight read views are `#[serde(transparent)]`
+/// newtypes over `serde_json::Value`, so serde validated nothing on the way in.
+/// Against a service answering `200 {}` on every path, `list` printed an empty
+/// table, `status` printed all zeros, `wave` printed an actively reassuring
+/// sentence, and `show` rendered a *fabricated blank ticket* — all exit 0. The
+/// rendering turns a shape mismatch into "empty", which reads as an answer.
+///
+/// Why it matters past an empty board: the process contract prescribes "read
+/// before writing — `qp show` is the answer to did my write land". Under a
+/// misrouted proxy `show` answers "it did not land" about a store it never
+/// reached, and the contract then tells the agent to re-issue the write.
+///
+/// **Why this is not solved by typing the payloads.** Deriving `Serialize` on
+/// the read-layer row types would re-derive every one of those bytes, and a
+/// `json!` map orders its keys alphabetically where a derive emits them in
+/// declaration order — so it would silently rewrite the input of every existing
+/// `--json` consumer. That was a deliberate, measured decision and this must not
+/// undo it. So the value stays a `Value`, and the check is a `deserialize_with`
+/// in front of it: same bytes, same key order, one refusal added.
+///
+/// **Why it is not enough on its own, either.** It catches a *quipu* that
+/// answered with a payload this client does not understand — a version skew. It
+/// cannot catch a foreign service whose `200` happens to have the right keys,
+/// and it fires late, per verb. [`VERSION_HEADER`] is the other half: it catches
+/// anything that is not a quipu front door at all, before the body is looked at.
+/// The two fail at different times against different things, which is why both
+/// are here.
+pub fn expect_array(v: Value) -> Result<Value, String> {
+    if v.is_array() {
+        return Ok(v);
+    }
+    Err(format!(
+        "expected a JSON array and got {}; this is not a response this client \
+         understands, and rendering it would show an empty view rather than fail",
+        type_name(&v)
+    ))
+}
+
+/// Refuses a response body that is not an object carrying every named key.
+///
+/// The keys are the ones the view's `human()` reads, so their absence is
+/// exactly the case that renders as blank. See [`expect_array`] for the full
+/// argument.
+pub fn expect_object(v: Value, required: &[&str]) -> Result<Value, String> {
+    let Some(o) = v.as_object() else {
+        return Err(format!(
+            "expected a JSON object and got {}; this is not a response this \
+             client understands",
+            type_name(&v)
+        ));
+    };
+    for k in required {
+        if !o.contains_key(*k) {
+            return Err(format!(
+                "the response object has no `{k}`; this is not a response this \
+                 client understands, and rendering it would show a blank view \
+                 rather than fail"
+            ));
+        }
+    }
+    Ok(v)
+}
+
+fn type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
+}
+
 /// Status and `{"error": ...}` body for a failure the server is about to write.
 ///
 /// The body is byte-for-byte what `main.rs` already writes to stderr under
