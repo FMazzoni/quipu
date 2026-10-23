@@ -1,0 +1,35 @@
+/* Styles for the standalone doc pages (architecture, wire contract, process
+   contract) that pages.yml renders with `rustdoc --markdown-css`. Same palette
+   as landing.html. */
+:root {
+  --bg: #fdfdfc; --fg: #23211d; --muted: #6b665e; --rule: #e0ddd6;
+  --accent: #a0522d; --code-bg: #f3f1ec;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16150f; --fg: #e6e2d8; --muted: #9a948a; --rule: #33302a;
+    --accent: #d78f5f; --code-bg: #201e18;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0 auto; max-width: 46rem; padding: 3rem 1.25rem 5rem;
+  background: var(--bg); color: var(--fg);
+  font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+h1 { font-size: 2.2rem; line-height: 1.15; letter-spacing: -0.02em; margin: 0 0 1rem; }
+h2 { margin-top: 2.5rem; border-bottom: 1px solid var(--rule); padding-bottom: .25rem; }
+h3, h4 { margin-top: 1.75rem; }
+a { color: var(--accent); }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .9em; }
+code { background: var(--code-bg); padding: .1em .3em; border-radius: 3px; }
+pre { background: var(--code-bg); padding: .9rem 1rem; border-radius: 6px; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--rule); padding: .35rem .6rem; text-align: left; vertical-align: top; }
+blockquote { margin: 1rem 0; padding-left: 1rem; border-left: 3px solid var(--rule); color: var(--muted); }
+nav#rustdoc { border: 1px solid var(--rule); border-radius: 6px; padding: .5rem 1rem; margin: 1.5rem 0 2rem; font-size: .92rem; }
+nav#rustdoc ul { padding-left: 1.1rem; margin: .25rem 0; }
+.back { font-size: .9rem; margin-bottom: 1.5rem; }
+a.doc-anchor { visibility: hidden; text-decoration: none; margin-left: -1.1em; padding-right: .3em; }
+h2:hover a.doc-anchor, h3:hover a.doc-anchor, h4:hover a.doc-anchor { visibility: visible; }
