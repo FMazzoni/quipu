@@ -419,7 +419,6 @@ a read endpoint changes latency, not semantics.
 Neither should become a streaming endpoint under this contract. Server-sent
 events or long-polling wants an async runtime, and CLAUDE.md forbids one.
 
-<<<<<<< HEAD
 **Implemented as: a third bucket in the routing table, and it was needed before
 the polls were.** This section describes the destination correctly and
 understates what the interval between here and there cost. `wait` and `watch` are neither
@@ -444,31 +443,6 @@ than being retried — a barrier that absorbed `unavailable` would report exit 3
 endpoint this section's read-side sibling deliberately did not build was
 measured and still not built: a six-ticket cohort's `list` body is 1441 bytes
 and the server spends at most 1 ms on it.
-=======
-**Retracted: "it becomes a client-side loop over the served read endpoint."**
-Both sentences describe a change that has not been made. Neither `wait` nor
-`watch` is in `route::served!`, neither consults `resolve_server`, and both open
-the store on the caller's own disk exactly as they did before there was a
-server. With `--server` set, `main.rs` prints `warning: --server is set but this
-verb is not served yet; it ran against the local store` and runs them locally —
-which is checked behaviour, not a reading of the source.
-
-The retraction is worth keeping because the consequence is the failure this
-whole document is organised around, and it is silent. On a machine with no store
-the result is loud: exit 6, no store here. On a coordinator that has *both* a
-local store and a front door — the tier-3 arrangement `remote set --front-door`
-exists to create — `qp wait` answers from the file on disk while every other
-verb answers from the socket. That is one process reading two boards and
-reporting neither, and a wave barrier is the worst possible place for it,
-because the barrier's whole job is to say when the other machines are done.
-
-The paragraph above is still right that neither verb is *semantically* broken
-over HTTP — both are already polls, and moving the poll to a read endpoint
-changes latency rather than meaning. What was wrong was the tense. Until the
-change is made, the skills teach a polled `qp list` as the barrier behind a
-front door (`skills/wave/SKILL.md`, "What is not served"), and `watch` is
-documented as a local-store command.
->>>>>>> origin/main
 
 ## 4. Collateral state changes
 

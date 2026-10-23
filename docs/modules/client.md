@@ -61,7 +61,6 @@ behalf of many agent ids, and connection-derived identity would need one
 connection per agent. It is also unauthenticated — anything that can reach the
 port can assert any agent — which is why the server binds loopback by default.
 
-<<<<<<< HEAD
 ## A 2xx is not by itself an answer
 
 Every 2xx whose body was valid JSON used to be accepted, of any shape, and the
@@ -94,7 +93,7 @@ routes on `/v1/<verb>` and has no notion of a base path. A prefix that reaches
 the process unstripped is refused as `invalid_input` (exit 1) with the remedy
 named — never as `not_found`, which is exit 2 and which the documentation tells
 a skill to retry.
-=======
+
 ## The other identity: which PROJECT, not which agent
 
 `--as` says who is asking. `project_key` says which project they think they are
@@ -112,4 +111,3 @@ holds the rule and the reasoning. A client with no store on disk sends nothing,
 and the guard does not apply to it: a storeless worker has no recorded key to
 be wrong about, so `--project alpha` *defines* alpha as whatever that front door
 calls alpha.
->>>>>>> origin/main

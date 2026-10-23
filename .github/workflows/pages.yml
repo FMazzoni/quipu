@@ -1,22 +1,16 @@
 name: pages
 
-# Publish the rustdoc to GitHub Pages. MANUAL TRIGGER ONLY — see below.
+# Publish the docs site to GitHub Pages: the landing page plus the three
+# hand-written design documents (architecture, wire contract, process
+# contract), each rendered as a standalone page with `rustdoc`'s Markdown mode.
 #
-# Not wired to `push` on purpose. A published docs site is deferred until quipu
-# has a home of its own (a custom domain, or an org), rather than living under a
-# personal account's github.io alongside unrelated content. Leaving a `push`
-# trigger here would fail on every commit to main with "Pages site not found",
-# so the workflow stays complete but dormant.
+# The generated rustdoc for the crate is deliberately NOT published. quipu is a
+# binary crate, so `cargo doc` documents every private item and its full doc
+# comment; that is useful locally (`just docs`) but too much for a visitor.
 #
-# TO TURN IT ON: set repo Settings → Pages → Source to "GitHub Actions", then run
-# this workflow from the Actions tab. Nothing here can enable Pages itself. Add a
-# `push: branches: [main]` trigger at that point if you want it automatic. A
-# custom domain needs no repo move: point a DNS CNAME at <user>.github.io and add
-# a CNAME file — the repo can stay exactly where it is.
-#
-# Deliberately separate from ci.yml: it needs `pages: write` + `id-token: write`
-# and must never run on pull_request (a fork PR would try to deploy). ci.yml
-# stays the required status check.
+# Manual trigger only: run it from the Actions tab (Settings → Pages → Source
+# must be "GitHub Actions"). It never runs on pull_request, so a fork PR cannot
+# deploy.
 
 on:
   workflow_dispatch:
@@ -43,42 +37,34 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
-
-      # Mirrors `just doc-check` and ci.yml's rustdoc step. `cargo rustdoc --
-      # -D warnings` APPENDS to the `[build] rustdocflags` in .cargo/config.toml;
-      # `RUSTDOCFLAGS="-D warnings" cargo doc` would REPLACE it and silently drop
-      # the --html-after-content injection — the docs would still build, this job
-      # would still pass green, and the published pages would lose the verify
-      # button and the item-table styling. Keep in sync with the justfile.
-      - name: build rustdoc
-        run: cargo rustdoc -- -D warnings
-
-      # cargo emits target/doc/qp/index.html but nothing at target/doc/index.html,
-      # so the artifact would 404 at the site root. docs/assets/landing.html is
-      # that root page; its links are relative to target/doc/.
-      - name: install root landing page
-        run: cp docs/assets/landing.html target/doc/index.html
-
-      # Fail loudly if the injection went missing rather than publishing a
-      # silently-degraded site. `qp-verify` is the button's element id and
-      # `fit-content(28%)` the item-table rule — both come only from
-      # docs/assets/verify-button.html.
-      - name: verify injection survived
+      # Standalone Markdown → HTML. No crate is compiled; rustdoc only renders
+      # the three files, links docs/assets/page.css from each page and puts the
+      # back-link from docs/assets/page-header.html above the content.
+      - name: build site
         run: |
-          for needle in 'qp-verify' 'fit-content(28%)'; do
-            if ! grep -qF "$needle" target/doc/qp/index.html; then
-              echo "::error::'$needle' missing from rustdoc output — the --html-after-content injection was dropped"
-              exit 1
-            fi
+          mkdir -p site
+          cp docs/assets/landing.html site/index.html
+          cp docs/assets/page.css site/page.css
+          for doc in architecture wire-contract process-contract; do
+            rustdoc "docs/$doc.md" -o site --markdown-css page.css \
+              --html-before-content docs/assets/page-header.html
           done
-          test -f target/doc/index.html
+          # rustdoc's Markdown mode prefixes every heading with "0.1", "0.2.1"…;
+          # the documents number their own sections, so strip the generated ones.
+          sed -i -E 's#(</a>)[0-9]+(\.[0-9]+)+ #\1#g; s#(title="[^"]*">)[0-9]+(\.[0-9]+)+ #\1#g' site/architecture.html site/wire-contract.html site/process-contract.html
+
+      - name: check site
+        run: |
+          for f in index architecture wire-contract process-contract; do
+            test -s "site/$f.html"
+          done
+          grep -qF 'no longer maintained' site/index.html
 
       - uses: actions/configure-pages@v5
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: target/doc
+          path: site
 
   deploy:
     needs: build
