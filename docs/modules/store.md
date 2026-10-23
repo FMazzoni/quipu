@@ -1,4 +1,4 @@
-Target layering (see the audit-remediation plan in `$QUIPU_VAULT/plans/`):
+Target layering:
 
 ```text
 db.rs      — connection, transactions, migrations, guarded-transition helpers

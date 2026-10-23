@@ -49,7 +49,7 @@ binary at any size.
 Per-project copies and packaging the skills as a Claude Code plugin were both
 weighed and rejected; the plugin route is the better long-term answer but
 deferred to v2, since it costs marketplace publishing or a git-clone-and-install
-dance. The long form is the decision note `quipu-skills-shipped-from-repo.md`.
+dance.
 
 `EMBEDDED_SKILLS` is a hand-written list of `include_str!` calls, which is a
 list that can silently fall behind the tree — a skill that grows a

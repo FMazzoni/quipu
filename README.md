@@ -1,5 +1,7 @@
 # quipu (`qp`)
 
+> **This project is no longer maintained.** quipu is kept here for reference, and no further fixes or releases are planned. For ongoing work in this space, see [kata](https://github.com/kenn-io/kata).
+
 Structured, observable task substrate for agent orchestration. Per-project SQLite + small CLI. Patterns (wave, critique-loop, branch-and-evaluate) live in skills, not the binary.
 
 ## Install
@@ -23,6 +25,9 @@ clear the attribute: `xattr -d com.apple.quarantine qp`.
 From source, if you have a Rust toolchain:
 
     cargo install --git https://github.com/FMazzoni/quipu
+
+Prebuilt binaries are v0.1.0, which predates `qp serve` and `qp sync`; build
+from source to get everything this README describes.
 
 Then `qp init` in a project.
 

@@ -74,5 +74,4 @@ A second url — the git claim authority — and the `GIT_SSH_COMMAND` quipu
 injected into the git children a claim spawned, keyed by acting agent so a wave
 fanning out got one ssh master each instead of bursting a single one past
 sshd's `MaxSessions`. Both are gone: claims are arbitrated by one writer holding
-`BEGIN IMMEDIATE`, so nothing here spawns a process any more. The measurements
-and the reasoning are in the vault, not in the tree.
+`BEGIN IMMEDIATE`, so nothing here spawns a process any more.

@@ -111,8 +111,6 @@ Write to `$QUIPU_VAULT/critiques/YYYY-MM-DD-HHMMSS-<wave-slug>-<lens>.md`:
 | F-4 | <title>                            | Observation|
 ```
 
-See `$QUIPU_VAULT/critiques/2026-05-24-183801-wave-pattern-d.md` for a shipped example.
-
 ## What NOT to flag
 
 - **Locked decisions.** Pre-decided; disputing them wastes everyone's time.

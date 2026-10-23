@@ -13,7 +13,7 @@ You are the **coordinator**. Subagents do all code changes inside `wt`-managed w
 ## Hard rules (read before phasing)
 
 - [ ] Never edit code. Exception: resolve merge conflicts during `wt merge` rebase.
-- [ ] **Never push to `main`.** It is protected (ruleset `protect-main`): direct pushes are rejected server-side, a PR with `lint` green is required, no bypass. A wave lands on its own branch and reaches `main` through a PR you open at Phase 8; you confirm `lint` green and **stop** — the human merges. Name branches descriptively (no wave numbers or qp ids); fix branch/PR strategy at kickoff (see "Branch strategy").
+- [ ] **Never push to `main`.** Changes reach it only through a PR with `lint` green. A wave lands on its own branch and reaches `main` through a PR you open at Phase 8; you confirm `lint` green and **stop** — the human merges. Name branches descriptively (no wave numbers or qp ids); fix branch/PR strategy at kickoff (see "Branch strategy").
 - [ ] Never use `isolation: "worktree"` on Agent calls. Always `wt switch -c`.
 - [ ] Never run workspace-wide `cargo test` while subagents are active — multiple rustc graphs OOM the machine. Run the single full test pass at wrap-up.
 - [ ] **Never ask a subagent for a full-suite test count.** You own the suite total; they own their filters. See Phase 3.
@@ -268,7 +268,7 @@ The OOM rule itself stays as written. "Three agents broke it and nothing burned"
 
 ## Phase 4 — Merge
 
-`<target-branch>` is **this wave's branch** (from "Branch strategy") — a descriptive slug, never `main`. Pass it explicitly; `wt merge` with no target defaults to `main`, which is both wrong here and rejected by the ruleset.
+`<target-branch>` is **this wave's branch** (from "Branch strategy") — a descriptive slug, never `main`. Pass it explicitly; `wt merge` with no target defaults to `main`, which is wrong here.
 
 ```bash
 wt merge -C <worktree-path> <target-branch> -y || exit 1   # target = the wave's descriptive branch, never main

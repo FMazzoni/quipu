@@ -5,8 +5,8 @@ description: Render a Markdown or HTML report from qp's `report --json` payload.
 
 ## When to use
 
-`qp report` only emits JSON — no Markdown/HTML renderer ships in the binary
-(see `decisions/` in the vault, or QP-73, for why). This skill is the
+`qp report` only emits JSON — no Markdown/HTML renderer ships in the binary.
+This skill is the
 rendering half: fetch the JSON, then produce prose/markup from it yourself.
 
 ## Fetching the payload
